@@ -1,31 +1,48 @@
 /**
  * utils/emailService.js
  *
- * WATERFALL DRIVER SYSTEM — drivers are tried in priority order.
- * If a driver fails with a permanent account-level error it is marked
- * as degraded and skipped for the rest of the process lifetime.
- * The console driver is always the final fallback: OTPs are ALWAYS visible
- * in Railway logs even when every provider is unavailable.
+ * WATERFALL DRIVER SYSTEM — drivers are tried in priority order until one
+ * accepts the message. Chain (only configured drivers are included):
  *
- * Driver priority: SENDGRID → SMTP (Gmail) → CONSOLE
+ *   SENDGRID #1 → #2 → #3 → #4 → #5 → SMTP (Gmail) → CONSOLE
  *
- * Setup (Railway env vars):
- *   SENDGRID → SENDGRID_API_KEY + SENDGRID_FROM  ← PRIMARY (recommended)
- *              ✅ 100 emails/day free forever. No IP restrictions.
- *              Sign up  → https://signup.sendgrid.com
- *              Verify   → Settings → Sender Authentication → Single Sender Verification
- *              API key  → Settings → API Keys → Create API Key (Mail Send permission only)
+ * SendGrid accounts (up to 5, each needs a KEY *and* its own verified FROM):
  *
- *   SMTP     → USE_REAL_EMAIL=true + EMAIL_USER + EMAIL_PASS  ← FALLBACK
- *              ⚠ Railway blocks SMTP ports 465/587 — only works locally or on a VPS
- *              EMAIL_PASS must be a Gmail App Password (16 chars, no spaces)
+ *   SENDGRID_API_KEY   + SENDGRID_FROM     ← account 1 (primary)
+ *   SENDGRID_API_KEY2  + SENDGRID_FROM2    ← account 2
+ *   SENDGRID_API_KEY3  + SENDGRID_FROM3    ← account 3
+ *   SENDGRID_API_KEY4  + SENDGRID_FROM4    ← account 4
+ *   SENDGRID_API_KEY5  + SENDGRID_FROM5    ← account 5
  *
- *   CONSOLE  → automatic fallback when no provider is configured or all fail
- *              OTPs and email content appear in the Railway log.
+ *   Each account verifies its own sender, so FROM is NOT shared between
+ *   accounts. A slot with a key but no FROM (or the reverse) is ignored and a
+ *   warning is logged at boot. Only account 1 falls back to EMAIL_USER when
+ *   SENDGRID_FROM is empty (legacy behaviour).
  *
- * Permanent failure detection (driver skipped for rest of process lifetime):
- *   HTTP 401, "temporarily blocked", "account suspended", "sender not verified",
- *   "domain not verified", "unrecognized IP", "invalid api key", "auth failed"
+ * Gmail SMTP (unchanged):
+ *   USE_REAL_EMAIL=true + EMAIL_USER + EMAIL_PASS  (Gmail App Password, 16 chars)
+ *   ⚠ Railway blocks SMTP ports 465/587 — works locally / on a VPS. If it is
+ *   enabled on Railway it is tried after SendGrid and fails fast (8 s timeout).
+ *
+ * Failure handling
+ *   • Permanent account-level errors (401/403, bad key, unverified sender,
+ *     suspended / trial-expired / over-quota account, SMTP unreachable) mark
+ *     that driver "degraded". It is skipped for EMAIL_DRIVER_COOLDOWN_MS
+ *     (default 10 min) and then retried automatically — no redeploy needed.
+ *   • Transient errors (5xx, timeouts, network) fall through to the next driver.
+ *   • Every failure is logged with the driver name and the provider's message.
+ *     When nothing delivers, ONE line lists every driver's reason.
+ *
+ * CONSOLE driver (last resort)
+ *   • Development: prints the email (incl. OTP) to the log and reports success.
+ *   • Railway/production: reports FAILURE (so users see an error instead of a
+ *     false "code sent") and does NOT print the OTP.
+ *     Set ALLOW_CONSOLE_OTP=true to restore the old behaviour for testing.
+ *
+ * Optional: EMAIL_HTTP_TIMEOUT_MS (default 10000), EMAIL_DRIVER_COOLDOWN_MS (default 600000)
+ *
+ * Env values are trimmed and stripped of accidental wrapping quotes, because
+ * pasting KEY="abc" into the Railway variables UI keeps the quotes.
  */
 
 'use strict';
@@ -33,70 +50,125 @@
 const nodemailer = require('nodemailer');
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Waterfall driver chain: SENDGRID → SMTP → CONSOLE
+// Environment helpers
+// ─────────────────────────────────────────────────────────────────────────────
+/** Read an env var, trimmed, with accidental wrapping quotes removed. */
+function env(name) {
+  return (process.env[name] || '').trim().replace(/^["']+|["']+$/g, '').trim();
+}
+
+// Railway does not set NODE_ENV for you, so also detect Railway itself.
+const IS_PRODUCTION =
+  env('NODE_ENV') === 'production' ||
+  !!(process.env.RAILWAY_ENVIRONMENT_NAME || process.env.RAILWAY_ENVIRONMENT || process.env.RAILWAY_PROJECT_ID);
+
+const ALLOW_CONSOLE_OTP      = env('ALLOW_CONSOLE_OTP') === 'true';
+const CONSOLE_COUNTS_AS_SENT = !IS_PRODUCTION || ALLOW_CONSOLE_OTP;
+
+const HTTP_TIMEOUT_MS = Number(env('EMAIL_HTTP_TIMEOUT_MS'))     || 10_000;
+const COOLDOWN_MS     = Number(env('EMAIL_DRIVER_COOLDOWN_MS'))  || 10 * 60 * 1000;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SendGrid accounts — slots 1..5
+// ─────────────────────────────────────────────────────────────────────────────
+const MAX_SENDGRID_ACCOUNTS = 5;
+
+/** Slot 1 = SENDGRID_API_KEY / SENDGRID_FROM, slot N = SENDGRID_API_KEY<N> / SENDGRID_FROM<N>. */
+const { accounts: SENDGRID_ACCOUNTS, warnings: SENDGRID_WARNINGS } = (() => {
+  const accounts = [];
+  const warnings = [];
+  const seenKeys = new Map(); // key → slot, to catch the same key pasted twice
+
+  for (let n = 1; n <= MAX_SENDGRID_ACCOUNTS; n++) {
+    const sfx  = n === 1 ? '' : String(n);
+    const key  = env(`SENDGRID_API_KEY${sfx}`);
+    let   from = env(`SENDGRID_FROM${sfx}`);
+
+    if (!key) {
+      if (from) warnings.push(`SENDGRID_FROM${sfx} is set but SENDGRID_API_KEY${sfx} is missing — slot ${n} ignored`);
+      continue;
+    }
+    if (!from && n === 1) from = env('EMAIL_USER') || 'noreply@pgadamis.gov.ph'; // legacy fallback
+    if (!from) {
+      warnings.push(`SENDGRID_API_KEY${sfx} is set but SENDGRID_FROM${sfx} is missing — slot ${n} ignored`);
+      continue;
+    }
+    if (seenKeys.has(key)) {
+      warnings.push(`SENDGRID_API_KEY${sfx} is identical to slot ${seenKeys.get(key)} — slot ${n} ignored (a duplicate key is not a fallback)`);
+      continue;
+    }
+    seenKeys.set(key, n);
+    accounts.push({ driver: n === 1 ? 'sendgrid' : `sendgrid${n}`, slot: n, key, from });
+  }
+  return { accounts, warnings };
+})();
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Driver chain: SENDGRID #1..#5 → SMTP → CONSOLE
 // ─────────────────────────────────────────────────────────────────────────────
 const DRIVER_CHAIN = (() => {
-  const chain = [];
-  if (process.env.SENDGRID_API_KEY)          chain.push('sendgrid');
-  if (process.env.USE_REAL_EMAIL === 'true') chain.push('smtp');
-  chain.push('console'); // always present — ensures OTPs always reach the log
+  const chain = SENDGRID_ACCOUNTS.map(a => a.driver);
+  if (env('USE_REAL_EMAIL') === 'true') chain.push('smtp');
+  chain.push('console'); // always last
   return chain;
 })();
 
-/**
- * Per-driver health. 'ok' → try normally. 'failed' → skip (permanent error).
- * Resets only on process restart — prevents hammering a blocked provider.
- */
-const _driverHealth = Object.fromEntries(DRIVER_CHAIN.map(d => [d, 'ok']));
-
-/** The primary (first non-console) driver — used for startup log. */
+/** The primary (first) driver — used for startup/error logs. */
 const DRIVER = DRIVER_CHAIN[0];
 
 /**
- * Returns true for errors that mean the driver itself is permanently broken
- * for this process lifetime (blocked account, bad credentials, IP banned).
+ * Per-driver health. 'ok' → try normally. 'degraded' → skipped until retryAt.
+ * (Console is not tracked — it cannot fail.)
  */
-function _isPermanentDriverError(msg = '') {
+const _health = Object.fromEntries(
+  DRIVER_CHAIN.filter(d => d !== 'console').map(d => [d, {
+    status: 'ok', since: null, retryAt: 0, lastError: null, lastOkAt: null,
+  }])
+);
+
+/**
+ * True for errors that mean the driver itself is broken (blocked / expired /
+ * over-quota account, bad credentials, unverified sender, unreachable SMTP)
+ * rather than a one-off.
+ */
+function _isPermanentDriverError(driver, msg = '') {
   const m = msg.toLowerCase();
-  return (
-    m.includes('401') ||
-    m.includes('temporarily blocked') ||
-    m.includes('account has been') ||
-    m.includes('account suspended') ||
-    m.includes('unrecognized ip') ||
-    m.includes('unauthorized') ||
-    m.includes('sender not verified') ||
-    m.includes('domain not verified') ||
-    m.includes('invalid api key') ||
-    m.includes('authentication failed')
-  );
+  if (driver === 'smtp' && /timeout|etimedout|econnrefused|enetunreach|ehostunreach|esocket/.test(m)) return true;
+  if (m.includes(' 401:') || m.includes(' 403:')) return true;
+  return [
+    'unauthorized', 'forbidden', 'invalid api key', 'api key is invalid', 'key not found',
+    'sender not verified', 'verified sender', 'domain is not verified', 'domain not verified',
+    'account suspended', 'account has been', 'temporarily blocked', 'unrecognized ip',
+    'unrecognised ip', 'not authorized', 'not authorised', 'authentication failed',
+    'invalid login', 'maximum credits exceeded',
+  ].some(s => m.includes(s));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SMTP transporter (Gmail)
+// SMTP transporter (Gmail) — local/VPS
 // ─────────────────────────────────────────────────────────────────────────────
 let smtpTransporter = null;
 
 async function initSMTP() {
   smtpTransporter = nodemailer.createTransport({
     service: 'gmail',
-    auth: {
-      user: process.env.EMAIL_USER,
-      pass: process.env.EMAIL_PASS,
-    },
+    auth: { user: env('EMAIL_USER'), pass: env('EMAIL_PASS') },
+    // Without these, a blocked port hangs for ~120 s per request.
+    connectionTimeout: 8_000,
+    greetingTimeout:   8_000,
+    socketTimeout:     15_000,
   });
 
-  // Railway blocks outbound SMTP (port 587) — skip the live verify in
-  // production to avoid a 30s timeout in the startup log.
-  // SendGrid handles all production email anyway.
-  if (process.env.NODE_ENV === 'production') {
-    console.log('   ℹ  Gmail SMTP configured (verify skipped in production — Railway blocks port 587)');
+  // Railway blocks outbound SMTP — skip the live verify in production to avoid
+  // a startup stall. SendGrid handles production email.
+  if (IS_PRODUCTION) {
+    console.log('   ℹ  Gmail SMTP configured (verify skipped in production — Railway blocks SMTP ports)');
     return;
   }
 
   try {
     await smtpTransporter.verify();
-    console.log('✅ Gmail SMTP connected —', process.env.EMAIL_USER);
+    console.log('✅ Gmail SMTP connected —', env('EMAIL_USER'));
   } catch (err) {
     console.error('❌ Gmail SMTP failed:', err.message);
     console.warn('   Make sure EMAIL_PASS is a Gmail App Password (16 chars, no spaces).');
@@ -115,72 +187,96 @@ function generateOTP() {
 function APP_NAME()  { return process.env.APP_NAME || 'PGA-DAMIS'; }
 function APP_URL()   { return process.env.APP_URL  || 'http://localhost:3000'; }
 
+/** Sender used by the Gmail SMTP driver (Gmail sends as the authenticated account anyway). */
 function FROM_EMAIL() {
-  return (
-    process.env.SENDGRID_FROM ||
-    process.env.EMAIL_USER    ||
-    'noreply@pgadamis.gov.ph'
-  );
+  return env('EMAIL_USER') || SENDGRID_ACCOUNTS[0]?.from || 'noreply@pgadamis.gov.ph';
 }
 
 function FROM_ADDRESS() {
   return `"${APP_NAME()}" <${FROM_EMAIL()}>`;
 }
 
+/** Hide 6-digit codes when a subject is written to the logs. */
+function _redact(s = '') {
+  return String(s).replace(/\b\d{6}\b/g, '••••••');
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Boot — runs once on module load
 // ─────────────────────────────────────────────────────────────────────────────
 (async () => {
-  const from   = FROM_EMAIL();
-  const labels = { sendgrid: 'SendGrid API', smtp: 'Gmail SMTP', console: 'Console (fallback)' };
+  const label = (d) => d === 'smtp' ? 'Gmail SMTP'
+                     : d === 'console' ? 'Console (fallback)'
+                     : `SendGrid #${SENDGRID_ACCOUNTS.find(a => a.driver === d)?.slot}`;
+
+  SENDGRID_WARNINGS.forEach(w => console.warn(`⚠️  [emailService] ${w}`));
 
   if (DRIVER_CHAIN[0] === 'console') {
     console.log('');
     console.log('╔════════════════════════════════════════════════════════════╗');
-    console.log('║  📧  Email driver : CONSOLE (development mode)             ║');
-    console.log('║  Emails are NOT delivered. OTPs will appear here.          ║');
-    console.log('║  → Railway: set SENDGRID_API_KEY + SENDGRID_FROM           ║');
-    console.log('║  → Gmail/VPS: set USE_REAL_EMAIL=true                      ║');
+    if (IS_PRODUCTION) {
+      console.log('║  ❌  Email driver : NONE CONFIGURED (production)            ║');
+      console.log('║  Verification emails will FAIL until you set               ║');
+      console.log('║  SENDGRID_API_KEY + SENDGRID_FROM in Railway variables.    ║');
+    } else {
+      console.log('║  📧  Email driver : CONSOLE (development mode)             ║');
+      console.log('║  Emails are NOT delivered. OTPs will appear here.          ║');
+      console.log('║  → Set SENDGRID_API_KEY + SENDGRID_FROM, or USE_REAL_EMAIL ║');
+    }
     console.log('╚════════════════════════════════════════════════════════════╝');
     console.log('');
     return;
   }
 
-  const chainStr = DRIVER_CHAIN.map(d => labels[d] || d).join(' → ');
-  console.log(`✅ Email driver : ${labels[DRIVER_CHAIN[0]]} — from=${from}`);
-  console.log(`   Chain        : ${chainStr}`);
+  console.log(`✅ Email driver : ${label(DRIVER_CHAIN[0])}`);
+  console.log(`   Chain        : ${DRIVER_CHAIN.map(label).join(' → ')}`);
+  SENDGRID_ACCOUNTS.forEach(a => console.log(`   SendGrid #${a.slot}  : from=${a.from}`));
+  console.log(`   Console OTP  : ${CONSOLE_COUNTS_AS_SENT ? 'counts as sent (dev / ALLOW_CONSOLE_OTP)' : 'treated as FAILURE (production)'}`);
 
-  if (DRIVER_CHAIN.includes('smtp'))     await initSMTP();
-  if (DRIVER_CHAIN.includes('sendgrid')) console.log('   ✅ SendGrid: no IP restrictions, 100 emails/day free forever');
+  if (DRIVER_CHAIN.includes('smtp')) await initSMTP();
 })().catch(console.error);
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Per-driver send implementations
 // ─────────────────────────────────────────────────────────────────────────────
-async function _sendSendGrid({ to, subject, html, text }) {
-  const res = await fetch('https://api.sendgrid.com/v3/mail/send', {
-    method:  'POST',
-    headers: {
-      'Authorization': `Bearer ${process.env.SENDGRID_API_KEY}`,
-      'Content-Type':  'application/json',
-    },
-    body: JSON.stringify({
-      personalizations: [{ to: [{ email: to }] }],
-      from:             { email: FROM_EMAIL(), name: APP_NAME() },
-      subject,
-      content: [
-        { type: 'text/plain', value: text },
-        { type: 'text/html',  value: html },
-      ],
-    }),
-  });
+/** One SendGrid account. Throws "SendGrid #N <status>: <detail>" on failure. */
+async function _sendSendGrid(account, { to, subject, html, text }) {
+  const label = `SendGrid #${account.slot}`;
+  let res;
+  try {
+    res = await fetch('https://api.sendgrid.com/v3/mail/send', {
+      method:  'POST',
+      headers: {
+        'Authorization': `Bearer ${account.key}`,
+        'Content-Type':  'application/json',
+      },
+      body: JSON.stringify({
+        personalizations: [{ to: [{ email: to }] }],
+        from:             { email: account.from, name: APP_NAME() },
+        subject,
+        content: [
+          { type: 'text/plain', value: text },
+          { type: 'text/html',  value: html },
+        ],
+      }),
+      // Without a timeout a stalled connection would hold the HTTP request open.
+      signal: AbortSignal.timeout(HTTP_TIMEOUT_MS),
+    });
+  } catch (err) {
+    if (err.name === 'TimeoutError' || err.name === 'AbortError') {
+      throw new Error(`${label} timeout after ${HTTP_TIMEOUT_MS}ms`);
+    }
+    throw new Error(`${label} network error: ${err.cause?.code || err.message}`);
+  }
+
   if (!res.ok) {
-    let detail = '';
+    const raw = await res.text().catch(() => '');
+    let detail = raw || res.statusText;
     try {
-      const data = await res.json();
-      detail = data?.errors?.map(e => e.message).join(', ') || JSON.stringify(data);
-    } catch { detail = res.statusText; }
-    throw new Error(`SendGrid ${res.status}: ${detail}`);
+      const data = JSON.parse(raw);
+      detail = data?.errors?.map(e => e.message).join(', ') || raw;
+    } catch { /* keep raw text */ }
+    throw new Error(`${label} ${res.status}: ${String(detail).slice(0, 300)}`);
   }
   return res.headers.get('X-Message-Id') || undefined;
 }
@@ -202,36 +298,73 @@ function _sendConsole({ to, subject, text }) {
   console.log('');
 }
 
-const _DRIVER_FN = { sendgrid: _sendSendGrid, smtp: _sendSMTP };
+const _DRIVER_FN = {
+  smtp: _sendSMTP,
+  ...Object.fromEntries(SENDGRID_ACCOUNTS.map(a => [a.driver, (msg) => _sendSendGrid(a, msg)])),
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Core send — waterfall across the driver chain
+// Returns { success, driver, messageId?, delivered, error? }
+//   delivered=true only when a real provider accepted the message.
 // ─────────────────────────────────────────────────────────────────────────────
 async function _send({ to, subject, html, text }) {
+  const attempts = []; // human-readable reason per driver that did not deliver
+
   for (const driver of DRIVER_CHAIN) {
     if (driver === 'console') {
-      _sendConsole({ to, subject, text });
-      return { success: true, driver: 'console' };
+      const reason = attempts.length ? attempts.join(' | ') : 'no real email driver configured';
+      console.error(`❌ [emailService] NOT DELIVERED → ${to} | "${_redact(subject).slice(0, 50)}" | ${reason}`);
+      if (CONSOLE_COUNTS_AS_SENT) _sendConsole({ to, subject, text });
+      return { success: CONSOLE_COUNTS_AS_SENT, driver: 'console', delivered: false, error: reason };
     }
 
-    if (_driverHealth[driver] === 'failed') continue;
+    const h = _health[driver];
+    if (h.status === 'degraded' && Date.now() < h.retryAt) {
+      const mins = Math.max(1, Math.ceil((h.retryAt - Date.now()) / 60000));
+      attempts.push(`${driver}: skipped (degraded: ${h.lastError}; retry in ~${mins}m)`);
+      continue;
+    }
 
     try {
-      const msgId = await _DRIVER_FN[driver]({ to, subject, html, text });
-      return { success: true, driver, messageId: msgId };
+      const messageId = await _DRIVER_FN[driver]({ to, subject, html, text });
+      if (h.status === 'degraded') console.log(`✅ [emailService] ${driver} recovered — back in rotation`);
+      h.status = 'ok'; h.since = null; h.lastError = null; h.lastOkAt = Date.now();
+      return { success: true, driver, messageId, delivered: true };
     } catch (err) {
-      const permanent = _isPermanentDriverError(err.message);
-      if (permanent) {
-        _driverHealth[driver] = 'failed';
-        console.error(`⚠️  [emailService] ${driver} permanently degraded: ${err.message}`);
-        console.warn(`   → Falling through to next driver in chain.`);
+      const msg = err.message || String(err);
+      h.lastError = msg;
+      attempts.push(`${driver}: ${msg}`);
+
+      if (_isPermanentDriverError(driver, msg)) {
+        h.status  = 'degraded';
+        h.since   = h.since || Date.now();
+        h.retryAt = Date.now() + COOLDOWN_MS;
+        console.error(`❌ [emailService] ${driver} DEGRADED (retry in ${Math.round(COOLDOWN_MS / 60000)}m): ${msg}`);
       } else {
-        console.error(`⚠️  [emailService] ${driver} transient error: ${err.message}`);
-        console.warn(`   → Trying next driver.`);
+        console.error(`⚠️  [emailService] ${driver} transient error: ${msg} → trying next driver`);
       }
     }
   }
-  return { success: false, driver: 'none' };
+
+  // Unreachable (chain always ends with console) — kept as a safety net.
+  return { success: false, driver: 'none', delivered: false, error: attempts.join(' | ') };
+}
+
+/** Safe-to-expose snapshot (no secrets) for an admin status endpoint. */
+function getHealth() {
+  return {
+    production: IS_PRODUCTION,
+    chain: [...DRIVER_CHAIN],
+    sendgridAccounts: SENDGRID_ACCOUNTS.map(a => ({ driver: a.driver, slot: a.slot, from: a.from })),
+    consoleCountsAsSent: CONSOLE_COUNTS_AS_SENT,
+    drivers: Object.fromEntries(Object.entries(_health).map(([name, h]) => [name, {
+      status:    h.status,
+      lastError: h.lastError,
+      lastOkAt:  h.lastOkAt ? new Date(h.lastOkAt).toISOString() : null,
+      retryInMs: h.status === 'degraded' ? Math.max(0, h.retryAt - Date.now()) : 0,
+    }])),
+  };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -309,7 +442,7 @@ async function sendOTPEmail(toEmail, otp, firstName = 'there') {
     const result = await _send({ to: toEmail, subject: `${otp} — Your ${appName} verification code`, html: body, text });
     if (result.driver !== 'console') {
       const ts = new Date().toLocaleTimeString('en-PH', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-      console.log(`  ✉  OTP sent [${result.driver}] → ${toEmail} | code=${otp} | ${ts}${result.messageId ? ` | id=${result.messageId}` : ''}`);
+      console.log(`  ✉  OTP sent [${result.driver}] → ${toEmail} | ${ts}${result.messageId ? ` | id=${result.messageId}` : ''}`);
     }
     return result;
   } catch (err) {
@@ -575,5 +708,7 @@ module.exports = {
   sendBedAssignedEmail,
   sendBedUnassignedEmail,
   /** Returns the active driver name — used by server.js startup log */
-  getDriver: () => DRIVER,
+  getDriver: () => (DRIVER.startsWith('sendgrid') ? 'sendgrid' : DRIVER),
+  /** Per-driver health snapshot (no secrets) — safe to expose on an admin route */
+  getHealth,
 };
