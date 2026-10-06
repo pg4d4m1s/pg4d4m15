@@ -60,35 +60,45 @@ app.use(helmet({
 app.use(cors());
 
 // ── Rate limiting ─────────────────────────────────────
+// express-rate-limit answers 429 BEFORE morgan / the request logger below ever run, so a
+// throttled resident used to leave NO trace in the logs. limiterHandler() logs every 429
+// (which limiter, which route, real IP vs express IP) and then replies exactly as before.
+function limiterHandler(name) {
+  return (req, res, _next, options) => {
+    const real = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim() || '?';
+    log.warn(
+      `🛑 RATE LIMITED [${name}] ${req.method} ${req.originalUrl.split('?')[0]} → 429 | ` +
+      `limit ${options.limit ?? options.max}/${Math.round(options.windowMs / 60000)}min | real-ip=${real} express-ip=${req.ip}` +
+      (real !== '?' && real !== req.ip
+        ? '  ⚠ express-ip ≠ real-ip: IP-keyed limits are SHARED between residents (try TRUST_PROXY_HOPS=2)'
+        : '')
+    );
+    res.status(options.statusCode || 429).json(options.message);
+  };
+}
+
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, max: 20,
   message: { error: 'Too many attempts. Please wait 15 minutes and try again.' },
   standardHeaders: true, legacyHeaders: false,
-});
-// OTP sends are expensive (hit email provider API) — limit tightly to prevent
-// abuse that gets our email provider accounts flagged / blocked.
-const otpLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, max: 5,
-  message: { error: 'Too many verification code requests. Please wait 15 minutes and try again.' },
-  standardHeaders: true, legacyHeaders: false,
-  skipSuccessfulRequests: false,
+  handler: limiterHandler('auth'),
 });
 const checkLimiter = rateLimit({
   windowMs: 1 * 60 * 1000, max: 60,
   message: { error: 'Too many requests. Please slow down.' },
   standardHeaders: true, legacyHeaders: false,
+  handler: limiterHandler('check'),
 });
 const apiLimiter = rateLimit({
   windowMs: 1 * 60 * 1000, max: 120,
   message: { error: 'Too many requests. Slow down!' },
   standardHeaders: true, legacyHeaders: false,
+  handler: limiterHandler('api'),
 });
 // AI support chat rate limiting is handled at the Gemini API level (20 RPD)
 
-app.use('/api/auth/send-otp',              otpLimiter);
-app.use('/api/auth/resend-otp',            otpLimiter);
-app.use('/api/auth/verify-otp',            authLimiter);
-app.use('/api/auth/complete-registration', authLimiter);
+// NOTE: the OTP / complete-registration limiters are mounted further down, AFTER the body
+// parser and session middleware, because they are keyed per e-mail (see "Registration limiters").
 app.use('/api/auth/login',                 authLimiter);
 app.use('/api/auth/forgot-password',       authLimiter);
 app.use('/api/auth/verify-reset-otp',      authLimiter);
@@ -115,7 +125,11 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 // ── Trust Railway's reverse proxy ────────────────────
-app.set('trust proxy', 1);
+// Number of proxy hops in front of the app. Leave at 1 unless the "RATE LIMITED" / "incoming" log
+// lines show express-ip ≠ real-ip (then req.ip is Railway's edge, shared by every resident) —
+// in that case set TRUST_PROXY_HOPS=2 in Railway and redeploy. Default keeps today's behaviour.
+const TRUST_PROXY_HOPS = parseInt(process.env.TRUST_PROXY_HOPS || '1', 10) || 1;
+app.set('trust proxy', TRUST_PROXY_HOPS);
 
 // ── Sessions ──────────────────────────────────────────
 // better-sqlite3-session-store already lives in package.json and shares the
@@ -142,6 +156,52 @@ app.use(session({
     maxAge:   24 * 60 * 60 * 1000,
   }
 }));
+
+// ── Registration limiters (keyed per E-MAIL, not per IP) ──────────────
+// Behind Railway, req.ip can be the proxy's address — shared by every resident — so 5 OTP
+// requests / 20 attempts per "IP" per 15 min could throttle unrelated residents at once.
+// Per-email keys give each resident their own budget; a generous per-IP ceiling remains as an
+// abuse backstop. Every 429 is logged by limiterHandler() above.
+const emailKey = (req) => {
+  const e = String((req.body && req.body.email) || (req.session && req.session.pendingRegistration && req.session.pendingRegistration.email) || '')
+    .trim().toLowerCase();
+  return e ? `email:${e}` : `ip:${req.ip}`;
+};
+const otpEmailLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, max: 5, keyGenerator: emailKey,
+  message: { error: 'Too many verification codes requested for this email. Please wait 15 minutes and try again.', code: 'RATE_LIMITED' },
+  standardHeaders: true, legacyHeaders: false, handler: limiterHandler('otp-per-email'),
+});
+const otpIpCeiling = rateLimit({
+  windowMs: 15 * 60 * 1000, max: 60,
+  message: { error: 'Too many verification code requests from this network. Please wait a few minutes and try again.', code: 'RATE_LIMITED' },
+  standardHeaders: true, legacyHeaders: false, handler: limiterHandler('otp-ip-ceiling'),
+});
+const verifyEmailLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, max: 20, keyGenerator: emailKey,
+  message: { error: 'Too many attempts for this email. Please wait 15 minutes and try again.', code: 'RATE_LIMITED' },
+  standardHeaders: true, legacyHeaders: false, handler: limiterHandler('verify-per-email'),
+});
+const regEmailLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, max: 30, keyGenerator: emailKey,
+  message: { error: 'Too many submit attempts. Please wait a few minutes and try again.', code: 'RATE_LIMITED' },
+  standardHeaders: true, legacyHeaders: false, handler: limiterHandler('register-per-email'),
+});
+const regIpCeiling = rateLimit({
+  windowMs: 15 * 60 * 1000, max: 300,
+  message: { error: 'Too many requests from this network. Please wait a few minutes and try again.', code: 'RATE_LIMITED' },
+  standardHeaders: true, legacyHeaders: false, handler: limiterHandler('register-ip-ceiling'),
+});
+const clientReportLimiter = rateLimit({
+  windowMs: 60 * 1000, max: 30, keyGenerator: (req) => `sid:${req.sessionID || req.ip}`,
+  standardHeaders: true, legacyHeaders: false,
+  handler: (_req, res) => res.status(204).end(),   // diagnostics must never surface errors to residents
+});
+app.use('/api/auth/send-otp',              otpIpCeiling, otpEmailLimiter);
+app.use('/api/auth/resend-otp',            otpIpCeiling, otpEmailLimiter);
+app.use('/api/auth/verify-otp',            regIpCeiling, verifyEmailLimiter);
+app.use('/api/auth/complete-registration', regIpCeiling, regEmailLimiter);
+app.use('/api/auth/client-report',         clientReportLimiter);
 
 // ── Passport ──────────────────────────────────────────
 require('./utils/passport-setup');
@@ -199,11 +259,26 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 // ── Request logger ────────────────────────────────────────────────
 const _reqLog = require('./utils/logger');
+const { uploadSummary, isUploadError, handleUploadError } = require('./middleware/uploadDiagnostics');
 
 // Attach a short 6-char hex request ID to every request for cross-line correlation.
 // e.g. ERROR and its matching request line share the same [a1b2c3] tag.
 app.use((req, _res, next) => {
   req._id = require('crypto').randomBytes(3).toString('hex');
+  next();
+});
+
+// Capture the {error, code} of every 4xx/5xx JSON reply so the request logger can print WHY a
+// request failed (before this only 500s showed a reason; a 400 just said "BAD REQUEST").
+app.use((req, res, next) => {
+  const _json = res.json.bind(res);
+  res.json = (body) => {
+    if (res.statusCode >= 400 && body && typeof body === 'object') {
+      res._errMsg  = body.error || body.message;
+      res._errCode = body.code;
+    }
+    return _json(body);
+  };
   next();
 });
 
@@ -252,8 +327,8 @@ app.use((req, res, next) => {
     }
 
     // For 500s, show the error message that the route handler stashed on res._errMsg
-    const errHint = s >= 500 && res._errMsg
-      ? `\n   \x1b[31m↳ error: ${res._errMsg}\x1b[0m`
+    const errHint = s >= 400 && res._errMsg
+      ? `\n   ${s >= 500 ? '\x1b[31m' : '\x1b[33m'}↳ ${s >= 500 ? 'error' : 'reason'}: ${res._errMsg}${res._errCode ? ` [${res._errCode}]` : ''}\x1b[0m`
       : '';
 
     const base = `${rid} ${req.method.padEnd(6)} ${req.path}${qs} → ${statusStr} ${msStr} [${user}]  ip=${ip}`;
@@ -261,25 +336,27 @@ app.use((req, res, next) => {
     if (s >= 500) {
       _reqLog.error(`${base} 🔴 SERVER ERROR${errHint}${bodyHint}`);
     } else if (s === 409 && isApi) {
-      _reqLog.warn(`${base} ⚡ CONFLICT`);
+      _reqLog.warn(`${base} ⚡ CONFLICT${errHint}`);
     } else if (s === 404 && isApi) {
-      _reqLog.warn(`${base} ⚠ NOT FOUND`);
+      _reqLog.warn(`${base} ⚠ NOT FOUND${errHint}`);
     } else if (s === 403 && isApi) {
-      _reqLog.warn(`${base} 🚫 FORBIDDEN`);
+      _reqLog.warn(`${base} 🚫 FORBIDDEN${errHint}`);
     } else if (s === 401 && isApi) {
-      _reqLog.warn(`${base} 🔒 UNAUTHORIZED`);
+      _reqLog.warn(`${base} 🔒 UNAUTHORIZED${errHint}`);
     } else if (s === 400 && isApi) {
-      _reqLog.warn(`${base} ✗ BAD REQUEST${bodyHint}`);
+      _reqLog.warn(`${base} ✗ BAD REQUEST${errHint}${bodyHint}`);
     } else if (s === 429 && isApi) {
-      _reqLog.warn(`${base} 🛑 RATE LIMITED`);
+      _reqLog.warn(`${base} 🛑 RATE LIMITED${errHint}`);
     } else if (s >= 400 && isApi) {
-      _reqLog.warn(`${base} ⚠ CLIENT ERROR`);
+      _reqLog.warn(`${base} ⚠ CLIENT ERROR${errHint}`);
     } else if (!isFileRoute && ms > slowLimit && isApi) {
       _reqLog.warn(`${base} 🐌 VERY SLOW (>${ms}ms)`);
     } else if (!isFileRoute && ms > warnLimit && isApi) {
       _reqLog.warn(`${base} ⏱ SLOW (>${ms}ms)`);
     } else if (isFileRoute && ms > slowLimit) {
-      _reqLog.warn(`${base} 🐌 VERY SLOW — file upload${bodyHint}`);
+      _reqLog.warn(`${base} 🐌 VERY SLOW — file upload${uploadSummary(req)}${bodyHint}`);
+    } else if (isFileRoute && ms > warnLimit && req.method !== 'GET') {
+      _reqLog.warn(`${base} ⏱ SLOW — file upload${uploadSummary(req)}`);
     } else if (isDorm && s < 400) {
       // Always log dormitory API calls (GET + mutations) — helps debug room/billing issues
       _reqLog.dorm(`${base}${bodyHint}`);
@@ -370,10 +447,13 @@ app.get('*', (req, res) => {
 
 // ── Global error handler ──────────────────────────────
 app.use((err, req, res, next) => {
-  if (err.code === 'LIMIT_FILE_SIZE')
-    return res.status(400).json({ error: 'File too large. Maximum size is 5 MB.' });
-  console.error('Unhandled error:', err.message);
-  res.status(500).json({ error: 'Server error. Please try again.' });
+  if (res.headersSent) return next(err);
+  // multer / file-type / aborted-upload errors → specific message + log line (see middleware/uploadDiagnostics.js).
+  // (Previously every LIMIT_FILE_SIZE said "Maximum size is 5 MB" although the real limit is 15 MB.)
+  if (isUploadError(err)) return handleUploadError(err, req, res);
+  log.error(`Unhandled error [${req._id}] ${req.method} ${req.originalUrl.split('?')[0]}: ${err.message}`);
+  console.error(err.stack || err);
+  res.status(500).json({ error: 'Server error. Please try again.', code: 'SERVER_ERROR', ref: req._id });
 });
 
 // ── Start ─────────────────────────────────────────────
@@ -390,7 +470,8 @@ httpServer.listen(PORT, async () => {
   log.success(`Admin panel    →  http://localhost:${PORT}/admin.html`);
   log.success(`Resident portal→  http://localhost:${PORT}/`);
   log.info(`Environment  : ${env} | Node ${process.version}`);
-  log.info(`Sessions     : ✔ SQLite store (connecthub.db → sessions table)`);
+  log.info(`Sessions     : ✔ SQLite store (${(process.env.DATA_DIR || '(project root)')}/connecthub.db → sessions table)`);
+  log.info(`Proxy hops   : ${TRUST_PROXY_HOPS} (TRUST_PROXY_HOPS) — rate limits are per-email for OTP/registration`);
   log.info(`Cloudinary   : ${process.env.CLOUDINARY_CLOUD_NAME ? '✔ configured' : '✖ NOT configured (base64 fallback)'}`);
   log.info(`Google OAuth : ${process.env.GOOGLE_CLIENT_ID      ? '✔ configured' : '✖ NOT configured'}`);
   const geminiPool   = require('./utils/geminiPool');

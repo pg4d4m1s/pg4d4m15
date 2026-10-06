@@ -119,6 +119,7 @@ async function go(from) {
   if (next) next.classList.remove('hidden');
   updateProgress(currentStep);
   document.querySelector('.overflow-y-auto').scrollTop = 0;
+  RegResilience.onStepChange(currentStep);   // save progress so a refresh resumes here
 
   // When entering step 3, re-run availability checks on any pre-filled fields
   if (currentStep === 3) {
@@ -157,6 +158,7 @@ function back(from) {
   stopCamera();
   stopSelfieCamera();
   $('step-' + from).classList.add('hidden');
+  currentStep = from - 1;   // BUGFIX: was never decremented, so Back did nothing on steps 4 and 5
   var prev = $('step-' + currentStep);
   if (prev) prev.classList.remove('hidden');
   updateProgress(currentStep);
@@ -732,6 +734,14 @@ async function sendOTP() {
       return false;
     }
 
+    if (data.alreadyVerified) {
+      // Refreshed mid-form and tapped Google again: this e-mail is already verified in the server session.
+      // Resume at step 3 (with saved answers) instead of waiting for a code that was never sent.
+      var resumed = false;
+      try { resumed = await RegResilience.maybeResume({ googleEmail: email }); } catch (e) { console.warn('[Resume]', e); }
+      if (resumed) return false;   // maybeResume() already switched the UI; stop go() from moving to step 2
+    }
+
     $('otp-email').textContent = email;
     startCountdown();
     showToast('Code sent to ' + email + '!');
@@ -769,6 +779,27 @@ function startCountdown() {
     $('cd').textContent = secs;
     if (secs <= 0) { clearInterval(countdownInterval); $('resend-timer').classList.add('hidden'); $('resend-btn').classList.remove('hidden'); }
   }, 1000);
+}
+
+function lockOtpStepUi() {
+  // Disable the Back button on step 2 (and step 3 back will also be blocked)
+  var step2BackBtn = $('step-2').querySelector('button:last-child');
+  if (step2BackBtn) {
+    step2BackBtn.disabled = true;
+    step2BackBtn.title = 'Email already verified';
+    step2BackBtn.classList.add('opacity-40', 'cursor-not-allowed');
+  }
+
+  // Disable step 3 back button
+  setTimeout(function() {
+    var s3back = $('btn-step3-back');
+    if (s3back) {
+      s3back.disabled = true;
+      s3back.title = 'Email already verified — cannot return to OTP step';
+      s3back.classList.add('opacity-40', 'cursor-not-allowed');
+      s3back.innerHTML = '<i class="fa-solid fa-lock mr-1 text-xs"></i> Email Verified';
+    }
+  }, 100);
 }
 
 async function verifyOTP() {
@@ -821,31 +852,18 @@ async function verifyOTP() {
     clearInterval(countdownInterval);
     hideStepError(2);
 
-    // Disable the Back button on step 2 (and step 3 back will also be blocked)
-    var step2BackBtn = $('step-2').querySelector('button:last-child');
-    if (step2BackBtn) {
-      step2BackBtn.disabled = true;
-      step2BackBtn.title = 'Email already verified';
-      step2BackBtn.classList.add('opacity-40', 'cursor-not-allowed');
-    }
-
-    // Disable step 3 back button
-    setTimeout(function() {
-      var s3back = $('btn-step3-back');
-      if (s3back) {
-        s3back.disabled = true;
-        s3back.title = 'Email already verified — cannot return to OTP step';
-        s3back.classList.add('opacity-40', 'cursor-not-allowed');
-        s3back.innerHTML = '<i class="fa-solid fa-lock mr-1 text-xs"></i> Email Verified';
-      }
-    }, 100);
+    lockOtpStepUi();   // disables the Back buttons (shared with the resume flow)
 
     $('step-2').classList.add('hidden');
     currentStep = 3;
     $('step-3').classList.remove('hidden');
     updateProgress(3);
     document.querySelector('.overflow-y-auto').scrollTop = 0;
-    initAddrDropdowns(); // populate all address dropdowns on step 3
+    // populate address dropdowns, then restore any saved answers for this e-mail (e.g. session expired earlier)
+    initAddrDropdowns()
+      .then(function(){ return RegResilience.restoreAfterVerify(); })
+      .catch(function(e){ console.warn('[Resume]', e); });
+    RegResilience.onStepChange(3);
 
   } catch(e) {
     showStepError(2, 'Network error. Please try again.');
@@ -1167,16 +1185,47 @@ function readFileWithProgress(file, cfg) {
 // loadAddrCascade(prefix, next) — prefix: pres/perm/father/mother
 // ═══════════════════════════════════════════════════
 var _addrCache = {};
+var _addrInflight = {};
+var PSGC_BASE = 'https://psgc.gitlab.io/api/';
+var PSGC_LS = 'damis_psgc_v1:';
 
+// PSGC data is static, so it is cached in localStorage (instant + works on a flaky network after the first load).
+// Network calls get a 12 s timeout and 3 attempts. A FAILED fetch returns [] with .__failed = true so callers
+// can tell "service unreachable" apart from "this region genuinely has no provinces".
 async function psgcFetchAddr(endpoint) {
   if (_addrCache[endpoint]) return _addrCache[endpoint];
-  try {
-    var r = await fetch('https://psgc.gitlab.io/api/' + endpoint + '.json');
-    if (!r.ok) throw new Error('PSGC error');
-    var data = await r.json();
-    _addrCache[endpoint] = Array.isArray(data) ? data : [data];
-    return _addrCache[endpoint];
-  } catch(e) { return []; }
+  if (_addrInflight[endpoint]) return _addrInflight[endpoint];
+  _addrInflight[endpoint] = (async function () {
+    try {
+      var raw = localStorage.getItem(PSGC_LS + endpoint);
+      if (raw) { var cached = JSON.parse(raw); if (Array.isArray(cached) && cached.length) { _addrCache[endpoint] = cached; return cached; } }
+    } catch (_) {}
+    var lastErr = null;
+    for (var attempt = 1; attempt <= 3; attempt++) {
+      var ctrl = ('AbortController' in window) ? new AbortController() : null;
+      var timer = ctrl ? setTimeout(function(){ ctrl.abort(); }, 12000) : null;
+      try {
+        var r = await fetch(PSGC_BASE + endpoint + '.json', ctrl ? { signal: ctrl.signal } : undefined);
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        var data = await r.json();
+        var list = Array.isArray(data) ? data : [data];
+        _addrCache[endpoint] = list;
+        try { localStorage.setItem(PSGC_LS + endpoint, JSON.stringify(list)); } catch (_) {}
+        return list;
+      } catch (e) {
+        lastErr = e;
+        console.warn('[PSGC] ' + endpoint + ' attempt ' + attempt + '/3 failed:', e && e.message);
+        if (attempt < 3) await new Promise(function(res){ setTimeout(res, 800 * attempt); });
+      } finally { if (timer) clearTimeout(timer); }
+    }
+    RegResilience.report('address_load_failed', { kind: 'psgc', phase: endpoint.slice(0, 28), message: String(lastErr && lastErr.message || lastErr) });
+    var failed = []; failed.__failed = true; return failed;
+  })();
+  try { return await _addrInflight[endpoint]; } finally { delete _addrInflight[endpoint]; }
+}
+
+function addrLoadFailed(what) {
+  showToast("Couldn't load the list of " + what + ". Check your signal, then select the previous field again.", 'error');
 }
 
 function resetAddrSelect(id, placeholder) {
@@ -1214,14 +1263,17 @@ async function loadAddrCascade(prefix, next) {
     if (regionCode === '1300000000') {
       if (provinceEl) { provinceEl.innerHTML = '<option value="__ncr__">N/A — NCR</option>'; }
       var cities = await psgcFetchAddr('regions/' + regionCode + '/cities-municipalities');
+    if (cities.__failed) return addrLoadFailed('cities');
       populateAddrSelect(prefix + '-city', cities, '— Select City —');
     } else {
       var provinces = await psgcFetchAddr('regions/' + regionCode + '/provinces');
+    if (provinces.__failed) return addrLoadFailed('provinces');
       if (provinces.length > 0) {
         populateAddrSelect(prefix + '-province', provinces, '— Select Province —');
       } else {
         if (provinceEl) { provinceEl.innerHTML = '<option value="__none__">N/A</option>'; }
         var cities2 = await psgcFetchAddr('regions/' + regionCode + '/cities-municipalities');
+    if (cities2.__failed) return addrLoadFailed('cities');
         populateAddrSelect(prefix + '-city', cities2, '— Select City —');
       }
     }
@@ -1232,11 +1284,13 @@ async function loadAddrCascade(prefix, next) {
     var provCode = provinceEl.value;
     if (!provCode || provCode === '__ncr__' || provCode === '__none__') return;
     var cities3 = await psgcFetchAddr('provinces/' + provCode + '/cities-municipalities');
+    if (cities3.__failed) return addrLoadFailed('cities');
     populateAddrSelect(prefix + '-city', cities3, '— Select City/Municipality —');
   } else if (next === 'brgy') {
     resetAddrSelect(prefix + '-brgy', '— Select Barangay —');
     if (!cityEl || !cityEl.value) return;
     var barangays = await psgcFetchAddr('cities-municipalities/' + cityEl.value + '/barangays');
+    if (barangays.__failed) return addrLoadFailed('barangays');
     populateAddrSelect(prefix + '-brgy', barangays, '— Select Barangay —');
   }
   buildAddrString(prefix);
@@ -1279,6 +1333,19 @@ function toggleSameAsPresent() {
 async function initAddrDropdowns() {
   var prefixes = ['pres', 'perm', 'father', 'mother', 'guardian'];
   var data = await psgcFetchAddr('regions');
+  if (data.__failed) {
+    // Without regions the resident is stuck on step 3 — retry automatically and say so (previously: silent empty dropdown).
+    window._addrRetries = (window._addrRetries || 0) + 1;
+    window._addrErrShown = true;
+    if (window._addrRetries <= 6) {
+      showStepError(3, "Couldn't load the address list (the address service didn't respond). Retrying automatically…");
+      setTimeout(initAddrDropdowns, 4000 * Math.min(window._addrRetries, 3));
+    } else {
+      showStepError(3, "Couldn't load the address list. Check your internet connection, then reload this page — your answers are saved.");
+    }
+    return;
+  }
+  if (window._addrErrShown) { window._addrErrShown = false; window._addrRetries = 0; hideStepError(3); }
   prefixes.forEach(function(prefix) {
     var el = $(prefix + '-region');
     if (!el) return;
@@ -1301,9 +1368,12 @@ function handleDocFile(evt, key) {
   var isPdf   = file.type === 'application/pdf';
   var isDocx  = file.name.toLowerCase().endsWith('.docx');
   if (!isImage && !isPdf && !isDocx) { showStepError(5, 'Accepted formats: JPG, PNG, WEBP, PDF, DOCX.'); return; }
-  if (file.size > 10 * 1024 * 1024) { showStepError(5, 'File too large. Maximum 10MB per document.'); return; }
+  // Photos are compressed before upload (reg-resilience.js), so big camera originals are fine; PDF/DOCX stay capped.
+  var maxBytes = isImage ? 30 * 1024 * 1024 : 10 * 1024 * 1024;
+  if (file.size > maxBytes) { showStepError(5, 'File too large (' + formatBytes(file.size) + '). Maximum ' + (isImage ? '30 MB per photo.' : '10 MB per document.')); return; }
   hideStepError(5);
   window._damis_docs[key] = file;
+  RegResilience.onDocSelected(key, file);   // compress in background + keep a copy for draft resume
   var def = $('doc-def-' + key), prev = $('doc-prev-' + key), fn = $('doc-fn-' + key);
   var sz  = $('doc-sz-' + key);
   var thumb = $('doc-thumb-' + key);
@@ -1405,6 +1475,7 @@ function handleDocDrop(evt, key) {
 function clearDocFile(evt, key) {
   if (evt) evt.stopPropagation();
   delete window._damis_docs[key];
+  RegResilience.onDocCleared(key);
   var fileInput = $('doc-file-' + key), def = $('doc-def-' + key), prev = $('doc-prev-' + key);
   var thumb = $('doc-thumb-' + key);
   var sz    = $('doc-sz-' + key);
@@ -1625,6 +1696,8 @@ async function completeRegistration() {
   // instrument's own consent statement ("has NO effect on the outcome of
   // your dormitory application").
 
+  if (RegResilience.isUploading()) return;   // ignore double-taps while an upload is running
+
   var btn = $('btn-complete');
   btn.disabled = true;
   btn.innerHTML = '<span class="spinner mr-2"></span> Submitting application...';
@@ -1723,38 +1796,19 @@ async function completeRegistration() {
     }
     fd.append('monthlyIncome', $('reg-income') ? $('reg-income').value : '');
 
-    // Attach DAMIS document files
-    var docFiles = window._damis_docs || {};
-    if (docFiles['school-id'])  fd.append('id_front',        docFiles['school-id']);
-    if (docFiles['residency'])  fd.append('cert_residency',  docFiles['residency']);
-    if (docFiles['low-income']) fd.append('cert_low_income', docFiles['low-income']);
-    if (docFiles['enrollment']) fd.append('cert_enrollment', docFiles['enrollment']);
-
-    // ── Attach profile photo ──────────────────────────────────────
-    // Always use the original file — the crop position is saved separately
-    // as avatarFaceX/Y so admin can display the right face region via object-position.
-    if (capturedPhotoData && !avatarFileRef) {
-      try {
-        var parts  = capturedPhotoData.split(',');
-        var mime   = (parts[0].match(/:(.*?);/) || [])[1] || 'image/jpeg';
-        var byteStr = atob(parts[1]);
-        var ab = new Uint8Array(byteStr.length);
-        for (var i = 0; i < byteStr.length; i++) ab[i] = byteStr.charCodeAt(i);
-        var camBlob = new Blob([ab], { type: mime });
-        fd.append('avatar', camBlob, 'avatar.jpg');
-        fd.append('selfie', camBlob, 'selfie.jpg');
-      } catch(camErr) {
-        console.error('[Registration] Camera blob conversion failed:', camErr);
-        showStepError(5, 'Could not process your profile photo. Please go back and re-upload it.');
-        btn.disabled = false;
-        btn.innerHTML = 'Submit Application <i class="fa-solid fa-paper-plane ml-1"></i>';
-        return;
-      }
-    }
-    // File-upload path: send original file directly
-    if (avatarFileRef) {
-      fd.append('avatar', avatarFileRef, avatarFileRef.name || 'avatar.jpg');
-      fd.append('selfie', avatarFileRef, avatarFileRef.name || 'selfie.jpg');
+    // Attach DAMIS document files + profile photo.
+    // Photos are resized to ≤1600 px JPEG first (a 4 MB phone photo → a few hundred KB) and files are copied
+    // into memory, so the upload is small and cannot be broken by a picker file disappearing (reg-resilience.js).
+    var prep = await RegResilience.prepareFiles({ docs: window._damis_docs || {} });
+    var pd = prep.docs;
+    if (pd['school-id'])  fd.append('id_front',        pd['school-id'].blob,  pd['school-id'].name);
+    if (pd['residency'])  fd.append('cert_residency',  pd['residency'].blob,  pd['residency'].name);
+    if (pd['low-income']) fd.append('cert_low_income', pd['low-income'].blob, pd['low-income'].name);
+    if (pd['enrollment']) fd.append('cert_enrollment', pd['enrollment'].blob, pd['enrollment'].name);
+    // Crop position is saved separately (percentages), so resizing the image does not move the crop.
+    if (prep.avatar) {
+      fd.append('avatar', prep.avatar.blob, prep.avatar.name || 'avatar.jpg');
+      fd.append('selfie', prep.avatar.blob, prep.avatar.name || 'selfie.jpg');
     }
 
     // ── Face crop position (percentage of original image) ────────
@@ -1777,18 +1831,20 @@ async function completeRegistration() {
     console.log('[DAMIS] Documents uploaded:', docKeys.length ? docKeys.join(', ') : 'none');
     console.log('[DAMIS] Avatar source:', capturedPhotoData ? 'camera' : avatarFileRef ? 'file' : 'none');
 
-    var res  = await fetch(API.COMPLETE_REG, { method: 'POST', body: fd });
-    var data = await res.json();
+    // Upload with a real progress bar, stall/timeout detection and specific error messages
+    var outcome = await RegResilience.submit(API.COMPLETE_REG, fd, { sizes: prep.sizes });
 
-    if (!res.ok) {
-      var errMsg = data.error || 'Registration failed. Please try again.';
-      var isUsernameTaken = errMsg.toLowerCase().includes('username') && errMsg.toLowerCase().includes('taken');
-      var isPhoneTaken    = errMsg.toLowerCase().includes('phone') && errMsg.toLowerCase().includes('registered');
-      if (isUsernameTaken || isPhoneTaken) {
+    if (!outcome.ok) {
+      var fl = outcome.failure;
+      var errMsg = fl.message + (fl.hint ? ' ' + fl.hint : '');
+      var isUsernameTaken = fl.message.toLowerCase().includes('username') && fl.message.toLowerCase().includes('taken');
+      var isPhoneTaken    = fl.message.toLowerCase().includes('phone') && fl.message.toLowerCase().includes('registered');
+      if (isUsernameTaken || isPhoneTaken || fl.goStep === 3) {
         $('step-5').classList.add('hidden');
         $('step-3').classList.remove('hidden');
         currentStep = 3;
         updateProgress(3);
+        if (!isUsernameTaken && !isPhoneTaken) showStepError(3, errMsg);
         if (isUsernameTaken) {
           var unameEl = $('reg-uname'); // field removed; username auto-generated
           if (unameEl) { unameEl.classList.add('is-error'); }
@@ -1819,6 +1875,7 @@ async function completeRegistration() {
       return;
     }
 
+    RegResilience.onSubmitted();   // wipe the saved draft + photos from this device
     hideStepError(5);
     $('step-5').classList.add('hidden');
     $('step-ok').classList.remove('hidden');
@@ -1834,7 +1891,15 @@ async function completeRegistration() {
 
   } catch(e) {
     console.error('completeRegistration error:', e);
-    showStepError(5, 'Something went wrong. Please try again.');
+    RegResilience.progressUI.hide();
+    if (e && e.kind === 'file_unreadable') {
+      var ex = RegResilience.explain(e);
+      showStepError(5, ex.message + ' ' + ex.hint);
+    } else {
+      RegResilience.report('submit_exception', { message: String((e && e.message) || e) });
+      showStepError(5, 'The app hit an unexpected problem while preparing your submission (' + String((e && e.message) || e).slice(0, 80) + '). ' +
+                       'Please reload the page — your answers are saved — and try again.');
+    }
     btn.disabled = false;
     btn.innerHTML = 'Submit Application <i class="fa-solid fa-paper-plane ml-1"></i>';
   }
@@ -2333,6 +2398,24 @@ function handleGoogleAuth(intent) {
 // ═══════════════════════════════════════════════════
 // URL PARAMS — handle Google OAuth redirect
 // ═══════════════════════════════════════════════════
+// Shared by checkUrlParams() and the resume flow (reg-resilience.js): puts the sign-up form into "Google" mode.
+function applyGoogleSignupUi(email) {
+  isGoogleSignup = true;
+  showTab('signup');
+
+  var emailInput = $('reg-email');
+  emailInput.value    = email;
+  emailInput.readOnly = true;
+  emailInput.style.background = '#eff6ff';
+  emailInput.style.color = '#1d4ed8';
+  emailInput.style.fontWeight = '600';
+
+  $('google-banner-email').textContent = email;
+  $('google-banner').classList.remove('hidden');
+  $('pass-fields').classList.add('hidden');
+  $('btn-google-signup').classList.add('hidden');
+}
+
 async function checkUrlParams() {
   var params = new URLSearchParams(window.location.search);
   window.history.replaceState({}, '', '/');
@@ -2389,22 +2472,13 @@ async function checkUrlParams() {
       var data = await res.json();
 
       if (data.pending) {
-        isGoogleSignup = true;
-        showTab('signup');
+        applyGoogleSignupUi(data.email);
 
-        var emailInput = $('reg-email');
-        emailInput.value    = data.email;
-        emailInput.readOnly = true;
-        emailInput.style.background = '#eff6ff';
-        emailInput.style.color = '#1d4ed8';
-        emailInput.style.fontWeight = '600';
-
-        $('google-banner-email').textContent = data.email;
-        $('google-banner').classList.remove('hidden');
-        $('pass-fields').classList.add('hidden');
-        $('btn-google-signup').classList.add('hidden');
-
-        showToast('Google account recognised. Please complete your registration.', 'info');
+        // Already verified earlier in this session? Skip the OTP and restore saved answers.
+        var resumedG = false;
+        try { resumedG = await RegResilience.maybeResume({ googleEmail: data.email }); } catch (re) { console.warn('[Resume]', re); }
+        window.__regResumeHandled = true;
+        if (!resumedG) showToast('Google account recognised. Please complete your registration.', 'info');
       } else {
         showTab('login');
         showLoginError('Google session expired. Please try signing up again.');
@@ -3350,7 +3424,14 @@ document.addEventListener('DOMContentLoaded', async function(){
   } catch (_) { /* network error — show login form normally */ }
 
   setupBirthdayField();
+  RegResilience.init();                         // autosave + diagnostics hooks
+  window.addEventListener('online', function(){ if (window._addrErrShown) initAddrDropdowns(); });
+  var hadParams = window.location.search.length > 1;   // checkUrlParams() wipes the query string
   await checkUrlParams();
+  if (!window.__regResumeHandled && !hadParams) {
+    // Plain reload mid-registration: the verified e-mail still lives in the server session — pick up where they left off.
+    try { await RegResilience.maybeResume({}); } catch (e) { console.warn('[Resume]', e); }
+  }
   $('terms-modal').addEventListener('click', function(e){ if (e.target === $('terms-modal')) closeTerms(); });
   console.log('PGA-DAMIS auth module loaded ✅ (v2 enhanced)');
 });

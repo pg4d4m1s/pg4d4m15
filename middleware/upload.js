@@ -1,4 +1,5 @@
 const log = require('../utils/logger');
+const { handleUploadError } = require('./uploadDiagnostics');
 /**
  * middleware/upload.js
  *
@@ -48,9 +49,14 @@ const fileFilter = (req, file, cb) => {
   // Extra guard: some browsers send wrong MIME for docx — check extension as fallback
   const ext = (file.originalname || '').toLowerCase();
   if (CERT_FIELDS.has(file.fieldname) && (ext.endsWith('.docx') || ext.endsWith('.doc'))) return cb(null, true);
-  cb(new Error(CERT_FIELDS.has(file.fieldname)
+  // Tag the error so the resident gets a specific message (see uploadDiagnostics.describeUploadError)
+  const typeErr = new Error(CERT_FIELDS.has(file.fieldname)
     ? 'Only JPG, PNG, WebP, PDF, or DOCX allowed for certificates.'
-    : 'Only JPG, PNG, GIF, WebP allowed.'), false);
+    : 'Only JPG, PNG, GIF, WebP allowed.');
+  typeErr.code = 'BAD_FILE_TYPE';
+  typeErr.field = file.fieldname;
+  typeErr.mimetype = file.mimetype;
+  cb(typeErr, false);
 };
 const multerUpload = multer({ storage, fileFilter, limits: { fileSize: 15 * 1024 * 1024 } });
 
@@ -161,12 +167,14 @@ async function processIdDocument(req, res, next) {
   log.upload(`Face crop params: faceCenter=(${cropParams.faceX}%,${cropParams.faceY}%) cropTopLeft=(${cropParams.cropX}%,${cropParams.cropY}%) size=${cropParams.cropSize}% → ${hasCropInput ? '✔ will use face-crop' : '✘ missing — will fall back to center-crop'}`);
 
   if (!req.files && !req.file) return next();
+  let currentField = null;   // which file we were working on if something throws
   try {
     const urls = {};
 
     // ── Avatar: face-aware crop using user's crop selection ──────────────
     const avatarFile = req.files?.['avatar']?.[0];
     if (avatarFile) {
+      currentField = 'avatar';
       const sharp = require('sharp');
       const faceX    = parseFloat(req.body?.avatarFaceX)    || 50;
       const faceY    = parseFloat(req.body?.avatarFaceY)    || 50;
@@ -219,6 +227,7 @@ async function processIdDocument(req, res, next) {
     for (const field of fields) {
       const file = req.files?.[field]?.[0] || (req.file?.fieldname === field ? req.file : null);
       if (!file) continue;
+      currentField = field;
       const isPdf  = file.mimetype === 'application/pdf';
       const isDocx = DOCX_MIMES.has(file.mimetype) || (file.originalname || '').toLowerCase().endsWith('.docx');
       const folder = field.startsWith('cert_') ? 'damis/cert-docs' : 'damis/id-docs';
@@ -274,9 +283,18 @@ async function processIdDocument(req, res, next) {
     log.upload(`processIdDocument done in ${elapsed}ms. Stored: ${Object.keys(urls).map(k => `${k}(${urls[k] ? '✔' : '✘'})`).join(' ')}`);
     next();
   } catch (err) {
-    log.error(`ID doc upload error: ${err.message}`);
+    // Cloudinary rejects with a plain object ({ message, http_code }); normalise so we can annotate it.
+    if (typeof err !== 'object' || err === null) err = new Error(String(err));
+    err.uploadField = err.uploadField || currentField;
+    if (!err.uploadStage && (err.http_code || /cloudinary|ETIMEDOUT|ECONNRESET|ENOTFOUND|socket hang up/i.test(String(err.message)))) {
+      err.uploadStage = 'storage';
+    }
+    log.error(
+      `ID doc upload error on field "${currentField || '?'}" after ${Date.now() - t0}ms: ${err.message}` +
+      `${err.http_code ? ` (Cloudinary HTTP ${err.http_code})` : ''}`
+    );
     console.error(err);
-    res.status(500).json({ error: 'ID upload failed.' });
+    return handleUploadError(err, req, res);   // specific JSON error + log line (was a generic "ID upload failed.")
   }
 }
 

@@ -16,6 +16,7 @@ const geminiPool = require('../utils/geminiPool');
 const { generateOTP, sendOTPEmail, sendWelcomeEmail, sendPasswordResetEmail, sendAccountPendingEmail, sendAccountApprovedEmail, sendAccountRejectedEmail, sendContactEmail } = require('../utils/emailService');
 const { rejectDisposableEmail } = require('../utils/disposableEmailCheck');
 const { uploadIdDocs } = require('../middleware/upload');
+const { trackUpload, uploadSummary, clientReportHandler, clientIp } = require('../middleware/uploadDiagnostics');
 const {
   findUserByEmail, findUserById, findUserByUsername, findUserByPhone,
   createUser, submitIdVerification,
@@ -60,6 +61,16 @@ router.post('/api/auth/send-otp', async (req, res) => {
           ? 'This email is already registered via Google Sign-In. Please use the Google button to log in.'
           : 'This email already has an account. Please log in instead.',
       });
+    }
+
+    // Google sign-ups that are already verified in this session: do NOT send another OTP.
+    // (Happens when a resident refreshes mid-form and taps "Continue with Google" again.)
+    // Password sign-ups are excluded on purpose — they may have typed a different password.
+    const prior = req.session.pendingRegistration;
+    if (isGoogleSignup && prior && prior.emailVerified && prior.isGoogleSignup &&
+        String(prior.email).toLowerCase() === email.trim().toLowerCase()) {
+      log.info(`[REG] send-otp skipped — ${email.trim()} is already verified in this session (client resumes at step 3) ip=${clientIp(req)}`);
+      return res.json({ success: true, alreadyVerified: true, message: 'Your email is already verified.' });
     }
 
     if (!isGoogleSignup) {
@@ -137,21 +148,62 @@ router.post('/api/auth/verify-otp', async (req, res) => {
       return res.status(400).json({ error: 'Session expired. Please register again.' });
     pending.emailVerified = true;
     req.session.pendingRegistration = pending;
+    log.info(`[REG] email verified: ${pending.email} (${pending.isGoogleSignup ? 'google' : 'password'}) ip=${clientIp(req)}`);
     return res.json({ success: true, message: 'Email verified! Continue to fill in your profile.' });
   } catch (err) {
     return res.status(500).json({ error: 'Server error. Please try again.' });
   }
 });
 
+// Early session guard for complete-registration.
+// Runs AFTER multer has parsed the body (so the browser finishes its upload and can read our
+// JSON reply) but BEFORE processIdDocument (so a dead session never wastes six Cloudinary uploads).
+function requireVerifiedRegistration(req, res, next) {
+  const pending = req.session.pendingRegistration;
+  if (pending && pending.emailVerified) return next();
+
+  const done = req.session.registrationSubmitted;
+  if (!pending && done && Date.now() - done.at < 24 * 60 * 60 * 1000) {
+    // The first request succeeded but the browser never saw the reply (timeout / refresh) and retried.
+    log.info(`[REG] duplicate submit ignored — ${done.email} was already submitted ${Math.round((Date.now() - done.at) / 1000)}s ago (ref=${req._id})`);
+    return res.json({
+      success: true, pending: true, alreadySubmitted: true,
+      message: 'Registration submitted! An admin will review and approve your account shortly.',
+    });
+  }
+
+  const code  = pending ? 'EMAIL_NOT_VERIFIED' : 'SESSION_EXPIRED';
+  const error = pending
+    ? 'Your email has not been verified yet. Please go back to the code step and enter the 6-digit code we emailed you.'
+    : 'Your sign-up session expired before your application could be saved (sessions last 24 hours and end if cookies are cleared). ' +
+      'Please verify your email again — your answers will be restored automatically.';
+  log.warn(
+    `[REG-FAIL] ${code} (HTTP 400) — ${req.headers.cookie ? 'session cookie was sent but no pending registration is stored (expired / server data reset)' : 'NO session cookie sent (cookies blocked or cleared?)'}` +
+    ` | ref=${req._id} ip=${clientIp(req)} body=${req.headers['content-length'] || '?'}B`
+  );
+  return res.status(400).json({ error, code, ref: req._id });
+}
+
 // ════════════════════════════════════════════════════
 // POST /api/auth/complete-registration
 // Accepts multipart/form-data (fields + optional id_front file)
+//
+// Chain: trackUpload → multer → requireVerifiedRegistration → processIdDocument → handler
+// (uploadIdDocs = [multer.fields(...), processIdDocument] — see middleware/upload.js)
 // ════════════════════════════════════════════════════
-router.post('/api/auth/complete-registration', ...uploadIdDocs, async (req, res) => {
+router.post('/api/auth/complete-registration',
+  trackUpload('complete-registration'), uploadIdDocs[0], requireVerifiedRegistration, uploadIdDocs[1],
+  async (req, res) => {
+  const ref = req._id;
+  // One structured WARN line for the log + a specific {error, code, field, ref} for the resident.
+  const fail = (status, code, error, extra = {}) => {
+    log.warn(`[REG-FAIL] ${code} (HTTP ${status}) — ${error} | ref=${ref} email=${(req.session.pendingRegistration || {}).email || '—'} ip=${clientIp(req)}`);
+    return res.status(status).json({ error, code, ref, ...extra });
+  };
   try {
     const pending = req.session.pendingRegistration;
     if (!pending || !pending.emailVerified)
-      return res.status(400).json({ error: 'Email not verified. Please complete Step 2 first.' });
+      return fail(400, 'SESSION_EXPIRED', 'Your sign-up session expired before your application was saved. Please verify your email again — your answers will be restored automatically.');
 
     const {
       firstName, middleName, lastName, suffix, username, birthday, sex, phone, bio,
@@ -162,17 +214,17 @@ router.post('/api/auth/complete-registration', ...uploadIdDocs, async (req, res)
       fatherInfo, motherInfo, guardianInfo, monthlyIncome,
       avatarFaceX, avatarFaceY,
     } = req.body;
-    if (!firstName?.trim()) return res.status(400).json({ error: 'First name is required.' });
-    if (!lastName?.trim())  return res.status(400).json({ error: 'Last name is required.' });
+    if (!firstName?.trim()) return fail(400, 'VALIDATION', 'First name is required.', { field: 'firstName' });
+    if (!lastName?.trim())  return fail(400, 'VALIDATION', 'Last name is required.',  { field: 'lastName' });
     // username validation removed — username field removed from registration form
-    if (!birthday)          return res.status(400).json({ error: 'Date of birth is required.' });
-    if (getAge(birthday) < 13) return res.status(400).json({ error: 'You must be at least 13 years old.' });
-    if (!sex)               return res.status(400).json({ error: 'Sex is required.' });
+    if (!birthday)          return fail(400, 'VALIDATION', 'Date of birth is required.', { field: 'birthday' });
+    if (getAge(birthday) < 13) return fail(400, 'VALIDATION', 'You must be at least 13 years old.', { field: 'birthday' });
+    if (!sex)               return fail(400, 'VALIDATION', 'Sex is required.', { field: 'sex' });
 
-    if (!phone?.trim()) return res.status(400).json({ error: 'Phone number is required.' });
+    if (!phone?.trim()) return fail(400, 'VALIDATION', 'Phone number is required.', { field: 'phone' });
     const phoneClean = phone.trim().replace(/\D/g, '');
     if (!/^(9\d{9}|09\d{9})$/.test(phoneClean))
-      return res.status(400).json({ error: 'Invalid phone number. Enter 10 digits after +63.' });
+      return fail(400, 'VALIDATION', 'Invalid phone number. Enter 10 digits after +63.', { field: 'phone' });
     const phoneFormatted = '+63' + (phoneClean.length === 11 ? phoneClean.slice(1) : phoneClean);
 
     // ⚠️ TESTING MODE: phone uniqueness check disabled — duplicate phones get an auto-suffix
@@ -185,10 +237,10 @@ router.post('/api/auth/complete-registration', ...uploadIdDocs, async (req, res)
     }
     // ── PRODUCTION: uncomment to enforce phone uniqueness (and remove block above) ──
     // if (findUserByPhone(phoneFormatted))
-    //   return res.status(409).json({ error: 'This phone number is already registered to another account.' });
+    //   return fail(409, 'PHONE_TAKEN', 'This phone number is already registered to another account.', { field: 'phone' });
     // Username uniqueness check removed
     if (findUserByEmail(pending.email))
-      return res.status(409).json({ error: 'This email was just registered by someone else.' });
+      return fail(409, 'EMAIL_TAKEN', 'This email was just registered by someone else.', { field: 'email' });
 
     const pg             = req.session.pendingGoogle;
     const hashedPassword = pending.password ? await bcrypt.hash(pending.password, 12) : null;
@@ -280,7 +332,10 @@ router.post('/api/auth/complete-registration', ...uploadIdDocs, async (req, res)
 
     delete req.session.pendingRegistration;
     delete req.session.pendingGoogle;
-    log.success(`Account created and pending approval: @${newUser.username} (${newUser.email})`);
+    // Lets the browser recover if our reply is lost (see GET /api/auth/registration-status) and
+    // turns an accidental double-submit into a harmless success instead of a confusing error.
+    req.session.registrationSubmitted = { email: newUser.email, at: Date.now() };
+    log.success(`Account created and pending approval: @${newUser.username} (${newUser.email}) ref=${ref}${uploadSummary(req)}`);
     log.divider();
 
     // Account is pending approval — do NOT log them in yet
@@ -328,7 +383,7 @@ router.post('/api/auth/complete-registration', ...uploadIdDocs, async (req, res)
     if (isUniquePhone) {
       return res.status(409).json({
         error: 'This phone number is already registered to another account.',
-        field: 'phone',
+        field: 'phone', code: 'PHONE_TAKEN', ref,
         // dev hint surfaced to browser console
         _dev: process.env.NODE_ENV === 'development'
           ? 'SQLITE UNIQUE constraint on users.phone — use a different number or clear the DB.'
@@ -336,13 +391,18 @@ router.post('/api/auth/complete-registration', ...uploadIdDocs, async (req, res)
       });
     }
     if (isUniqueEmail) {
-      return res.status(409).json({ error: 'This email was just registered by someone else.', field: 'email' });
+      return res.status(409).json({ error: 'This email was just registered by someone else.', field: 'email', code: 'EMAIL_TAKEN', ref });
     }
     if (isUniqueUser) {
-      return res.status(409).json({ error: 'Username already taken. Please choose another.', field: 'username' });
+      return res.status(409).json({ error: 'Username already taken. Please choose another.', field: 'username', code: 'USERNAME_TAKEN', ref });
     }
 
-    return res.status(500).json({ error: 'Server error. Please try again.' });
+    log.error(`[REG-FAIL] SERVER_ERROR (HTTP 500) — ref=${ref} ${err.message}`);
+    return res.status(500).json({
+      error: 'Something went wrong while saving your application on our server. Your answers are still saved on this device — please try again in a minute. ' +
+             'If it keeps happening, contact the dorm office and quote the reference code shown.',
+      code: 'SERVER_ERROR', ref,
+    });
   }
 });
 
@@ -728,6 +788,44 @@ router.get('/api/auth/pending-google', (req, res) => {
   if (pg) return res.json({ pending: true, email: pg.email, firstName: pg.firstName, avatar: pg.avatar });
   return res.json({ pending: false });
 });
+
+// ════════════════════════════════════════════════════
+// REGISTRATION RESUME SUPPORT
+// The sign-up state lives in the server session (SQLite store, 24 h), so a page refresh does NOT
+// lose the verified email — the browser just never asked. These endpoints let it ask, so a resident
+// who refreshes (or whose phone reloads the tab after the camera/file picker) resumes at step 3
+// instead of requesting a brand-new OTP.
+// ════════════════════════════════════════════════════
+router.get('/api/auth/registration-status', (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  const p = req.session.pendingRegistration;
+  if (p) {
+    return res.json({
+      active: true,
+      email: p.email,
+      emailVerified: !!p.emailVerified,
+      isGoogleSignup: !!p.isGoogleSignup,
+      firstName: (req.session.pendingGoogle || {}).firstName || null,
+    });
+  }
+  const done = req.session.registrationSubmitted;
+  if (done && Date.now() - done.at < 24 * 60 * 60 * 1000) {
+    return res.json({ active: false, submitted: true, email: done.email });
+  }
+  return res.json({ active: false });
+});
+
+router.post('/api/auth/registration-reset', (req, res) => {
+  const had = req.session.pendingRegistration && req.session.pendingRegistration.email;
+  delete req.session.pendingRegistration;
+  delete req.session.pendingGoogle;
+  delete req.session.registrationSubmitted;
+  if (had) log.info(`[REG] registration reset by the resident ("start over"): ${had} ip=${clientIp(req)}`);
+  return res.json({ success: true });
+});
+
+// Browser-side failure reports (timeouts, offline, page left mid-upload, upload speeds).
+router.post('/api/auth/client-report', clientReportHandler);
 
 // ════════════════════════════════════════════════════
 // GOOGLE OAUTH
