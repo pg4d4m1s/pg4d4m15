@@ -4,7 +4,7 @@
  * WATERFALL DRIVER SYSTEM — drivers are tried in priority order until one
  * accepts the message. Chain (only configured drivers are included):
  *
- *   SENDGRID #1 → #2 → #3 → #4 → #5 → SMTP (Gmail) → CONSOLE
+ *   SENDGRID #1 → #2 → #3 → #4 → #5 → GMAIL API → SMTP (Gmail) → CONSOLE
  *
  * SendGrid accounts (up to 5, each needs a KEY *and* its own verified FROM):
  *
@@ -18,6 +18,14 @@
  *   accounts. A slot with a key but no FROM (or the reverse) is ignored and a
  *   warning is logged at boot. Only account 1 falls back to EMAIL_USER when
  *   SENDGRID_FROM is empty (legacy behaviour).
+ *
+ * Gmail API (HTTPS — works on Railway Free/Hobby where SMTP is blocked):
+ *   GMAIL_CLIENT_ID + GMAIL_CLIENT_SECRET + GMAIL_REFRESH_TOKEN + GMAIL_USER
+ *   OAuth2 refresh-token flow with the gmail.send scope (see utils/gmailApi.js).
+ *   Free, ~500 emails/day for a personal Gmail account. All four variables are
+ *   required; if only some are set the driver is disabled and a warning is
+ *   logged at boot. It is tried after SendGrid, so it acts as the fallback when
+ *   SendGrid hits its daily limit.
  *
  * Gmail SMTP (unchanged):
  *   USE_REAL_EMAIL=true + EMAIL_USER + EMAIL_PASS  (Gmail App Password, 16 chars)
@@ -48,6 +56,7 @@
 'use strict';
 
 const nodemailer = require('nodemailer');
+const { createGmailClient } = require('./gmailApi');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Environment helpers
@@ -104,10 +113,44 @@ const { accounts: SENDGRID_ACCOUNTS, warnings: SENDGRID_WARNINGS } = (() => {
 })();
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Driver chain: SENDGRID #1..#5 → SMTP → CONSOLE
+// Gmail API (HTTPS, OAuth2) — works on Railway Free/Hobby where SMTP is blocked
+// ─────────────────────────────────────────────────────────────────────────────
+const GMAIL_API = (() => {
+  const cfg = {
+    clientId:     env('GMAIL_CLIENT_ID'),
+    clientSecret: env('GMAIL_CLIENT_SECRET'),
+    refreshToken: env('GMAIL_REFRESH_TOKEN'),
+    user:         env('GMAIL_USER'),
+  };
+  const required = {
+    GMAIL_CLIENT_ID:     cfg.clientId,
+    GMAIL_CLIENT_SECRET: cfg.clientSecret,
+    GMAIL_REFRESH_TOKEN: cfg.refreshToken,
+    GMAIL_USER:          cfg.user,
+  };
+  const missing = Object.entries(required).filter(([, v]) => !v).map(([k]) => k);
+
+  if (missing.length === Object.keys(required).length) return { enabled: false, warning: null };
+  if (missing.length) {
+    return {
+      enabled: false,
+      warning: `Gmail API is partly configured — missing ${missing.join(', ')}; Gmail API driver disabled`,
+    };
+  }
+  return {
+    enabled: true,
+    user:    cfg.user,
+    warning: null,
+    client:  createGmailClient({ ...cfg, timeoutMs: HTTP_TIMEOUT_MS }),
+  };
+})();
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Driver chain: SENDGRID #1..#5 → GMAIL API → SMTP → CONSOLE
 // ─────────────────────────────────────────────────────────────────────────────
 const DRIVER_CHAIN = (() => {
   const chain = SENDGRID_ACCOUNTS.map(a => a.driver);
+  if (GMAIL_API.enabled) chain.push('gmailapi');
   if (env('USE_REAL_EMAIL') === 'true') chain.push('smtp');
   chain.push('console'); // always last
   return chain;
@@ -141,6 +184,8 @@ function _isPermanentDriverError(driver, msg = '') {
     'account suspended', 'account has been', 'temporarily blocked', 'unrecognized ip',
     'unrecognised ip', 'not authorized', 'not authorised', 'authentication failed',
     'invalid login', 'maximum credits exceeded',
+    'invalid_grant', 'invalid_client', 'unauthorized_client', 'insufficient permission',
+    'daily user sending limit', 'dailylimitexceeded',
   ].some(s => m.includes(s));
 }
 
@@ -206,10 +251,12 @@ function _redact(s = '') {
 // ─────────────────────────────────────────────────────────────────────────────
 (async () => {
   const label = (d) => d === 'smtp' ? 'Gmail SMTP'
+                     : d === 'gmailapi' ? 'Gmail API'
                      : d === 'console' ? 'Console (fallback)'
                      : `SendGrid #${SENDGRID_ACCOUNTS.find(a => a.driver === d)?.slot}`;
 
   SENDGRID_WARNINGS.forEach(w => console.warn(`⚠️  [emailService] ${w}`));
+  if (GMAIL_API.warning) console.warn(`⚠️  [emailService] ${GMAIL_API.warning}`);
 
   if (DRIVER_CHAIN[0] === 'console') {
     console.log('');
@@ -217,11 +264,11 @@ function _redact(s = '') {
     if (IS_PRODUCTION) {
       console.log('║  ❌  Email driver : NONE CONFIGURED (production)            ║');
       console.log('║  Verification emails will FAIL until you set               ║');
-      console.log('║  SENDGRID_API_KEY + SENDGRID_FROM in Railway variables.    ║');
+      console.log('║  SENDGRID_* or GMAIL_* (Gmail API) in Railway variables.   ║');
     } else {
       console.log('║  📧  Email driver : CONSOLE (development mode)             ║');
       console.log('║  Emails are NOT delivered. OTPs will appear here.          ║');
-      console.log('║  → Set SENDGRID_API_KEY + SENDGRID_FROM, or USE_REAL_EMAIL ║');
+      console.log('║  → Set SENDGRID_*, GMAIL_* (Gmail API) or USE_REAL_EMAIL   ║');
     }
     console.log('╚════════════════════════════════════════════════════════════╝');
     console.log('');
@@ -231,6 +278,7 @@ function _redact(s = '') {
   console.log(`✅ Email driver : ${label(DRIVER_CHAIN[0])}`);
   console.log(`   Chain        : ${DRIVER_CHAIN.map(label).join(' → ')}`);
   SENDGRID_ACCOUNTS.forEach(a => console.log(`   SendGrid #${a.slot}  : from=${a.from}`));
+  if (GMAIL_API.enabled) console.log(`   Gmail API    : user=${GMAIL_API.user}`);
   console.log(`   Console OTP  : ${CONSOLE_COUNTS_AS_SENT ? 'counts as sent (dev / ALLOW_CONSOLE_OTP)' : 'treated as FAILURE (production)'}`);
 
   if (DRIVER_CHAIN.includes('smtp')) await initSMTP();
@@ -287,6 +335,11 @@ async function _sendSMTP({ to, subject, html, text }) {
   return info.messageId;
 }
 
+/** Gmail API over HTTPS. Throws "Gmail API <status>: <detail>" on failure. */
+async function _sendGmailApi({ to, subject, html, text }) {
+  return GMAIL_API.client.send({ fromName: APP_NAME(), to, subject, html, text });
+}
+
 function _sendConsole({ to, subject, text }) {
   const border = '═'.repeat(60);
   console.log('');
@@ -300,6 +353,7 @@ function _sendConsole({ to, subject, text }) {
 
 const _DRIVER_FN = {
   smtp: _sendSMTP,
+  ...(GMAIL_API.enabled ? { gmailapi: _sendGmailApi } : {}),
   ...Object.fromEntries(SENDGRID_ACCOUNTS.map(a => [a.driver, (msg) => _sendSendGrid(a, msg)])),
 };
 
@@ -357,6 +411,7 @@ function getHealth() {
     production: IS_PRODUCTION,
     chain: [...DRIVER_CHAIN],
     sendgridAccounts: SENDGRID_ACCOUNTS.map(a => ({ driver: a.driver, slot: a.slot, from: a.from })),
+    gmailApi: GMAIL_API.enabled ? { user: GMAIL_API.user } : null,
     consoleCountsAsSent: CONSOLE_COUNTS_AS_SENT,
     drivers: Object.fromEntries(Object.entries(_health).map(([name, h]) => [name, {
       status:    h.status,
