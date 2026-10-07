@@ -1,3 +1,4 @@
+<!-- public/admin.html -->
 <!DOCTYPE html>
 <html lang="en" class="h-full">
 <head>
@@ -296,9 +297,9 @@
       </div>
       <div class="flex items-center gap-3">
         <span id="auto-mod-status-label" class="text-xs font-bold px-3 py-1 rounded-full bg-slate-200 dark:bg-slate-700 text-slate-600 dark:text-slate-300">OFF</span>
-        <button id="auto-mod-toggle" onclick="toggleAutoMod()" role="switch" aria-label="Toggle auto AI moderation"
+        <button data-automod-toggle onclick="toggleAutoMod()" role="switch" aria-checked="false" aria-label="Toggle auto AI moderation"
           class="relative w-14 h-7 rounded-full transition-all duration-300 bg-slate-200 dark:bg-slate-700 flex-shrink-0 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:ring-offset-2">
-          <span id="auto-mod-thumb" class="absolute left-1 top-1 w-5 h-5 rounded-full bg-white shadow-md transition-transform duration-300"></span>
+          <span data-automod-thumb data-travel="28" class="absolute left-1 top-1 w-5 h-5 rounded-full bg-white shadow-md transition-transform duration-300"></span>
         </button>
       </div>
     </div>
@@ -938,10 +939,10 @@
             <p class="text-sm font-semibold text-slate-700 dark:text-slate-200 flex items-center gap-1.5"><i class="fa-solid fa-robot text-purple-500"></i> Auto-Moderation</p>
             <p class="text-xs text-slate-400" id="auto-mod-desc">Off — posts require manual review</p>
           </div>
-          <button id="auto-mod-toggle" onclick="toggleAutoMod()" role="switch"
+          <button data-automod-toggle onclick="toggleAutoMod()" role="switch" aria-checked="false" aria-label="Toggle auto AI moderation"
             class="relative w-12 h-6 rounded-full transition-colors duration-200 bg-slate-200 dark:bg-slate-700 flex-shrink-0"
             title="Toggle auto AI moderation">
-            <span id="auto-mod-thumb" class="absolute left-1 top-1 w-4 h-4 rounded-full bg-white shadow transition-transform duration-200"></span>
+            <span data-automod-thumb data-travel="24" class="absolute left-1 top-1 w-4 h-4 rounded-full bg-white shadow transition-transform duration-200"></span>
           </button>
         </div>
         <button onclick="loadAiModerationLog()" class="flex items-center gap-2 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 text-sm font-medium px-4 py-2 rounded-xl hover:bg-slate-50 transition-colors"><i class="fa-solid fa-rotate text-xs"></i>Refresh</button>
@@ -5182,15 +5183,17 @@
   }
   function setAutoModUI(on) {
     _autoModOn = on;
-    const btn = document.getElementById('auto-mod-toggle');
-    const thumb = document.getElementById('auto-mod-thumb');
+    // The switch exists in TWO places (dashboard card + AI Log tab). IDs must be
+    // unique, so both are matched by data-attribute and updated together.
     const desc = document.getElementById('auto-mod-desc');
     const descDash = document.getElementById('auto-mod-desc-dash');
     const label = document.getElementById('auto-mod-status-label');
-    if (btn) {
+    document.querySelectorAll('[data-automod-toggle]').forEach(btn => {
       btn.style.background = on ? '#7c3aed' : '';
-      if (thumb) thumb.style.transform = on ? 'translateX(28px)' : 'translateX(0)';
-    }
+      btn.setAttribute('aria-checked', on ? 'true' : 'false');
+      const thumb = btn.querySelector('[data-automod-thumb]');
+      if (thumb) thumb.style.transform = on ? `translateX(${thumb.dataset.travel || 28}px)` : 'translateX(0)';
+    });
     if (desc) desc.textContent = on ? 'On — posts are auto-reviewed by AI' : 'Off — posts require manual review';
     if (descDash) descDash.textContent = on ? 'ON — new posts are automatically reviewed by AI' : 'When ON, posts are automatically reviewed by AI upon submission';
     if (label) {

@@ -1,3 +1,4 @@
+// routes/admin.js
 /**
  * routes/admin.js — Admin API (v2 — Full Moderation Edition)
  */
@@ -322,15 +323,41 @@ router.delete('/api/admin/users/:id', requireAdmin, (req, res) => {
     log.warn(`Archive before delete failed (non-fatal): ${archiveErr.message}`);
   }
 
-  // ── Clear FK-constrained rows that lack ON DELETE CASCADE ──
-  db.prepare('DELETE FROM bed_assignments WHERE user_id = ?').run(targetId);
-  db.prepare('DELETE FROM dorm_billing    WHERE user_id = ?').run(targetId);
-
-  // ── Hard delete (all other FK tables have ON DELETE CASCADE) ──
-  logAdminAction(req.user?.id || 'system', 'user_deleted', 'user', targetId, `@${user.username} (${user.email})`);
-  db.prepare('DELETE FROM users WHERE id = ?').run(targetId);
-  log.admin(`🗑 DELETED user @${user.username} (${user.email}) — by @${req.user?.username || 'system'}`);
-  res.json({ success: true });
+  // ── Hard delete, atomically ─────────────────────────────
+  // Tables whose user_id FK has NO "ON DELETE CASCADE" must be cleared by hand,
+  // otherwise SQLite aborts with "FOREIGN KEY constraint failed" (the old
+  // behaviour: bed_assignments + dorm_billing were handled, room_history was
+  // missed — so any resident who had ever been unassigned/reassigned could not
+  // be deleted). Keep this list in sync with the schema in utils/db.js:
+  //   bed_assignments.user_id, room_history.user_id, dorm_billing.user_id
+  //   id_verification_requests.reviewed_by (nullable → detach, keep the request)
+  // Everything runs in ONE transaction so a failure can never leave a
+  // half-deleted user (e.g. bed removed but account still present).
+  try {
+    const purge = db.transaction(() => {
+      const cleared = {
+        bed_assignments: db.prepare('DELETE FROM bed_assignments WHERE user_id = ?').run(targetId).changes,
+        room_history:    db.prepare('DELETE FROM room_history    WHERE user_id = ?').run(targetId).changes,
+        dorm_billing:    db.prepare('DELETE FROM dorm_billing    WHERE user_id = ?').run(targetId).changes,
+        reviewer_refs:   db.prepare('UPDATE id_verification_requests SET reviewed_by = NULL WHERE reviewed_by = ?').run(targetId).changes,
+      };
+      logAdminAction(req.user?.id || 'system', 'user_deleted', 'user', targetId, `@${user.username} (${user.email})`);
+      db.prepare('DELETE FROM users WHERE id = ?').run(targetId);
+      return cleared;
+    });
+    const cleared = purge();
+    log.admin(`🗑 DELETED user @${user.username} (${user.email}) — by @${req.user?.username || 'system'} — cleared: ${JSON.stringify(cleared)}`);
+    res.json({ success: true });
+  } catch (e) {
+    // Fail loudly with enough context to find the offending table next time.
+    log.error(`Delete user @${user.username} (${targetId}) FAILED: ${e.message}`);
+    if (String(e.message).includes('FOREIGN KEY')) {
+      // A new table was added with a non-cascading FK and not listed above.
+      // Find it with: PRAGMA foreign_key_check;  (see utils/db.js schema)
+      return res.status(409).json({ error: 'This user still has linked records that block deletion. Check the server log for details.' });
+    }
+    send500(res, e, 'Delete user');
+  }
 });
 
 // ── Deleted Users Archive ─────────────────────────────

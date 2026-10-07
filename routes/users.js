@@ -1,3 +1,4 @@
+// routes/users.js
 /**
  * routes/users.js
  *
@@ -36,7 +37,39 @@ const {
 
 const log = require('../utils/logger');
 
-function publicProfile(user, extras = {}) {
+// ── Location privacy (RA 10173 — data minimisation / proportionality) ─────────
+// Registration stores full addresses as "Barangay, City/Municipality, Province,
+// Region, Philippines" for ELIGIBILITY VERIFICATION. Showing a street-level
+// address to every resident is not needed for a social profile, so other
+// viewers only get the coarse "City/Municipality, Province" part. The full
+// address is returned only to the owner and to admins.
+function coarseLocation(addr) {
+  const parts = String(addr || '').split(',').map(p => p.trim()).filter(Boolean);
+  if (parts.length && /^philippines$/i.test(parts[parts.length - 1])) parts.pop(); // country
+  if (parts.length < 3) return '';   // unknown/legacy format → show nothing rather than risk leaking a street/barangay
+  parts.shift();                     // barangay (most precise part)
+  parts.pop();                       // region
+  return parts.join(', ');           // "City, Province" (NCR has no province → "City")
+}
+
+/**
+ * @param {object}  user
+ * @param {object}  extras
+ * @param {'full'|'coarse'|'none'} [locationMode='coarse']
+ *   full   → owner / admin: exact stored addresses
+ *   coarse → logged-in viewers: City/Municipality + Province only
+ *   none   → anonymous API callers: no location at all
+ */
+function publicProfile(user, extras = {}, locationMode = 'coarse') {
+  let location = '', permanentAddress = '';
+  if (locationMode === 'full') {
+    location = user.location || '';
+    permanentAddress = user.permanentAddress || '';
+  } else if (locationMode === 'coarse') {
+    // permanentAddress is deliberately blank for other viewers; the client falls
+    // back to `location`, which here holds the coarse value.
+    location = coarseLocation(user.permanentAddress) || coarseLocation(user.location);
+  }
   return {
     id:               user.id,
     firstName:        user.firstName,
@@ -47,8 +80,8 @@ function publicProfile(user, extras = {}) {
     avatar:           user.avatar      || '',
     coverPhoto:       user.coverPhoto  || '',
     bio:              user.bio         || '',
-    location:         user.location    || '',
-    permanentAddress: user.permanentAddress || '',
+    location,
+    permanentAddress,
     course:           user.course      || '',
     yearLevel:        user.yearLevel   || '',
     idVerified:       user.idVerified,
@@ -65,7 +98,7 @@ router.get('/api/users/me', requireAuth, (req, res) => {
   if (!user) return res.status(404).json({ error: 'User not found.' });
   res.json({
     user: {
-      ...publicProfile(user),
+      ...publicProfile(user, {}, 'full'),   // owner sees their own full address
       email:       user.email,
       phone:       user.phone,
       birthday:    user.birthday,
@@ -89,7 +122,7 @@ router.put('/api/users/me', requireAuth, (req, res) => {
   updateUser(req.user.id, fields);
   const updated = findUserById(req.user.id);
   log.info(`Profile updated by @${req.user.username} — fields: ${Object.keys(fields).join(', ')}`);
-  res.json({ user: publicProfile(updated) });
+  res.json({ user: publicProfile(updated, {}, 'full') });   // owner's own data
 });
 
 // ════════════════════════════════════════════════════
@@ -153,6 +186,8 @@ router.get('/api/users/:username', (req, res) => {
   }
 
   const viewerId = req.isAuthenticated() ? req.user.id : null;
+  const isOwnerOrAdmin = !!viewerId && (viewerId === user.id || req.user.role === 'admin');
+  const locationMode = isOwnerOrAdmin ? 'full' : (viewerId ? 'coarse' : 'none');
   const reputationScore = getReputationScore(user.id);
   const myVote          = viewerId ? getMyRepVote(viewerId, user.id) : 0;
 
@@ -167,7 +202,7 @@ router.get('/api/users/:username', (req, res) => {
       friendCount:         getFriendCount(user.id),
       reputationScore,
       myVote,
-    })
+    }, locationMode)
   });
 });
 
