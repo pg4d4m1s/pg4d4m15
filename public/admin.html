@@ -921,8 +921,24 @@
     <!-- Open-ended comments -->
     <div class="bg-white dark:bg-slate-900 rounded-2xl border border-slate-100 dark:border-slate-800 p-5">
       <h2 class="font-semibold text-slate-800 dark:text-slate-100 mb-1">Comments &amp; Suggestions</h2>
-      <p class="text-xs text-slate-400 mb-4">Open-ended feedback, newest first.</p>
+      <p class="text-xs text-slate-400 mb-4">Open-ended feedback, newest first. Authors are shown as R-numbers while Anonymize is on; switch it off to see names.</p>
       <div id="research-comments"></div>
+    </div>
+
+    <!-- Residents who have not yet answered the current questionnaire -->
+    <div class="bg-white dark:bg-slate-900 rounded-2xl border border-slate-100 dark:border-slate-800 overflow-hidden mt-6">
+      <div class="px-5 py-4 border-b border-slate-100 dark:border-slate-800 flex items-center justify-between gap-3 flex-wrap">
+        <div>
+          <h2 class="font-semibold text-slate-800 dark:text-slate-100">Not Yet Answered</h2>
+          <p id="research-nonrespondents-summary" class="text-xs text-slate-400 mt-0.5">Loading&hellip;</p>
+        </div>
+        <div class="flex items-center gap-2">
+          <input type="search" placeholder="Search name, email, course&hellip;" oninput="filterNonRespondents(this.value)"
+            class="px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-sm text-slate-700 dark:text-slate-200 w-56"/>
+          <button onclick="exportNonRespondentsExcel()" class="flex items-center gap-2 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 text-sm font-medium px-3 py-2 rounded-xl hover:bg-slate-50 transition-colors"><i class="fa-solid fa-file-excel text-xs"></i> Excel</button>
+        </div>
+      </div>
+      <div id="research-nonrespondents" class="overflow-x-auto max-h-[520px]"></div>
     </div>
   </div>
 
@@ -2616,6 +2632,43 @@
     applyRegFilters();
   }
 
+  // ── Dormitory preferences (room request + roommate note) ─────────────
+  // Shared by the pending-registration card and the user review modal.
+  // roomPref is dorm_rooms.room_number or null; it is what the applicant ASKED for, not an assignment.
+  function dormPrefHtml(roomPref, note) {
+    var hasRoom = roomPref !== null && roomPref !== undefined && roomPref !== '';
+    var n = (note || '').trim();
+    if (!hasRoom && !n) return '';
+    var hd = '<div class="flex items-center gap-2.5 mb-4 pb-2.5 border-b-2 border-slate-100 dark:border-slate-700">'
+      + '<div class="w-7 h-7 rounded-lg bg-slate-100 dark:bg-slate-800 flex items-center justify-center flex-shrink-0"><i class="fa-solid fa-door-open text-slate-500 dark:text-slate-400 text-sm"></i></div>'
+      + '<p class="text-sm font-extrabold text-slate-600 dark:text-slate-300 uppercase tracking-widest">Dormitory Preferences</p></div>';
+    var roomBox = '<div class="px-4 py-3 rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700">'
+      + '<p class="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Room Preference</p>'
+      + '<p class="text-sm font-bold text-slate-700 dark:text-slate-200">' + (hasRoom ? 'Room ' + escHtml(String(roomPref)) : '<span class="font-normal text-slate-400">No preference</span>') + '</p></div>';
+    var noteBox = '<div class="px-4 py-3 rounded-xl bg-indigo-50/60 dark:bg-indigo-950/20 border border-indigo-200 dark:border-indigo-900/40">'
+      + '<p class="text-[10px] font-bold text-indigo-400 uppercase tracking-wider">Note from Applicant</p>'
+      + '<p class="text-sm text-slate-700 dark:text-slate-200 whitespace-pre-wrap leading-relaxed">' + (n ? escHtml(n) : '<span class="text-slate-400">None</span>') + '</p></div>';
+    return '<div class="mb-5">' + hd + '<div class="grid grid-cols-1 md:grid-cols-2 gap-3">' + roomBox + noteBox + '</div></div>';
+  }
+
+  // Chip shown next to an assigned resident's name in Room Management.
+  // Green = they got the room they asked for; amber = assigned elsewhere.
+  function roomPrefChip(st, assignedRoomNo) {
+    if (!st) return '';
+    var pref = st.roomPreference;
+    var noteIcon = st.roommateNote
+      ? '<i class="fa-solid fa-note-sticky text-[11px] text-indigo-400 flex-shrink-0 cursor-help" title="Note: ' + escHtml(st.roommateNote) + '"></i>'
+      : '';
+    if (pref === null || pref === undefined || pref === '') return noteIcon;
+    var match = Number(pref) === Number(assignedRoomNo);
+    var cls = match
+      ? 'bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-300'
+      : 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300';
+    return '<span class="inline-block px-1.5 py-0.5 rounded-md text-[10px] font-bold whitespace-nowrap flex-shrink-0 ' + cls + '" '
+      + 'title="' + (match ? 'Assigned to the room they requested' : 'Requested Room ' + escHtml(String(pref)) + ' — assigned elsewhere') + '">'
+      + 'Pref: Room ' + escHtml(String(pref)) + (match ? ' ✓' : '') + '</span>' + noteIcon;
+  }
+
   function renderRegistrationRow(a){
     const mi    = (a.middle_name||'').trim();
     const miStr = mi ? ' ' + mi[0].toUpperCase() + '.' : '';
@@ -3004,6 +3057,7 @@
 
         <!-- FAMILY INFORMATION -->
         ${familyHtml}
+        ${dormPrefHtml(a.room_preference, a.roommate_note)}
 
         <!-- DOCUMENT REQUIREMENTS -->
         <div>
@@ -4924,6 +4978,7 @@
 
         <!-- FAMILY INFORMATION -->
         ${familyHtml}
+        ${dormPrefHtml(u.roomPreference, u.roommateNote)}
 
         <!-- DOCUMENT REQUIREMENTS -->
         <div>
@@ -5255,7 +5310,7 @@
         const beds = [];
         for (let b = 1; b <= (room.capacity || 4); b++) {
           const asgn = (room.assignments || []).find(a => a.bedNumber === b);
-          beds.push({ bed: b, student: asgn ? { userId: asgn.userId, name: asgn.name } : null });
+          beds.push({ bed: b, student: asgn ? { userId: asgn.userId, name: asgn.name, roomPreference: asgn.roomPreference ?? null, roommateNote: asgn.roommateNote || '' } : null });
         }
         return { roomNo: room.room_number, id: room.id, gender: room.gender, capacity: room.capacity || 4, beds };
       });
@@ -5334,7 +5389,10 @@
             </div>
             <div class="min-w-0">
               <p class="text-xs font-semibold text-slate-700 dark:text-slate-200">Bed ${b.bed}</p>
-              <p class="text-xs font-semibold ${occupied ? 'text-slate-800 dark:text-slate-100' : 'text-slate-400'} truncate max-w-[120px]" title="${occupied ? escHtml(b.student.name||'') : ''}">${occupied ? escHtml(b.student.name || 'Resident') : 'Available'}</p>
+              <div class="flex items-center gap-1.5 flex-wrap">
+                <p class="text-xs font-semibold ${occupied ? 'text-slate-800 dark:text-slate-100' : 'text-slate-400'} truncate max-w-[120px]" title="${occupied ? escHtml(b.student.name||'') : ''}">${occupied ? escHtml(b.student.name || 'Resident') : 'Available'}</p>
+                ${occupied ? roomPrefChip(b.student, r.roomNo) : ''}
+              </div>
             </div>
           </div>
           ${occupied
@@ -5549,6 +5607,11 @@
       <div class="min-w-0">
         <p class="text-sm font-semibold text-slate-800 dark:text-slate-100 truncate">${escHtml(surnameFirst)}</p>
         <p class="text-xs text-slate-400">@${escHtml(u.username)} · ${u.sex || 'N/A'}</p>
+        ${(u.roomPreference !== null && u.roomPreference !== undefined && u.roomPreference !== '') || u.roommateNote
+          ? `<p class="text-xs mt-0.5 ${Number(u.roomPreference) === Number(_assignRoomNo) ? 'text-green-600 font-semibold' : 'text-amber-600'}">`
+            + (u.roomPreference !== null && u.roomPreference !== undefined && u.roomPreference !== '' ? `Prefers Room ${escHtml(String(u.roomPreference))}` : 'No room preference')
+            + (u.roommateNote ? ` · <span class="text-indigo-500" title="${escHtml(u.roommateNote)}">has note</span>` : '') + `</p>`
+          : ''}
       </div>
     </div>`;
   }

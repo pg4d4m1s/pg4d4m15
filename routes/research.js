@@ -6,8 +6,12 @@
  *   POST /api/research/survey            submit answers (logged-in resident)
  *
  * Admin:
- *   GET  /api/admin/research/stats       aggregate weighted means + interpretations
- *   GET  /api/admin/research/responses   individual responses (optionally anonymized)
+ *   GET  /api/admin/research/stats             aggregate weighted means + interpretations,
+ *                                              plus written comments with their author
+ *                                              (anonymized unless ?anonymize=0)
+ *   GET  /api/admin/research/responses         individual responses (optionally anonymized)
+ *   GET  /api/admin/research/non-respondents   approved residents who have not yet answered
+ *                                              the current questionnaire
  *
  * Delivery: a dismissible card pinned above the feed (public/js/resident-survey.js),
  * eligible as soon as the account/feed is reachable. The email in the row is
@@ -34,6 +38,7 @@ const {
   hasResponded,
   getResponses,
   getStats,
+  getNonRespondents,
 } = require('../utils/researchSurvey');
 
 /**
@@ -170,9 +175,15 @@ router.get('/api/research/survey/status', (req, res) => {
 // ADMIN
 // ════════════════════════════════════════════════════════════════════
 
+/** ?anonymize=0|false turns anonymizing off; anything else (including absent) keeps it ON. */
+function wantsAnonymize(req) {
+  const v = String(req.query.anonymize ?? '1').toLowerCase();
+  return !(v === '0' || v === 'false');
+}
+
 router.get('/api/admin/research/stats', requireAdmin, (req, res) => {
   try {
-    return res.json({ success: true, stats: getStats() });
+    return res.json({ success: true, stats: getStats({ anonymize: wantsAnonymize(req) }) });
   } catch (err) {
     return send500(res, err, 'admin/research/stats');
   }
@@ -190,6 +201,16 @@ router.get('/api/admin/research/responses', requireAdmin, (req, res) => {
     });
   } catch (err) {
     return send500(res, err, 'admin/research/responses');
+  }
+});
+
+router.get('/api/admin/research/non-respondents', requireAdmin, (req, res) => {
+  try {
+    const result = getNonRespondents();
+    log.info(`[Research] Non-respondents requested by @${req.user?.username || '?'} — ${result.nonRespondents.length} of ${result.eligibleCount} approved residents have not answered`);
+    return res.json({ success: true, ...result });
+  } catch (err) {
+    return send500(res, err, 'admin/research/non-respondents');
   }
 });
 

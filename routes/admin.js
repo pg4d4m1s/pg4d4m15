@@ -235,6 +235,7 @@ router.get('/api/admin/users', requireAdmin, (req, res) => {
       u.id_verified, u.is_active, u.role, u.avatar, u.created_at, u.account_status,
       u.sex, u.course, u.year_level,
       u.present_address, u.permanent_address,
+      u.room_preference, u.roommate_note,
       dr.room_number, ba.bed_number
     FROM users u
     LEFT JOIN bed_assignments ba ON ba.user_id = u.id
@@ -254,6 +255,8 @@ router.get('/api/admin/users', requireAdmin, (req, res) => {
     permanentAddress: r.permanent_address || '',
     roomNumber: r.room_number || '',   // Bed assignment (null if unassigned)
     bedNumber:  r.bed_number  || '',
+    roomPreference: r.room_preference ?? null,   // what the resident ASKED for at registration (not an assignment)
+    roommateNote:   r.roommate_note   || '',
   }));
   res.json({ users });
 });

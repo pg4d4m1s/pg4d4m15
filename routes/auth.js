@@ -23,6 +23,7 @@ const {
   getPendingAccounts, approveAccount, rejectAccount,
   saveOTP, verifyOTP, saveResetOTP, verifyResetOTP, consumeResetOTP,
   recordFailedLogin, checkLoginLock, clearLoginAttempts,
+  getRoomAvailability, resolveRoomPreference,
 } = require('../utils/db');
 
 // ─── helpers ────────────────────────────────────────
@@ -213,6 +214,7 @@ router.post('/api/auth/complete-registration',
       schoolName, course, yearLevel, schoolAddress, specialization,
       fatherInfo, motherInfo, guardianInfo, monthlyIncome,
       avatarFaceX, avatarFaceY,
+      roomPreference, roommateNote,
     } = req.body;
     if (!firstName?.trim()) return fail(400, 'VALIDATION', 'First name is required.', { field: 'firstName' });
     if (!lastName?.trim())  return fail(400, 'VALIDATION', 'Last name is required.',  { field: 'lastName' });
@@ -241,6 +243,24 @@ router.post('/api/auth/complete-registration',
     // Username uniqueness check removed
     if (findUserByEmail(pending.email))
       return fail(409, 'EMAIL_TAKEN', 'This email was just registered by someone else.', { field: 'email' });
+
+    // ── Room preference (optional) + roommate note (optional) ──────────────
+    // The picker only offers rooms that matched the applicant's sex and had a
+    // free bed, but that was a moment ago — re-check here. A bad value fails
+    // loudly (ROOM_UNAVAILABLE, not VALIDATION, so the wizard stays on Step 5
+    // instead of bouncing to Step 3). Empty = "No preference" and is fine.
+    const roomCheck = resolveRoomPreference(roomPreference, sex);
+    if (!roomCheck.ok) {
+      log.warn(`[REG] Room preference rejected (${roomCheck.reason}) — value="${String(roomPreference).slice(0, 20)}" sex=${sex} ref=${ref}`);
+      return fail(409, 'ROOM_UNAVAILABLE',
+        'The room you selected is no longer available. Please choose another room (or "No preference") and submit again.',
+        { field: 'roomPreference' });
+    }
+    // Free text: strip control characters, trim, cap at 300 chars (the form enforces the same cap).
+    const roommateNoteClean = String(roommateNote || '')
+      .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '')
+      .trim()
+      .slice(0, 300);
 
     const pg             = req.session.pendingGoogle;
     const hashedPassword = pending.password ? await bcrypt.hash(pending.password, 12) : null;
@@ -277,6 +297,8 @@ router.post('/api/auth/complete-registration',
       emailVerified:    true,
       idVerified:       false,
       authProvider:     pg ? 'google' : 'local',
+      roomPreference:   roomCheck.roomNumber,   // number | null
+      roommateNote:     roommateNoteClean,
     });
 
     log.divider('NEW REGISTRATION');
@@ -297,6 +319,8 @@ router.post('/api/auth/complete-registration',
       specialization:   specialization || '(none)',
       monthlyIncome:    monthlyIncome || '(not set)',
       guardianInfo:     guardianInfo ? '(provided — both parents marked deceased)' : '(none)',
+      roomPreference:   roomCheck.roomNumber ? `Room ${roomCheck.roomNumber}` : '(no preference)',
+      roommateNote:     roommateNoteClean ? `(${roommateNoteClean.length} chars)` : '(none)',
       authProvider:     pg ? 'google' : 'local',
     });
 
@@ -517,6 +541,26 @@ router.get('/api/auth/check-phone', (req, res) => {
   else if (raw.length === 12 && raw.startsWith('63')) tenDigits = raw.slice(2);
   else return res.status(400).json({ available: false, error: 'Invalid phone format.' });
   return res.json({ available: !findUserByPhone('+63' + tenDigits) });
+});
+
+// ════════════════════════════════════════════════════
+// ROOM AVAILABILITY (registration Step 5 — room preference picker)
+// Public on purpose: applicants have no account yet. Returns counts only
+// (free beds + how many people already prefer the room) — never names.
+// Rate-limited with checkLimiter in server.js.
+// ════════════════════════════════════════════════════
+router.get('/api/auth/room-availability', (req, res) => {
+  try {
+    const sex = String(req.query.sex || '').toLowerCase();
+    if (sex !== 'male' && sex !== 'female')
+      return res.status(400).json({ error: 'sex must be "male" or "female".' });
+    const rooms = getRoomAvailability(sex);
+    res.set('Cache-Control', 'no-store');   // live numbers — never serve a stale list
+    return res.json({ success: true, sex, rooms });
+  } catch (err) {
+    log.error(`[room-availability] ${err.message}`);
+    return res.status(500).json({ error: 'Could not load room availability. Please try again.' });
+  }
 });
 
 // ════════════════════════════════════════════════════

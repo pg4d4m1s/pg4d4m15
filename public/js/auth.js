@@ -121,6 +121,9 @@ async function go(from) {
   document.querySelector('.overflow-y-auto').scrollTop = 0;
   RegResilience.onStepChange(currentStep);   // save progress so a refresh resumes here
 
+  // Step 5 has the live room-preference picker — (re)load it every time the step is entered.
+  if (currentStep === 5) loadRoomPreferences(false);
+
   // When entering step 3, re-run availability checks on any pre-filled fields
   if (currentStep === 3) {
     initAddrDropdowns();
@@ -1676,6 +1679,121 @@ function buildLocationString() {
 }
 
 // ═══════════════════════════════════════════════════
+// ROOM PREFERENCE (Step 5) — live list of rooms that still have free beds
+// ═══════════════════════════════════════════════════
+// Backed by GET /api/auth/room-availability?sex=… (public, counts only).
+// A pick is a REQUEST stored on the application; it never assigns a bed.
+// The chosen room number lives in the hidden input #reg-room-pref so
+// RegResilience can save/restore it with the rest of the draft.
+var _roomPrefRooms = [];      // last list received from the server
+var _roomPrefSeq   = 0;       // guards against out-of-order responses
+var _roomPrefTimer = null;    // light polling while Step 5 is on screen
+
+function _roomPrefStatus(msg, isError) {
+  var el = $('room-pref-status');
+  if (!el) return;
+  el.textContent = msg || '';
+  el.className = 'text-xs mt-2 ' + (isError ? 'text-amber-600' : 'text-slate-400');
+}
+
+function _roomPrefCard(attrs, selected, inner, extraCls) {
+  return '<button type="button" role="radio" aria-checked="' + (selected ? 'true' : 'false') + '" ' + attrs +
+    ' class="text-left rounded-xl border-2 px-3 py-2.5 transition-all ' + (extraCls || '') + ' ' +
+    (selected
+      ? 'border-blue-500 bg-blue-50 dark:bg-blue-950/30 ring-2 ring-blue-200 dark:ring-blue-900'
+      : 'border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 hover:border-blue-300') +
+    '">' + inner + '</button>';
+}
+
+function renderRoomPrefList() {
+  var list = $('room-pref-list');
+  if (!list) return;
+  var selected = ($('reg-room-pref') || {}).value || '';
+
+  var html = _roomPrefCard('onclick="selectRoomPref(\'\')"', selected === '',
+    '<p class="text-sm font-bold text-slate-700 dark:text-slate-100"><i class="fa-solid fa-shuffle text-slate-400 mr-1.5"></i>No preference</p>' +
+    '<p class="text-xs text-slate-400 mt-0.5">Let the dormitory manager decide.</p>', 'col-span-2');
+
+  _roomPrefRooms.forEach(function (r) {
+    var n        = Number(r.roomNumber);
+    var free     = Number(r.freeBeds);
+    var cap      = Number(r.capacity);
+    var wanted   = Number(r.interested);
+    var inDemand = wanted > 0 && wanted >= free;
+    var demandHtml = wanted === 0
+      ? '<p class="text-xs text-slate-400 mt-0.5">No requests yet</p>'
+      : '<p class="text-xs mt-0.5 ' + (inDemand ? 'text-amber-600 font-semibold' : 'text-slate-500') + '">' +
+          '<i class="fa-solid fa-users text-[10px] mr-1"></i>' + wanted + ' want' + (wanted === 1 ? 's' : '') + ' this room' +
+          (inDemand ? ' &middot; high demand' : '') + '</p>';
+    html += _roomPrefCard('onclick="selectRoomPref(' + n + ')"', String(n) === String(selected),
+      '<p class="text-sm font-bold text-slate-700 dark:text-slate-100"><i class="fa-solid fa-door-open text-teal-500 mr-1.5"></i>Room ' + n + '</p>' +
+      '<p class="text-xs text-green-600 font-semibold mt-0.5">' + free + ' of ' + cap + ' bed' + (cap === 1 ? '' : 's') + ' free</p>' +
+      demandHtml);
+  });
+
+  if (!_roomPrefRooms.length) {
+    html += '<p class="col-span-2 text-xs text-slate-400 py-2 text-center">No rooms with free beds right now. You can still submit with no preference.</p>';
+  }
+  list.innerHTML = html;
+}
+
+function selectRoomPref(roomNumber) {
+  var el = $('reg-room-pref');
+  if (!el) return;
+  el.value = roomNumber === '' || roomNumber == null ? '' : String(roomNumber);
+  renderRoomPrefList();
+}
+
+async function loadRoomPreferences(manual) {
+  var list = $('room-pref-list');
+  if (!list) return;
+
+  var sexEl = document.querySelector('input[name="sex"]:checked');
+  var sex   = sexEl ? sexEl.value : '';
+  if (sex !== 'male' && sex !== 'female') {
+    _roomPrefRooms = [];
+    list.innerHTML = '<p class="col-span-2 text-xs text-slate-400 py-3 text-center">Select your sex in Step 3 to see the rooms available to you.</p>';
+    return;
+  }
+
+  var seq = ++_roomPrefSeq;
+  if (manual) _roomPrefStatus('Refreshing\u2026');
+
+  try {
+    var res  = await fetch('/api/auth/room-availability?sex=' + encodeURIComponent(sex), { cache: 'no-store' });
+    var data = await res.json().catch(function () { return {}; });
+    if (seq !== _roomPrefSeq) return;                       // a newer request already answered
+    if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
+
+    _roomPrefRooms = Array.isArray(data.rooms) ? data.rooms : [];
+
+    // A selected room that has filled up (or no longer matches the sex chosen in Step 3) is dropped.
+    var cur = ($('reg-room-pref') || {}).value || '';
+    if (cur && !_roomPrefRooms.some(function (r) { return String(r.roomNumber) === String(cur); })) {
+      $('reg-room-pref').value = '';
+      showToast('Room ' + cur + ' is no longer available \u2014 please choose another room.', 'info');
+    }
+
+    renderRoomPrefList();
+    _roomPrefStatus(_roomPrefRooms.length + ' room' + (_roomPrefRooms.length === 1 ? '' : 's') +
+      ' with free beds \u00b7 updated ' + new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
+
+    if (!_roomPrefTimer) {
+      _roomPrefTimer = setInterval(function () {
+        if (currentStep !== 5) { clearInterval(_roomPrefTimer); _roomPrefTimer = null; return; }
+        if (!document.hidden) loadRoomPreferences(false);
+      }, 30000);
+    }
+  } catch (e) {
+    if (seq !== _roomPrefSeq) return;
+    console.warn('[DAMIS] room availability failed:', e.message);
+    // Keep whatever list we already had; the field is optional so this never blocks submitting.
+    if (!_roomPrefRooms.length) renderRoomPrefList();
+    _roomPrefStatus('Could not load rooms (' + e.message + '). You can tap Refresh, or submit with no preference.', true);
+  }
+}
+
+// ═══════════════════════════════════════════════════
 // COMPLETE REGISTRATION (Step 5 submit button)
 // ═══════════════════════════════════════════════════
 async function completeRegistration() {
@@ -1796,6 +1914,10 @@ async function completeRegistration() {
     }
     fd.append('monthlyIncome', $('reg-income') ? $('reg-income').value : '');
 
+    // Room preference (optional request — empty string = no preference) + note for the dorm manager.
+    fd.append('roomPreference', $('reg-room-pref') ? $('reg-room-pref').value : '');
+    fd.append('roommateNote',   $('reg-roommate-note') ? $('reg-roommate-note').value.trim().slice(0, 300) : '');
+
     // Attach DAMIS document files + profile photo.
     // Photos are resized to ≤1600 px JPEG first (a 4 MB phone photo → a few hundred KB) and files are copied
     // into memory, so the upload is small and cannot be broken by a picker file disappearing (reg-resilience.js).
@@ -1868,6 +1990,8 @@ async function completeRegistration() {
           if (phoneEl) phoneEl.focus();
         }
       } else {
+        // The picked room filled up / was removed between picking and submitting → refresh the list so they can re-pick.
+        if (fl.code === 'ROOM_UNAVAILABLE') loadRoomPreferences(true);
         showStepError(5, errMsg);
       }
       btn.disabled = false;

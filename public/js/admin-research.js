@@ -6,7 +6,8 @@
  *   2. Per-characteristic weighted means (the Chapter 4 summary table)
  *   3. Per-item frequency distribution + weighted mean (the Chapter 4 detail tables)
  *   4. Individual responses, with an anonymize toggle
- *   5. Open-ended comments
+ *   5. Open-ended comments, each with its author (follows the anonymize toggle)
+ *   6. Residents who have not yet answered the current questionnaire
  *
  * Loaded as a separate script from admin.html so the 400 KB inline script does
  * not have to grow. It relies on these globals already defined there:
@@ -19,6 +20,8 @@
 
   var _stats      = null;
   var _responses  = [];
+  var _nonResp    = null;   // { eligibleCount, respondedCount, nonRespondents[] }
+  var _nonRespQuery = '';
   var _anonymize  = true;   // default ON — the study reports responses anonymously
   var _loading    = false;
 
@@ -281,12 +284,66 @@
     }
 
     box.innerHTML = _stats.comments.map(function (c) {
+      // Server already blanks name/email when anonymized; authorName is then "Respondent N".
+      var who = '<span class="font-semibold text-slate-600 dark:text-slate-300">' + esc(c.authorName || c.respondentLabel || '—') + '</span>' +
+        (c.respondentLabel && !_anonymize ? ' <span class="text-slate-300 dark:text-slate-600">(' + esc(c.respondentLabel) + ')</span>' : '') +
+        (!_anonymize && c.email ? ' &middot; ' + esc(c.email) : '');
       return '' +
         '<div class="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-100 dark:border-slate-800 mb-2">' +
           '<p class="text-sm text-slate-600 dark:text-slate-300 leading-relaxed whitespace-pre-wrap">' + esc(c.text) + '</p>' +
-          '<p class="text-xs text-slate-400 mt-1.5">' + esc(when(c.submittedAt)) + '</p>' +
+          '<p class="text-xs text-slate-400 mt-1.5">' + who + ' &middot; ' + esc(when(c.submittedAt)) + '</p>' +
         '</div>';
     }).join('');
+  }
+
+  function renderNonRespondents() {
+    var box = $id('research-nonrespondents');
+    var sum = $id('research-nonrespondents-summary');
+    if (!box) return;
+    if (!_nonResp) { box.innerHTML = ''; return; }
+
+    var all = _nonResp.nonRespondents || [];
+    if (sum) {
+      sum.textContent = all.length + ' of ' + _nonResp.eligibleCount + ' approved resident' +
+        (_nonResp.eligibleCount === 1 ? '' : 's') + ' have not answered yet (' + _nonResp.respondedCount + ' answered).';
+    }
+    if (!all.length) {
+      box.innerHTML = '<p class="text-sm text-green-600 py-6 text-center"><i class="fa-solid fa-circle-check mr-1"></i>Every approved resident has answered.</p>';
+      return;
+    }
+
+    var q = _nonRespQuery.trim().toLowerCase();
+    var list = q ? all.filter(function (r) {
+      return (r.fullName + ' ' + r.username + ' ' + r.email + ' ' + r.course).toLowerCase().indexOf(q) !== -1;
+    }) : all;
+
+    var rows = list.map(function (r, i) {
+      var ctx  = [r.yearLevel, r.course].filter(Boolean).join(' · ');
+      var room = r.roomNumber ? 'Room ' + esc(r.roomNumber) + (r.bedNumber ? ' · Bed ' + esc(r.bedNumber) : '') : '<span class="text-slate-300">unassigned</span>';
+      return '' +
+        '<tr class="border-t border-slate-100 dark:border-slate-800">' +
+          '<td class="px-3 py-2.5 text-slate-400 tabular-nums">' + (i + 1) + '</td>' +
+          '<td class="px-3 py-2.5"><p class="font-semibold text-slate-700 dark:text-slate-200">' + esc(r.lastName ? r.lastName + ', ' + r.firstName : r.fullName) + '</p>' +
+            '<p class="text-xs text-slate-400">@' + esc(r.username) + ' &middot; ' + esc(r.email) + '</p></td>' +
+          '<td class="px-3 py-2.5 text-xs text-slate-500">' + esc(ctx || '—') + '</td>' +
+          '<td class="px-3 py-2.5 text-xs text-slate-500">' + room + '</td>' +
+          '<td class="px-3 py-2.5 text-xs">' + (r.answeredOlderVersion
+            ? '<span class="px-2 py-0.5 rounded-lg bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300 font-semibold">answered older version</span>'
+            : '<span class="text-slate-400">no response</span>') + '</td>' +
+        '</tr>';
+    }).join('');
+
+    box.innerHTML = list.length
+      ? '<table class="w-full text-sm min-w-[640px]"><thead><tr class="text-left text-xs text-slate-500 dark:text-slate-400 uppercase tracking-wider">' +
+          '<th class="px-3 py-2.5 font-semibold w-10">#</th><th class="px-3 py-2.5 font-semibold">Resident</th>' +
+          '<th class="px-3 py-2.5 font-semibold">Year · Course</th><th class="px-3 py-2.5 font-semibold">Room</th>' +
+          '<th class="px-3 py-2.5 font-semibold">Status</th></tr></thead><tbody>' + rows + '</tbody></table>'
+      : '<p class="text-sm text-slate-400 py-6 text-center">No matches.</p>';
+  }
+
+  function filterNonRespondents(q) {
+    _nonRespQuery = q || '';
+    renderNonRespondents();
   }
 
   function renderAnonToggle() {
@@ -318,16 +375,19 @@
 
     try {
       var results = await Promise.all([
-        fetch('/api/admin/research/stats').then(function (r) { return r.json(); }),
+        fetch('/api/admin/research/stats?anonymize=' + (_anonymize ? '1' : '0')).then(function (r) { return r.json(); }),
         fetch('/api/admin/research/responses?anonymize=' + (_anonymize ? '1' : '0')).then(function (r) { return r.json(); }),
+        fetch('/api/admin/research/non-respondents').then(function (r) { return r.json(); }),
       ]);
 
-      var statsRes = results[0], respRes = results[1];
+      var statsRes = results[0], respRes = results[1], nonRes = results[2];
       if (statsRes.error) throw new Error(statsRes.error);
       if (respRes.error)  throw new Error(respRes.error);
+      if (nonRes.error)   throw new Error(nonRes.error);
 
       _stats     = statsRes.stats;
       _responses = respRes.responses || [];
+      _nonResp   = nonRes;
 
       console.log('[Research] Loaded — ' + _stats.respondentCount + ' respondent(s), overall mean ' +
                   _stats.overallMean + ' (' + _stats.overallInterpretation + '), instrument ' +
@@ -339,6 +399,7 @@
       renderItems();
       renderResponses();
       renderComments();
+      renderNonRespondents();
 
       var ver = $id('research-version');
       if (ver) ver.textContent = _stats.instrumentVersion;
@@ -440,9 +501,29 @@
     );
   }
 
+  /** Follow-up list for the researcher — names are intentionally included (see getNonRespondents). */
+  function exportNonRespondentsExcel() {
+    if (!_nonResp || !_nonResp.nonRespondents.length) { notify('No non-respondents to export', 'error'); return; }
+    var rows = _nonResp.nonRespondents.map(function (r) {
+      return {
+        'Last Name':  r.lastName,
+        'First Name': r.firstName,
+        'Username':   r.username,
+        'Email':      r.email,
+        'Year Level': r.yearLevel,
+        'Course':     r.course,
+        'Room':       r.roomNumber ? r.roomNumber + (r.bedNumber ? '-' + r.bedNumber : '') : '',
+        'Status':     r.answeredOlderVersion ? 'Answered older version' : 'No response',
+      };
+    });
+    exportToExcel(rows, Object.keys(rows[0]), 'DAMIS_Questionnaire_NonRespondents.xlsx', 'Not yet answered');
+  }
+
   // Expose the handlers referenced from admin.html markup.
   window.loadResearchTab         = loadResearchTab;
   window.toggleResearchAnonymize = toggleResearchAnonymize;
   window.exportResearchExcel     = exportResearchExcel;
   window.exportResearchPDF       = exportResearchPDF;
+  window.filterNonRespondents    = filterNonRespondents;
+  window.exportNonRespondentsExcel = exportNonRespondentsExcel;
 })();

@@ -465,7 +465,10 @@ function getResponses({ anonymize = false } = {}) {
  * The weighted mean here is Σfx / N exactly as defined in the manuscript:
  * each rating is a weight, each respondent contributes one frequency count.
  */
-function getStats() {
+function getStats({ anonymize = true } = {}) {
+  // `anonymize` only affects who each written comment is attributed to; every
+  // number below is aggregate. It defaults to TRUE so any caller that forgets
+  // the flag gets the study-safe behaviour rather than leaking identities.
   // Scoped to the CURRENT instrument version. v1 (registration-scoped
   // wording) and v2 (system-wide wording) answer the same item codes with
   // different statements — averaging them together would silently blend two
@@ -541,12 +544,105 @@ function getStats() {
     overallInterpretation: interpret(overall),
     // Comments are the qualitative half of the data — surfaced here so the
     // admin tab can show them without a second round trip.
-    comments: db.prepare(`
-      SELECT comments, submitted_at
-        FROM research_survey_responses
-       WHERE TRIM(COALESCE(comments,'')) <> ''
-       ORDER BY submitted_at DESC
-    `).all().map(r => ({ text: r.comments, submittedAt: r.submitted_at })),
+    comments: getComments({ anonymize }),
+  };
+}
+
+/**
+ * Written comments with their author. Respondent numbers use the same
+ * chronological scheme as getResponses() (R1 = first person to answer), so
+ * "R7" in the comments list is the same person as "R7" in Individual Responses.
+ *
+ * When anonymize is true, name / email / username are blanked and only the
+ * R-label is returned — the identity never leaves the server.
+ */
+function getComments({ anonymize = true } = {}) {
+  const numbering = db.prepare(
+    'SELECT id, submitted_at, rowid AS row_seq FROM research_survey_responses'
+  ).all().sort((a, b) =>
+    String(a.submitted_at).localeCompare(String(b.submitted_at)) || (a.row_seq - b.row_seq));
+  const respondentNo = new Map(numbering.map((r, i) => [r.id, i + 1]));
+
+  const rows = db.prepare(`
+    SELECT r.id, r.comments, r.submitted_at, r.email, r.full_name,
+           u.username       AS username,
+           u.first_name     AS first_name,
+           u.last_name      AS last_name,
+           u.account_status AS account_status
+      FROM research_survey_responses r
+      LEFT JOIN users u ON lower(u.email) = r.email
+     WHERE TRIM(COALESCE(r.comments, '')) <> ''
+     ORDER BY r.submitted_at DESC, r.rowid DESC
+  `).all();
+
+  return rows.map(r => {
+    const n = respondentNo.get(r.id);
+    const realName = [r.first_name, r.last_name].filter(Boolean).join(' ') || r.full_name || '';
+    return {
+      text:            r.comments,
+      submittedAt:     r.submitted_at,
+      respondentLabel: `R${n}`,
+      authorName:      anonymize ? `Respondent ${n}` : realName,
+      email:           anonymize ? '' : r.email,
+      username:        anonymize ? '' : (r.username || ''),
+      accountStatus:   r.account_status || 'not_found',
+    };
+  });
+}
+
+/**
+ * Approved residents who have NOT answered the CURRENT instrument version.
+ * Same eligibility the feed card uses (a signed-in resident), same version
+ * check as hasResponded() — so this list is exactly "who will still see the
+ * questionnaire card".
+ *
+ * `answeredOlderVersion` flags people who only answered a superseded
+ * instrument (v1): they are still non-respondents for the current one, but the
+ * admin may want to know they aren't strangers to the survey.
+ *
+ * Names/emails are returned regardless of the anonymize toggle — the list
+ * holds no answers, and its purpose is to let the researcher follow up.
+ */
+function getNonRespondents() {
+  const eligible = db.prepare(`
+    SELECT COUNT(*) AS c FROM users
+     WHERE account_status = 'approved' AND is_active = 1 AND role = 'user'
+  `).get().c;
+
+  const rows = db.prepare(`
+    SELECT u.id, u.first_name, u.middle_name, u.last_name, u.suffix, u.username, u.email,
+           u.year_level, u.course, u.created_at,
+           dr.room_number, ba.bed_number,
+           EXISTS (SELECT 1 FROM research_survey_responses o WHERE o.email = lower(u.email)) AS answered_older
+      FROM users u
+      LEFT JOIN bed_assignments ba ON ba.user_id = u.id
+      LEFT JOIN dorm_rooms dr      ON dr.id = ba.room_id
+     WHERE u.account_status = 'approved' AND u.is_active = 1 AND u.role = 'user'
+       AND NOT EXISTS (
+             SELECT 1 FROM research_survey_responses r
+              WHERE r.email = lower(u.email) AND r.instrument_version = ?)
+     ORDER BY u.last_name COLLATE NOCASE, u.first_name COLLATE NOCASE
+  `).all(INSTRUMENT_VERSION);
+
+  const nonRespondents = rows.map(r => ({
+    userId:               r.id,
+    fullName:             [r.first_name, r.middle_name, r.last_name, r.suffix].filter(Boolean).join(' '),
+    lastName:             r.last_name || '',
+    firstName:            r.first_name || '',
+    username:             r.username || '',
+    email:                r.email || '',
+    yearLevel:            r.year_level || '',
+    course:               r.course || '',
+    roomNumber:           r.room_number || '',
+    bedNumber:            r.bed_number || '',
+    joinedAt:             r.created_at,
+    answeredOlderVersion: !!r.answered_older,
+  }));
+
+  return {
+    eligibleCount:   eligible,
+    respondedCount:  eligible - nonRespondents.length,
+    nonRespondents,
   };
 }
 
@@ -565,4 +661,6 @@ module.exports = {
   hasResponded,
   getResponses,
   getStats,
+  getComments,
+  getNonRespondents,
 };

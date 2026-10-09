@@ -496,6 +496,10 @@
       if (o.region) addr[p] = o;
     });
     var news = $('chk-news'); if (news) fields['chk-news'] = news.checked ? 1 : 0;
+    // Step 5 is not scanned wholesale (it holds the T&C checkbox, which must never be auto-restored),
+    // so the two optional Step 5 inputs are saved explicitly. Restore is generic by element id.
+    var roomPref = $('reg-room-pref');       if (roomPref && roomPref.value) fields['reg-room-pref'] = roomPref.value;
+    var roomNote = $('reg-roommate-note');   if (roomNote && roomNote.value) fields['reg-roommate-note'] = roomNote.value;
     return { v: 1, email: verifiedEmail(), step: curStep(), fields: fields, addr: addr };
   }
 
@@ -582,6 +586,7 @@
     try { currentStep = n; } catch (e) {}
     call('updateProgress', n);
     var sc = document.querySelector('.overflow-y-auto'); if (sc) sc.scrollTop = 0;
+    if (n === 5) call('loadRoomPreferences', false);   // resumed straight onto Step 5 → populate the live room list
   }
 
   async function restoreDraft(d) {
@@ -631,6 +636,7 @@
       // 5) refresh phone counters / formatting (input handlers)
       ['father-phone', 'mother-phone', 'guardian-phone'].forEach(function (id) { var el = $(id); if (el && el.value) el.dispatchEvent(new Event('input', { bubbles: true })); });
       var rp = $('reg-phone'); if (rp && rp.value) call('validatePhoneInline');
+      var rn = $('reg-roommate-note'); if (rn && rn.value) rn.dispatchEvent(new Event('input', { bubbles: true }));   // refresh the 0/300 counter
 
       // 6) photo + documents
       if (d.step >= 4 || (await FileStore.get('avatar'))) restored.avatar = await restoreAvatar(f);

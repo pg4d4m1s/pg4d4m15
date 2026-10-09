@@ -563,8 +563,9 @@ function createUser(userData) {
       suffix, username, birthday, sex, civil_status, phone, bio, location,
       present_address, permanent_address, school_name, course, year_level, school_address,
       father_info, mother_info, guardian_info, monthly_income, specialization,
-      avatar, avatar_face_x, avatar_face_y, email_verified, id_verified, auth_provider, role, account_status)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      avatar, avatar_face_x, avatar_face_y, email_verified, id_verified, auth_provider, role, account_status,
+      room_preference, roommate_note)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     id,
     userData.googleId || null,
@@ -599,7 +600,9 @@ function createUser(userData) {
     userData.idVerified ? 1 : 0,
     userData.authProvider || 'local',
     userData.role || 'user',
-    accountStatus
+    accountStatus,
+    Number.isInteger(userData.roomPreference) ? userData.roomPreference : null,
+    userData.roommateNote || ''
   );
   return findUserById(id);
 }
@@ -664,6 +667,8 @@ function dbRowToUser(row) {
     avatarFaceX:      row.avatar_face_x     ?? 50,
     avatarFaceY:      row.avatar_face_y     ?? 50,
     specialization:   row.specialization    || '',
+    roomPreference:   row.room_preference   ?? null,   // dorm_rooms.room_number, or null = no preference
+    roommateNote:     row.roommate_note     || '',
   };
 }
 
@@ -1614,6 +1619,7 @@ function getPendingAccounts() {
            u.father_info, u.mother_info, u.guardian_info, u.monthly_income,
            u.created_at, u.auth_provider,
            u.avatar_face_x, u.avatar_face_y,
+           u.room_preference, u.roommate_note,
            ivr.id as verif_id, ivr.id_front_url, ivr.id_back_url, ivr.selfie_url, ivr.id_type,
            ivr.cert_residency_url, ivr.cert_low_income_url, ivr.cert_enrollment_url
     FROM users u
@@ -1677,7 +1683,8 @@ function getDormRooms() {
     GROUP BY r.id
     ORDER BY r.room_number
   `).all();
-  return rooms.map(r => {
+  // Mutates each room in place (assignments/available); the array is returned below.
+  rooms.forEach(r => {
     const assignments = [];
     if (r.assignments_raw) {
       r.assignments_raw.split('|').forEach(a => {
@@ -1689,8 +1696,104 @@ function getDormRooms() {
     delete r.assignments_raw;
     r.assignments = assignments;
     r.available = r.capacity - r.occupied;
-    return r;
   });
+  // Attach each resident's room preference (+ note) so Room Management can show it
+  // next to their name. Looked up separately because the GROUP_CONCAT above is
+  // delimiter-based and must not carry free-text.
+  const prefRows = db.prepare(`
+    SELECT b.user_id, u.room_preference, u.roommate_note
+      FROM bed_assignments b JOIN users u ON u.id = b.user_id
+  `).all();
+  const prefByUser = new Map(prefRows.map(p => [p.user_id, p]));
+  rooms.forEach(room => room.assignments.forEach(a => {
+    const p = prefByUser.get(a.userId);
+    a.roomPreference = p ? (p.room_preference ?? null) : null;
+    a.roommateNote   = p ? (p.roommate_note || '') : '';
+  }));
+  return rooms;
+}
+
+// ── Room preference (registration) ─────────────────────────────────────────────
+
+/** 'male' | 'female' | null from the free-form users.sex value. */
+function normalizeRoomGender(sex) {
+  const v = String(sex || '').trim().toLowerCase();
+  if (v === 'male'   || v === 'm') return 'male';
+  if (v === 'female' || v === 'f') return 'female';
+  return null;
+}
+
+/**
+ * Live availability for the registration form: every room of the applicant's
+ * gender that still has at least one free bed, plus how many pending/approved
+ * residents who have NOT yet been given a bed have asked for that room.
+ *
+ * Counts only — no names — because the caller is an unauthenticated applicant.
+ * "interested" is demand, not a reservation: admins still assign beds manually,
+ * so a room can show more interested applicants than free beds.
+ *
+ * @returns {{ roomNumber:number, capacity:number, occupied:number, freeBeds:number, interested:number }[]}
+ */
+function getRoomAvailability(sex) {
+  const gender = normalizeRoomGender(sex);
+  if (!gender) return [];
+
+  const rooms = db.prepare(`
+    SELECT r.room_number, r.capacity, COUNT(b.id) AS occupied
+      FROM dorm_rooms r
+      LEFT JOIN bed_assignments b ON b.room_id = r.id
+     WHERE r.gender = ?
+     GROUP BY r.id
+     ORDER BY r.room_number
+  `).all(gender);
+
+  const demandRows = db.prepare(`
+    SELECT u.room_preference AS room_number, COUNT(*) AS n
+      FROM users u
+     WHERE u.room_preference IS NOT NULL
+       AND u.role = 'user'
+       AND u.is_active = 1
+       AND u.account_status IN ('pending', 'approved')
+       AND NOT EXISTS (SELECT 1 FROM bed_assignments ba WHERE ba.user_id = u.id)
+     GROUP BY u.room_preference
+  `).all();
+  const demand = new Map(demandRows.map(d => [d.room_number, d.n]));
+
+  return rooms
+    .map(r => ({
+      roomNumber: r.room_number,
+      capacity:   r.capacity,
+      occupied:   r.occupied,
+      freeBeds:   r.capacity - r.occupied,
+      interested: demand.get(r.room_number) || 0,
+    }))
+    .filter(r => r.freeBeds > 0);
+}
+
+/**
+ * Server-side check of a submitted room preference. The client list is only a
+ * convenience — the room could have filled up, been deleted, or the form could
+ * have been tampered with, so the registration route re-validates here.
+ *
+ * @returns {{ ok:true, roomNumber:number|null } | { ok:false, reason:'invalid'|'not_found'|'gender_mismatch'|'full' }}
+ *   roomNumber null means "no preference" (empty input is valid).
+ */
+function resolveRoomPreference(raw, sex) {
+  if (raw === undefined || raw === null || String(raw).trim() === '') return { ok: true, roomNumber: null };
+  const n = Number(String(raw).trim());
+  if (!Number.isInteger(n) || n < 1) return { ok: false, reason: 'invalid' };
+
+  const room = db.prepare(`
+    SELECT r.room_number, r.gender, r.capacity, COUNT(b.id) AS occupied
+      FROM dorm_rooms r
+      LEFT JOIN bed_assignments b ON b.room_id = r.id
+     WHERE r.room_number = ?
+     GROUP BY r.id
+  `).get(n);
+  if (!room) return { ok: false, reason: 'not_found' };
+  if (room.gender !== normalizeRoomGender(sex)) return { ok: false, reason: 'gender_mismatch' };
+  if (room.capacity - room.occupied <= 0) return { ok: false, reason: 'full' };
+  return { ok: true, roomNumber: n };
 }
 
 function assignBed(roomId, bedNumber, userId, assignedBy, notes) {
@@ -1977,6 +2080,16 @@ migrate(`ALTER TABLE deleted_users ADD COLUMN semester_tag TEXT DEFAULT ''`);
 migrate(`ALTER TABLE deleted_users ADD COLUMN guardian_info TEXT DEFAULT ''`);
 // Per-user admission slip serial counter (reset each semester rollover)
 migrate(`ALTER TABLE users ADD COLUMN admission_no TEXT DEFAULT ''`);
+
+// ── Room preference + roommate note (captured at registration, Step 5) ─────────
+// room_preference stores the dorm_rooms.room_number the applicant would like
+// (NULL = no preference). It is a PREFERENCE ONLY — it never creates a
+// bed_assignment; admins still assign beds manually. Storing the room number
+// rather than dorm_rooms.id keeps it meaningful if a room row is re-created.
+migrate(`ALTER TABLE users ADD COLUMN room_preference INTEGER DEFAULT NULL`);
+// Free-text request from the applicant, e.g. "I'd like to share a room with Maria Santos".
+migrate(`ALTER TABLE users ADD COLUMN roommate_note TEXT DEFAULT ''`);
+db.exec(`CREATE INDEX IF NOT EXISTS idx_users_room_pref ON users(room_preference);`);
 
 // idx_users_status depends on account_status, which is only guaranteed to exist
 // once the migration above (and the account_status migration earlier in this
@@ -2314,6 +2427,7 @@ module.exports = {
   getFullUserProfile,
   // Dormitory Management
   getDormRooms, assignBed, unassignBed, getRoomHistory,
+  getRoomAvailability, resolveRoomPreference,
   getDormBilling, generateMonthlyBills, generateBillForUser, markBillPaid, markBillUnpaid, waiveBill, setBillComment,
   // Reputation
   getReputationScore, getMyRepVote, setRepVote,
