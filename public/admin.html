@@ -126,6 +126,9 @@
       <button onclick="loadDormDashboard()" class="flex items-center gap-2 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 text-sm font-medium px-4 py-2 rounded-xl hover:bg-slate-50 transition-colors"><i class="fa-solid fa-rotate text-xs"></i>Refresh</button>
     </div>
 
+    <!-- Dormitory Manager ISO/IEC 25010 questionnaire — rendered by /js/admin-manager-survey.js -->
+    <div id="manager-survey-card" class="mb-6"></div>
+
     <!-- ── Primary KPIs (top hero row) ── -->
     <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-4">
       <!-- Total Residents -->
@@ -862,6 +865,15 @@
   <!-- ═══ AI MODERATION LOG ═══ -->
   <!-- ═══ RESEARCH — Student Residents Questionnaire ═══ -->
   <div id="tab-research" class="tab-content">
+    <!-- Two separate datasets: residents and dormitory manager are never mixed -->
+    <div class="inline-flex rounded-xl bg-slate-100 dark:bg-slate-800 p-1 mb-6" role="tablist">
+      <button id="research-seg-residents" onclick="setResearchPanel('residents')" role="tab"
+        class="px-4 py-1.5 rounded-lg text-sm font-semibold transition-colors bg-brand-600 text-white">Student Residents</button>
+      <button id="research-seg-manager" onclick="setResearchPanel('manager')" role="tab"
+        class="px-4 py-1.5 rounded-lg text-sm font-semibold transition-colors text-slate-600 dark:text-slate-300">Dormitory Manager</button>
+    </div>
+
+    <div id="research-panel-residents">
     <div class="flex items-center justify-between mb-6 flex-wrap gap-3">
       <div>
         <h1 class="font-display font-bold text-2xl text-slate-900 dark:text-slate-100">Research</h1>
@@ -893,7 +905,14 @@
     <!-- Headline figures -->
     <div id="research-headline" class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6"></div>
 
-    <!-- Per-characteristic summary (the Chapter 4 summary table) -->
+    <!-- Profile of the respondents (Chapter 3, section 1) -->
+    <div class="bg-white dark:bg-slate-900 rounded-2xl border border-slate-100 dark:border-slate-800 p-5 mb-6">
+      <h2 class="font-semibold text-slate-800 dark:text-slate-100 mb-1">Profile of the Respondents</h2>
+      <p class="text-xs text-slate-400 mb-4">Age, sex, year level, program and origin of the residents who answered. Counts only &mdash; included in the Excel and PDF exports.</p>
+      <div id="research-profile"></div>
+    </div>
+
+    <!-- Per-characteristic summary (the Chapter 3 summary table) -->
     <div class="bg-white dark:bg-slate-900 rounded-2xl border border-slate-100 dark:border-slate-800 overflow-hidden mb-6">
       <div class="px-5 py-4 border-b border-slate-100 dark:border-slate-800">
         <h2 class="font-semibold text-slate-800 dark:text-slate-100">Level of Acceptability by Quality Characteristic</h2>
@@ -940,6 +959,10 @@
       </div>
       <div id="research-nonrespondents" class="overflow-x-auto max-h-[520px]"></div>
     </div>
+    </div><!-- /research-panel-residents -->
+
+    <!-- Dormitory Manager results — rendered by /js/admin-manager-survey.js -->
+    <div id="research-panel-manager" class="hidden"><div id="manager-research-root"></div></div>
   </div>
 
   <div id="tab-ai-log" class="tab-content">
@@ -1584,6 +1607,7 @@
 
 <script src="/js/api.js"></script>
 <script src="/js/admin-research.js"></script>
+<script src="/js/admin-manager-survey.js"></script>
 <script>
   let currentUser=null, allUsers=[], allPosts=[], statsChart=null, provChart=null;
   let _lastStats = null; // cached latest /api/admin/stats response

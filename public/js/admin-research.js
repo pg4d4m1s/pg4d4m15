@@ -8,6 +8,12 @@
  *   4. Individual responses, with an anonymize toggle
  *   5. Open-ended comments, each with its author (follows the anonymize toggle)
  *   6. Residents who have not yet answered the current questionnaire
+ *   7. Respondent profile (age, sex, year level, program, school, origin)
+ *
+ * Exports: a multi-sheet Excel workbook (results, profile, per-respondent responses,
+ * comments, report info) and a multi-section PDF (profile, acceptability, item analysis,
+ * comments). The Dormitory Manager panel lives in admin-manager-survey.js and reuses
+ * the helpers exposed on window.DAMISResearchUI at the bottom of this file.
  *
  * Loaded as a separate script from admin.html so the 400 KB inline script does
  * not have to grow. It relies on these globals already defined there:
@@ -24,6 +30,8 @@
   var _nonRespQuery = '';
   var _anonymize  = true;   // default ON — the study reports responses anonymously
   var _loading    = false;
+  var _profile    = null;   // { n, ageStats, tables{…}, respondents[] } from /api/admin/research/profile
+  var _profById   = {};     // response id → enriched respondent row
 
   function $id(id) { return document.getElementById(id); }
 
@@ -127,6 +135,52 @@
     }).join('');
   }
 
+  function renderProfile() {
+    var box = $id('research-profile');
+    if (!box) return;
+    if (!_profile) {
+      box.innerHTML = '<p class="text-sm text-slate-400 py-6 text-center">Respondent profile is unavailable — see the browser console.</p>';
+      return;
+    }
+    if (!_profile.n) {
+      box.innerHTML = '<p class="text-sm text-slate-400 py-6 text-center">No respondents yet.</p>';
+      return;
+    }
+
+    var t = _profile.tables, a = _profile.ageStats;
+    var ageNote = a.n
+      ? 'Mean ' + a.mean + ' · SD ' + (a.sd === null ? '—' : a.sd) + ' · range ' + a.min + '–' + a.max +
+        (a.missing ? ' · ' + a.missing + ' without a usable birthday' : '')
+      : 'No usable birthdays on record';
+
+    var blocks = [
+      ['Age',                  t.age,           ageNote],
+      ['Sex',                  t.sex,           ''],
+      ['Year Level',           t.yearLevel,     ''],
+      ['School',               t.school,        ''],
+      ['Program',              t.program,       ''],
+      ['Origin',               t.origin,        ''],
+      ['Municipality / City',  t.municipality,  ''],
+      ['Application Status',   t.accountStatus, 'Respondents whose account is not “approved” may not belong in the resident sample.'],
+    ];
+
+    box.innerHTML = '<div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">' + blocks.map(function (b) {
+      var rows = b[1].map(function (r) {
+        return '<tr class="border-t border-slate-100 dark:border-slate-800">' +
+          '<td class="px-3 py-1.5 text-slate-700 dark:text-slate-300">' + esc(r.label) + '</td>' +
+          '<td class="px-3 py-1.5 text-right tabular-nums text-slate-500">' + r.count + '</td>' +
+          '<td class="px-3 py-1.5 text-right tabular-nums text-slate-500">' + r.percent.toFixed(2) + '%</td></tr>';
+      }).join('');
+      return '<div class="rounded-xl border border-slate-100 dark:border-slate-800 overflow-hidden">' +
+        '<div class="px-3 py-2 bg-slate-50 dark:bg-slate-800/60"><p class="text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">' + esc(b[0]) + '</p>' +
+        (b[2] ? '<p class="text-xs text-slate-400 mt-0.5">' + esc(b[2]) + '</p>' : '') + '</div>' +
+        '<table class="w-full text-sm"><tbody>' + rows +
+        '<tr class="border-t-2 border-slate-200 dark:border-slate-700 font-bold"><td class="px-3 py-1.5">Total</td>' +
+        '<td class="px-3 py-1.5 text-right tabular-nums">' + _profile.n + '</td><td class="px-3 py-1.5 text-right tabular-nums">100.00%</td></tr>' +
+        '</tbody></table></div>';
+    }).join('') + '</div>';
+  }
+
   function renderCharacteristics() {
     var box = $id('research-characteristics');
     if (!box || !_stats) return;
@@ -134,7 +188,7 @@
     if (!_stats.respondentCount) {
       box.innerHTML = '<div class="py-12 text-center text-sm text-slate-400">' +
         '<i class="fa-solid fa-clipboard-question text-3xl mb-3 block opacity-40"></i>' +
-        'No questionnaire responses yet. Answers appear here as applicants submit Step 5 of the application.' +
+        'No questionnaire responses yet. Answers appear here as residents submit the questionnaire card on their feed.' +
         '</div>';
       return;
     }
@@ -252,7 +306,12 @@
         : '<p class="font-semibold text-slate-700 dark:text-slate-200">' + esc(r.fullName || '—') + '</p>' +
           '<p class="text-xs text-slate-400">' + esc(r.email) + '</p>';
 
-      var context = [r.yearLevel, r.course].filter(Boolean).join(' · ');
+      var p = _profById[r.id] || {};
+      var context = [
+        r.yearLevel, r.course,
+        (p.sex && p.sex !== 'Not specified') ? p.sex : '',
+        (p.ageBand && p.ageBand !== 'Not specified') ? 'Age ' + p.ageBand : '',
+      ].filter(Boolean).join(' · ');
 
       return '' +
         '<tr class="border-t border-slate-100 dark:border-slate-800 align-top">' +
@@ -389,12 +448,26 @@
       _responses = respRes.responses || [];
       _nonResp   = nonRes;
 
+      // Profile is additive: if it fails, the rest of the tab (and the results exports) still work.
+      try {
+        var profRes = await fetch('/api/admin/research/profile?anonymize=' + (_anonymize ? '1' : '0')).then(function (r) { return r.json(); });
+        if (profRes.error) throw new Error(profRes.error);
+        _profile = profRes.profile;
+        _profById = {};
+        (_profile.respondents || []).forEach(function (r) { _profById[r.id] = r; });
+      } catch (pe) {
+        console.error('[Research] Profile load failed:', pe);
+        _profile = null; _profById = {};
+        notify('Respondent profile could not be loaded: ' + pe.message, 'error');
+      }
+
       console.log('[Research] Loaded — ' + _stats.respondentCount + ' respondent(s), overall mean ' +
                   _stats.overallMean + ' (' + _stats.overallInterpretation + '), instrument ' +
                   _stats.instrumentVersion);
 
       renderAnonToggle();
       renderHeadline();
+      renderProfile();
       renderCharacteristics();
       renderItems();
       renderResponses();
@@ -471,34 +544,214 @@
     return out;
   }
 
+  /** json_to_sheet with column widths sized to content (capped so long statements don't explode the sheet). */
+  function sheetFromRows(rows, maxWidth) {
+    var ws = XLSX.utils.json_to_sheet(rows);
+    var keys = Object.keys(rows[0] || {});
+    ws['!cols'] = keys.map(function (k) {
+      var w = k.length;
+      rows.forEach(function (r) { var l = String(r[k] == null ? '' : r[k]).length; if (l > w) w = l; });
+      return { wch: Math.min(Math.max(w + 2, 8), maxWidth || 60) };
+    });
+    return ws;
+  }
+
+  function profileSheetRows() {
+    var t = _profile.tables, a = _profile.ageStats, out = [];
+    function block(title, rows) {
+      out.push([title, '', '', '']);
+      rows.forEach(function (r) { out.push(['', r.label, r.count, r.percent]); });
+      out.push(['', 'Total', _profile.n, 100]);
+      out.push(['', '', '', '']);
+    }
+    out.push(['Dimension', 'Category', 'f', '%']);
+    block('Age', t.age);
+    out.push(['', 'Mean age', a.mean == null ? '' : a.mean, '']);
+    out.push(['', 'Standard deviation', a.sd == null ? '' : a.sd, '']);
+    out.push(['', 'Youngest – oldest', a.n ? a.min + ' – ' + a.max : '', '']);
+    out.push(['', 'Respondents with a usable birthday', a.n, '']);
+    out.push(['', '', '', '']);
+    block('Sex', t.sex);
+    block('Year Level', t.yearLevel);
+    block('School', t.school);
+    block('Program', t.program);
+    block('Origin', t.origin);
+    block('Municipality / City', t.municipality);
+    block('Application Status', t.accountStatus);
+    return out;
+  }
+
+  function responseSheetRows() {
+    var chars = _stats.characteristics;
+    return (_profile.respondents || []).slice().sort(function (a, b) { return a.respondentNo - b.respondentNo; }).map(function (r) {
+      var row = { 'Respondent': r.respondentLabel };
+      if (!_anonymize) { row['Name'] = r.fullName; row['Email'] = r.email; }
+      row['Application Status'] = r.accountStatus === 'not_found' ? 'No account' : r.accountStatus;
+      row['Sex']        = r.sex;
+      row['Age Band']   = r.ageBand;
+      if (!_anonymize) { row['Age'] = r.age == null ? '' : r.age; }
+      row['Year Level'] = r.yearLevel;
+      row['Program']    = r.program;
+      row['School']     = r.school;
+      row['Origin']     = r.origin;
+      if (!_anonymize) { row['Municipality / City'] = r.municipality; }
+      chars.forEach(function (ch) { ch.items.forEach(function (it) { row[it.code] = r.answers[it.code] == null ? '' : r.answers[it.code]; }); });
+      chars.forEach(function (ch) { row[ch.code + ' mean'] = r.means[ch.code] == null ? '' : r.means[ch.code]; });
+      row['Overall']        = r.overallMean == null ? '' : r.overallMean;
+      row['Interpretation'] = r.interpretation;
+      row['Submitted']      = r.submittedAt;
+      return row;
+    });
+  }
+
   function exportResearchExcel() {
     var rows = researchItemRows();
-    if (!rows.length) { notify('No data to export', 'error'); return; }
-    var headers = Object.keys(rows[0]);
-    exportToExcel(rows, headers, 'DAMIS_Student_Residents_Questionnaire.xlsx', 'ISO25010 Results');
+    if (!rows.length || !_stats.respondentCount) { notify('No data to export', 'error'); return; }
+
+    var wb = XLSX.utils.book_new();
+
+    // Sheet 1 keeps the original name and columns — it is the sheet Chapter 3's item tables are built from.
+    XLSX.utils.book_append_sheet(wb, sheetFromRows(rows, 70), 'ISO25010 Results');
+
+    if (_profile && _profile.n) {
+      var wsP = XLSX.utils.aoa_to_sheet(profileSheetRows());
+      wsP['!cols'] = [{ wch: 22 }, { wch: 42 }, { wch: 8 }, { wch: 10 }];
+      XLSX.utils.book_append_sheet(wb, wsP, 'Respondent Profile');
+
+      var resp = responseSheetRows();
+      if (resp.length) {
+        var wsR = sheetFromRows(resp, 30);
+        wsR['!autofilter'] = { ref: wsR['!ref'] };
+        XLSX.utils.book_append_sheet(wb, wsR, 'Responses');
+      }
+    }
+
+    if (_stats.comments.length) {
+      XLSX.utils.book_append_sheet(wb, sheetFromRows(_stats.comments.map(function (c) {
+        var row = { 'Respondent': c.respondentLabel };
+        if (!_anonymize) { row['Name'] = c.authorName; row['Email'] = c.email; }
+        row['Comment']   = c.text;
+        row['Submitted'] = c.submittedAt;
+        return row;
+      }), 100), 'Comments');
+    }
+
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([
+      ['Report',              'Student Residents Questionnaire — ISO/IEC 25010'],
+      ['Instrument version',  _stats.instrumentVersion],
+      ['Respondents (n)',     _stats.respondentCount],
+      ['Earlier-version responses excluded', _stats.legacyRespondentCount || 0],
+      ['Identities',          _anonymize ? 'Anonymized (exact age and municipality omitted from per-respondent rows)' : 'Visible'],
+      ['Weighted mean',       'Σfx / N'],
+      ['Interpretation',      '4.21–5.00 Very Highly Acceptable · 3.41–4.20 Highly Acceptable · 2.61–3.40 Moderately Acceptable · 1.81–2.60 Slightly Acceptable · 1.00–1.80 Not Acceptable'],
+      ['Generated',           new Date().toLocaleString()],
+    ]), 'Report Info');
+
+    XLSX.writeFile(wb, 'DAMIS_Student_Residents_Questionnaire.xlsx');
+    notify('DAMIS_Student_Residents_Questionnaire.xlsx downloaded');
   }
 
   function exportResearchPDF() {
     if (!_stats || !_stats.respondentCount) { notify('No data to export', 'error'); return; }
-    var rows = _stats.characteristics.map(function (ch) {
-      return {
-        characteristic: ch.name,
-        mean:           num(ch.mean),
-        interpretation: ch.interpretation,
-      };
-    });
-    rows.push({ characteristic: 'OVERALL', mean: num(_stats.overallMean), interpretation: _stats.overallInterpretation });
+    var jsPDF = window.jspdf && window.jspdf.jsPDF;
+    if (!jsPDF) { notify('PDF library not loaded', 'error'); return; }
 
-    exportToPDF(
-      rows,
-      [
-        { header: 'ISO/IEC 25010 Characteristic', dataKey: 'characteristic' },
-        { header: 'Weighted Mean',                dataKey: 'mean' },
-        { header: 'Interpretation',               dataKey: 'interpretation' },
-      ],
-      'DAMIS_Student_Residents_Questionnaire.pdf',
-      'Level of Acceptability — Student Residents (n=' + _stats.respondentCount + ')'
-    );
+    var doc   = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' });
+    var pageW = doc.internal.pageSize.getWidth();
+    var pageH = doc.internal.pageSize.getHeight();
+    var title = 'Student Residents Questionnaire — ISO/IEC 25010 Results';
+    var sub   = 'n = ' + _stats.respondentCount + '  ·  instrument ' + _stats.instrumentVersion + '  ·  ' +
+                (_anonymize ? 'responses anonymized' : 'identities visible');
+
+    if (typeof _pdfHeader === 'function') {
+      _pdfHeader(doc, title, sub);
+    } else {
+      doc.setFontSize(14); doc.setFont('helvetica', 'bold'); doc.text(title, 14, 16);
+      doc.setFontSize(9);  doc.setFont('helvetica', 'normal'); doc.text(sub, 14, 22);
+    }
+
+    var y = 60;
+    var HEAD = { fillColor: [99, 102, 241], textColor: 255, fontStyle: 'bold' };
+
+    function section(heading) {
+      if (y > pageH - 40) { doc.addPage(); y = 18; }
+      doc.setFontSize(11); doc.setFont('helvetica', 'bold'); doc.setTextColor(30);
+      doc.text(heading, 14, y);
+      y += 3;
+    }
+    function table(head, body, columnStyles) {
+      doc.autoTable({
+        startY: y, head: [head], body: body,
+        styles: { fontSize: 8, cellPadding: 2, overflow: 'linebreak' },
+        headStyles: HEAD,
+        alternateRowStyles: { fillColor: [248, 250, 252] },
+        columnStyles: columnStyles || {},
+        margin: { left: 14, right: 14, bottom: 16 },
+        rowPageBreak: 'avoid',
+      });
+      y = doc.lastAutoTable.finalY + 9;
+    }
+
+    // 1. Profile
+    if (_profile && _profile.n) {
+      var a = _profile.ageStats, t = _profile.tables;
+      section('1. Profile of the Respondents  (n = ' + _profile.n + ')');
+      var prow = [];
+      [['Age', t.age], ['Sex', t.sex], ['Year Level', t.yearLevel], ['School', t.school], ['Origin', t.origin]].forEach(function (b) {
+        b[1].forEach(function (r, i) { prow.push([i === 0 ? b[0] : '', r.label, String(r.count), r.percent.toFixed(2) + '%']); });
+      });
+      table(['Dimension', 'Category', 'f', '%'], prow, { 2: { halign: 'right' }, 3: { halign: 'right' } });
+      if (a.n) {
+        doc.setFontSize(8.5); doc.setFont('helvetica', 'normal'); doc.setTextColor(90);
+        doc.text('Age: mean ' + a.mean + ', SD ' + (a.sd === null ? '—' : a.sd) + ', range ' + a.min + '–' + a.max +
+                 (a.missing ? '  (' + a.missing + ' without a usable birthday)' : ''), 14, y - 4);
+        doc.setTextColor(0); y += 4;
+      }
+    }
+
+    // 2. Acceptability by characteristic
+    section('2. Level of Acceptability by Quality Characteristic');
+    var crow = _stats.characteristics.map(function (ch) { return [ch.name, num(ch.mean), ch.interpretation]; });
+    crow.push([{ content: 'OVERALL', styles: { fontStyle: 'bold' } }, { content: num(_stats.overallMean), styles: { fontStyle: 'bold' } },
+               { content: _stats.overallInterpretation, styles: { fontStyle: 'bold' } }]);
+    table(['ISO/IEC 25010 Characteristic', 'Weighted Mean', 'Interpretation'], crow, { 1: { halign: 'center' } });
+
+    // 3. Item analysis
+    section('3. Item Analysis');
+    var irow = [];
+    _stats.characteristics.forEach(function (ch) {
+      irow.push([{ content: ch.name + '  —  mean ' + num(ch.mean) + ' (' + ch.interpretation + ')', colSpan: 10,
+                   styles: { fillColor: [224, 231, 255], fontStyle: 'bold', textColor: [49, 46, 129] } }]);
+      ch.items.forEach(function (it) {
+        var f = it.frequency;
+        irow.push([it.code, it.text, String(f[5]), String(f[4]), String(f[3]), String(f[2]), String(f[1]), String(it.responses), num(it.mean), it.interpretation]);
+      });
+    });
+    table(['Code', 'Statement', '5', '4', '3', '2', '1', 'N', 'WM', 'Interpretation'], irow, {
+      0: { cellWidth: 12 }, 1: { cellWidth: 'auto' },
+      2: { cellWidth: 9, halign: 'center' }, 3: { cellWidth: 9, halign: 'center' }, 4: { cellWidth: 9, halign: 'center' },
+      5: { cellWidth: 9, halign: 'center' }, 6: { cellWidth: 9, halign: 'center' }, 7: { cellWidth: 10, halign: 'center' },
+      8: { cellWidth: 14, halign: 'center' }, 9: { cellWidth: 38 },
+    });
+
+    // 4. Comments
+    if (_stats.comments.length) {
+      section('4. Comments and Suggestions');
+      table(['Respondent', 'Comment'], _stats.comments.map(function (c) {
+        return [_anonymize ? c.respondentLabel : (c.authorName || c.respondentLabel), c.text];
+      }), { 0: { cellWidth: 38 } });
+    }
+
+    // footer
+    var pages = doc.internal.getNumberOfPages();
+    for (var i = 1; i <= pages; i++) {
+      doc.setPage(i);
+      doc.setFontSize(8); doc.setTextColor(130);
+      doc.text('Page ' + i + ' of ' + pages, pageW - 14, pageH - 8, { align: 'right' });
+    }
+
+    doc.save('DAMIS_Student_Residents_Questionnaire.pdf');
+    notify('DAMIS_Student_Residents_Questionnaire.pdf downloaded');
   }
 
   /** Follow-up list for the researcher — names are intentionally included (see getNonRespondents). */
@@ -518,6 +771,12 @@
     });
     exportToExcel(rows, Object.keys(rows[0]), 'DAMIS_Questionnaire_NonRespondents.xlsx', 'Not yet answered');
   }
+
+  // Shared with admin-manager-survey.js (loaded after this file).
+  window.DAMISResearchUI = {
+    esc: esc, num: num, badge: badge, when: when, notify: notify,
+    isAnonymized: function () { return _anonymize; },
+  };
 
   // Expose the handlers referenced from admin.html markup.
   window.loadResearchTab         = loadResearchTab;

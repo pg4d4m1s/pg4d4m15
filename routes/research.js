@@ -12,6 +12,15 @@
  *   GET  /api/admin/research/responses         individual responses (optionally anonymized)
  *   GET  /api/admin/research/non-respondents   approved residents who have not yet answered
  *                                              the current questionnaire
+ *   GET  /api/admin/research/profile           respondent profile (age, sex, year level, program, origin)
+ *                                              frequency tables + enriched per-respondent rows
+ *
+ * Dormitory Manager questionnaire (separate table + stats, never mixed with residents):
+ *   GET    /api/admin/research/manager/questionnaire   instrument spec
+ *   GET    /api/admin/research/manager/mine            the signed-in admin's own answers (prefill + card state)
+ *   POST   /api/admin/research/manager/survey          submit / update
+ *   GET    /api/admin/research/manager/stats           weighted means + comments + respondent list
+ *   DELETE /api/admin/research/manager/responses/:id   remove a test submission
  *
  * Delivery: a dismissible card pinned above the feed (public/js/resident-survey.js),
  * eligible as soon as the account/feed is reachable. The email in the row is
@@ -40,6 +49,8 @@ const {
   getStats,
   getNonRespondents,
 } = require('../utils/researchSurvey');
+const { buildProfile }  = require('../utils/researchProfile');
+const manager = require('../utils/managerSurvey');
 
 /**
  * Same contract as requireAdmin in routes/admin.js, duplicated rather than
@@ -211,6 +222,86 @@ router.get('/api/admin/research/non-respondents', requireAdmin, (req, res) => {
     return res.json({ success: true, ...result });
   } catch (err) {
     return send500(res, err, 'admin/research/non-respondents');
+  }
+});
+
+router.get('/api/admin/research/profile', requireAdmin, (req, res) => {
+  try {
+    const profile = buildProfile({ anonymize: wantsAnonymize(req) });
+    return res.json({ success: true, profile });
+  } catch (err) {
+    return send500(res, err, 'admin/research/profile');
+  }
+});
+
+// ════════════════════════════════════════════════════════════════════
+// DORMITORY MANAGER QUESTIONNAIRE
+// ════════════════════════════════════════════════════════════════════
+
+router.get('/api/admin/research/manager/questionnaire', requireAdmin, (req, res) => {
+  try {
+    return res.json({ success: true, questionnaire: manager.getQuestionnaire() });
+  } catch (err) {
+    return send500(res, err, 'admin/research/manager/questionnaire');
+  }
+});
+
+router.get('/api/admin/research/manager/mine', requireAdmin, (req, res) => {
+  try {
+    if (!req.user?.email) return res.status(400).json({ error: 'Your account has no email address on file.' });
+    return res.json({ success: true, ...manager.getMine(req.user.email), instrumentVersion: manager.INSTRUMENT_VERSION });
+  } catch (err) {
+    return send500(res, err, 'admin/research/manager/mine');
+  }
+});
+
+/** Body: { answers: { FS1: 1..5, … }, comments?: string, consentGiven: boolean } */
+router.post('/api/admin/research/manager/survey', requireAdmin, (req, res) => {
+  try {
+    const email = req.user?.email;
+    if (!email) return res.status(400).json({ error: 'Your account has no email address on file.' });
+
+    const { answers, comments, consentGiven } = req.body || {};
+    if (!consentGiven) {
+      return res.status(400).json({ error: 'Please give your consent before submitting the questionnaire.' });
+    }
+
+    const check = manager.validateAnswers(answers);
+    if (!check.ok) {
+      log.warn(`[Research/Manager] Rejected submission from ${email} — ${check.error}${check.missing ? ` (missing: ${check.missing.join(', ')})` : ''}`);
+      return res.status(400).json({ error: check.error, missing: check.missing || [] });
+    }
+
+    const saved = manager.saveResponse({
+      email,
+      fullName:    [req.user.firstName, req.user.lastName].filter(Boolean).join(' ') || req.user.username || '',
+      accountRole: req.user.role,
+      answers:     check.answers,
+      comments,
+      consentGiven: true,
+      userAgent:   req.headers['user-agent'] || '',
+    });
+    return res.json({ success: true, submittedAt: saved.submittedAt, updatedAt: saved.updatedAt });
+  } catch (err) {
+    return send500(res, err, 'admin/research/manager/survey');
+  }
+});
+
+router.get('/api/admin/research/manager/stats', requireAdmin, (req, res) => {
+  try {
+    return res.json({ success: true, stats: manager.getStats({ anonymize: wantsAnonymize(req) }) });
+  } catch (err) {
+    return send500(res, err, 'admin/research/manager/stats');
+  }
+});
+
+router.delete('/api/admin/research/manager/responses/:id', requireAdmin, (req, res) => {
+  try {
+    const ok = manager.deleteResponse(req.params.id);
+    log.warn(`[Research/Manager] @${req.user?.username || '?'} deleted manager response ${req.params.id} (${ok ? 'removed' : 'not found'})`);
+    return ok ? res.json({ success: true }) : res.status(404).json({ error: 'Response not found.' });
+  } catch (err) {
+    return send500(res, err, 'admin/research/manager/delete');
   }
 });
 
