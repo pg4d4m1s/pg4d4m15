@@ -2216,6 +2216,8 @@ router.get('/api/admin/backup/download', requireAdmin, async (req, res) => {
  * Accepts a .db file upload, validates it is a SQLite database,
  * then replaces the live DB using SQLite's restore pattern.
  * ⚠ This is destructive — the current DB is replaced.
+ * After the swap, the live schema is reconciled (utils/schemaReconcile.js) so a
+ * backup taken before newer columns/tables existed can't break running code.
  * Requires admin role.
  */
 router.post('/api/admin/backup/restore',
@@ -2259,14 +2261,39 @@ router.post('/api/admin/backup/restore',
 
       // Use better-sqlite3 restore: open the uploaded DB and backup INTO the live DB
       // This is safe because .backup() copies page-by-page with WAL checkpoints
+      // Record the schema the running code expects BEFORE the file is swapped, so it
+      // can be re-applied afterwards (boot-time migrations won't run again until restart).
+      // Always the real live handle — never the archive-view proxy.
+      const { liveDb } = require('../utils/db');
+      const { captureSchema, reconcileSchema } = require('../utils/schemaReconcile');
+      const expectedSchema = captureSchema(liveDb);
+
       const srcDb = new Database(tmpPath, { readonly: true });
       await srcDb.backup(liveDbPath);
       srcDb.close();
       fs.unlink(tmpPath, () => {});
 
+      // The restored file may predate columns/tables added since the backup was taken.
+      let schemaReport = null;
+      try {
+        schemaReport = reconcileSchema(liveDb, expectedSchema);
+        const { tablesCreated, columnsAdded, indexesCreated, failures } = schemaReport;
+        log.admin(`🧩 Post-restore schema repair: +${tablesCreated.length} tables, +${columnsAdded.length} columns, +${indexesCreated.length} indexes, ${failures.length} failures`);
+        if (columnsAdded.length) log.info(`[restore] columns re-added: ${columnsAdded.join(', ')}`);
+      } catch (schemaErr) {
+        log.error(`⚠ Post-restore schema repair crashed — restart the server to re-run boot migrations: ${schemaErr.message}`);
+      }
+
       log.admin(`♻ DB RESTORED from backup — by @${req.user.username}`);
       // Note: we don't logAdminAction here because the log table was just replaced
-      res.json({ success: true, message: 'Database restored. The server will continue running with the restored data.' });
+      const repairFailed = !schemaReport || schemaReport.failures.length > 0;
+      res.json({
+        success: true,
+        message: repairFailed
+          ? 'Database restored, but some newer columns could not be re-added. Restart the server before using Start New Semester or deleting users.'
+          : 'Database restored. The server will continue running with the restored data.',
+        schemaRepair: schemaReport,
+      });
     } catch (err) { send500(res, err); }
   }
 );
