@@ -138,7 +138,10 @@ app.set('trust proxy', TRUST_PROXY_HOPS);
 // automatically on first boot.  TTL matches cookie maxAge; expired rows are
 // pruned on the interval below so the table doesn't grow unboundedly.
 const SqliteStore       = require('better-sqlite3-session-store')(session);
-const { db: sessionDb } = require('./utils/db');
+// ⚠ MUST be `liveDb`, never `db`: `db` is a proxy that follows the per-request Archive DB
+// switch (utils/archiveView.js). The session store has to keep talking to the real file even
+// while an admin is viewing a read-only snapshot — otherwise their session could not be saved.
+const { liveDb: sessionDb } = require('./utils/db');
 
 app.use(session({
   store: new SqliteStore({
@@ -217,6 +220,16 @@ app.use((req, res, next) => {
   res.locals.error   = req.flash('error');
   next();
 });
+
+// ── Archive DB viewing (read-only snapshot per admin session) ─────────
+// Must sit AFTER session + passport (needs req.session / req.user) and BEFORE the routers.
+//   /api/admin → an admin who has a snapshot "Set Active" is answered from that snapshot
+//                (read-only; writes get 403 ARCHIVE_READ_ONLY). Everyone else: untouched.
+//   /api/posts → no DB switch; just refuses writes from a snapshot-viewing admin, because the
+//                admin page calls DELETE /api/posts/:id and snapshot ids also exist in the live DB.
+const { archiveViewMiddleware, archiveWriteGuard } = require('./utils/archiveView');
+app.use('/api/admin', archiveViewMiddleware);
+app.use('/api/posts', archiveWriteGuard);
 
 // ── Admin HTML guard (BEFORE static so the file is never served raw) ──
 // Session + passport run first above, so req.user is fully populated here.

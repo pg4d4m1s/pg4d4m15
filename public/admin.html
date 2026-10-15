@@ -62,6 +62,12 @@
       #mobile-menu-btn{display:flex;}
     }
   </style>
+  <style>
+    /* Archive DB → "Set Active": every tab is showing an old, read-only snapshot. */
+    body.archive-mode #main-content{box-shadow:inset 0 3px 0 #f59e0b;}
+    @keyframes archive-banner-flash{0%,100%{transform:translateX(-50%) scale(1);}40%{transform:translateX(-50%) scale(1.04);}}
+    #archive-banner.flash{animation:archive-banner-flash .5s ease-in-out 2;}
+  </style>
   <!-- Export libraries (SheetJS for Excel, jsPDF for PDF) -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
@@ -113,6 +119,9 @@
     <button onclick="logout()" class="nav-item w-full text-left text-red-400 hover:text-red-300"><i class="fa-solid fa-right-from-bracket w-4"></i>Log out</button>
   </div>
 </aside>
+
+<!-- Shown on every tab while an archived snapshot is Active (filled by applyArchiveMode) -->
+<div id="archive-banner" role="status" class="hidden fixed bottom-4 left-1/2 -translate-x-1/2 z-[150] max-w-[94vw] items-center gap-3 flex-wrap justify-center bg-amber-50 dark:bg-amber-950 border border-amber-300 dark:border-amber-700 shadow-lg rounded-2xl px-4 py-2.5 text-sm text-amber-900 dark:text-amber-200"></div>
 
 <main id="main-content">
 
@@ -1390,7 +1399,7 @@
     <div class="flex items-center justify-between mb-6 flex-wrap gap-3">
       <div>
         <h1 class="font-display font-bold text-2xl text-slate-900 dark:text-slate-100">Archive DB</h1>
-        <p class="text-sm text-slate-400 mt-0.5">Every "Archive &amp; Start New Semester" auto-saves a full database snapshot here — set one active to browse its old records (read-only), or download it. The live database is never overwritten.</p>
+        <p class="text-sm text-slate-400 mt-0.5">Every "Archive &amp; Start New Semester" auto-saves a full database snapshot here — set one active and the normal tabs (Residents, Room Management, Billing, …) show its old records, read-only. The live database is never overwritten.</p>
       </div>
       <div class="flex gap-2 flex-wrap">
         <button onclick="saveManualDbArchive()" id="db-archive-save-btn" class="flex items-center gap-2 bg-brand-600 hover:bg-brand-700 text-white text-sm font-medium px-4 py-2 rounded-xl transition-colors"><i class="fa-solid fa-plus text-xs"></i>Save Snapshot Now</button>
@@ -1398,7 +1407,7 @@
       </div>
     </div>
 
-    <!-- Which database is the admin looking at? (filled by renderArchiveStatus) -->
+    <!-- Which database is the admin looking at? (filled by applyArchiveMode) -->
     <div id="db-archive-status" class="mb-4"></div>
 
     <div class="bg-white dark:bg-slate-900 rounded-2xl border border-slate-100 dark:border-slate-800 overflow-hidden">
@@ -1417,31 +1426,12 @@
       </div>
     </div>
 
-    <!-- Read-only viewer for the snapshot that is currently Active -->
-    <div id="db-archive-viewer" class="hidden mt-6 bg-white dark:bg-slate-900 rounded-2xl border border-amber-200 dark:border-amber-800/50 overflow-hidden">
-      <div class="px-4 py-3 border-b border-amber-100 dark:border-amber-900/40 bg-amber-50/60 dark:bg-amber-950/20 flex items-center justify-between flex-wrap gap-2">
-        <p class="text-sm font-semibold text-amber-800 dark:text-amber-300 flex items-center gap-2"><i class="fa-solid fa-lock text-xs"></i><span id="db-archive-viewer-title">Archived records</span></p>
-        <span class="text-xs text-amber-700 dark:text-amber-400">Static, read-only view — nothing here can change the live database.</span>
-      </div>
-      <div id="db-archive-viewer-summary" class="px-4 pt-4 grid grid-cols-2 md:grid-cols-4 gap-3"></div>
-      <div class="px-4 pt-4 flex items-center justify-between flex-wrap gap-2">
-        <div class="flex gap-1.5">
-          <button id="avtab-residents" onclick="setArchiveViewTab('residents')" class="text-xs font-semibold px-3 py-1.5 rounded-lg border transition-colors">Residents</button>
-          <button id="avtab-rooms" onclick="setArchiveViewTab('rooms')" class="text-xs font-semibold px-3 py-1.5 rounded-lg border transition-colors">Rooms &amp; Beds</button>
-          <button id="avtab-billing" onclick="setArchiveViewTab('billing')" class="text-xs font-semibold px-3 py-1.5 rounded-lg border transition-colors">Billing</button>
-        </div>
-        <input id="db-archive-viewer-search" oninput="renderArchiveViewer()" placeholder="Search this snapshot…" class="text-sm px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 w-56 max-w-full"/>
-      </div>
-      <div id="db-archive-viewer-warnings" class="px-4 pt-3"></div>
-      <div id="db-archive-viewer-body" class="p-4 overflow-x-auto"></div>
-    </div>
-
     <div class="mt-6 bg-blue-50 dark:bg-blue-950/20 border border-blue-200 dark:border-blue-800/40 rounded-2xl p-4 max-w-3xl">
       <p class="text-xs text-blue-800 dark:text-blue-300 font-semibold flex items-center gap-2 mb-1"><i class="fa-solid fa-circle-info"></i>How this works</p>
       <ul class="text-xs text-blue-700 dark:text-blue-400 space-y-1 list-disc list-inside">
         <li>A snapshot is taken automatically right before every semester rollover, capturing the closing semester's full data — residents, rooms, and billing — before anything is archived or deleted.</li>
         <li>Snapshots marked <strong>Semester Rollover</strong> are auto-saved; <strong>Manual</strong> ones come from the "Save Snapshot Now" button.</li>
-        <li><strong>Set Active</strong> only lets you <em>browse</em> that snapshot's records (static, read-only). The live database is never replaced, keeps running in the background, and is exactly as you left it when you switch back with <strong>Live Database → Set Active</strong>.</li>
+        <li><strong>Set Active</strong> makes the regular tabs — Residents, Room Management, Billing, Maintenance, Incident Reports, Utility Bills, Dashboard — display that snapshot's records, as if you had loaded the database, but <em>static and read-only</em> (saves and deletes are refused). It only affects <em>your</em> admin session; residents and other admins keep using the live database, which is never replaced and is exactly as you left it when you switch back with <strong>Live Database → Set Active</strong> or the banner's <em>Back to Live Database</em> button.</li>
         <li>To actually roll the system back to a file, use <strong>Backup &amp; Restore</strong> (a deliberate, separate action).</li>
         <li>Files are stored in Cloudinary so they survive redeploys, not on the server's local disk.</li>
         <li>This list itself is tracked separately from the live database, so restoring a backup never removes anything from this page.</li>
@@ -4233,8 +4223,6 @@
 
   // Which snapshot (if any) this admin is currently browsing. null = live database.
   let dbArchiveActiveId = null;
-  let archiveViewData   = null;
-  let archiveViewTab    = 'residents';
 
   async function loadDbArchives() {
     const tbody = document.getElementById('db-archives-tbody');
@@ -4251,26 +4239,42 @@
 
       dbArchiveActiveId = act && act.mode === 'archive' && act.archive ? act.archive.id : null;
       renderDbArchives(d.archives || []);
-      renderArchiveStatus(act && act.mode === 'archive' ? act.archive : null);
-      if (dbArchiveActiveId) await loadArchiveViewer(dbArchiveActiveId); else hideArchiveViewer();
+      applyArchiveMode(act && act.mode === 'archive' ? act.archive : null);
     } catch (e) {
       tbody.innerHTML = `<tr><td colspan="6" class="px-4 py-6 text-center text-red-400">${escHtml(e.message)}</td></tr>`;
     }
   }
 
-  function renderArchiveStatus(archive) {
+  // Single place that reflects "which database am I looking at?" everywhere:
+  // global banner (every tab), amber page edge, sidebar dot, and the Archive DB tab's status box.
+  function applyArchiveMode(archive) {
+    dbArchiveActiveId = archive ? archive.id : null;
+    document.body.classList.toggle('archive-mode', !!archive);
+
+    const banner = document.getElementById('archive-banner');
+    if (banner) {
+      if (archive) {
+        banner.innerHTML = `<span><i class="fa-solid fa-lock mr-1.5"></i>Viewing archived snapshot <strong>${escHtml(archive.label)}</strong> — read-only. The live database is untouched.</span>
+          <button onclick="deactivateDbArchive()" class="text-xs font-semibold text-white bg-green-600 hover:bg-green-700 px-3 py-1.5 rounded-lg transition-colors whitespace-nowrap"><i class="fa-solid fa-power-off mr-1"></i>Back to Live Database</button>`;
+        banner.classList.remove('hidden'); banner.classList.add('flex');
+      } else {
+        banner.classList.add('hidden'); banner.classList.remove('flex'); banner.innerHTML = '';
+      }
+    }
+
     const box = document.getElementById('db-archive-status');
     if (box) {
       box.innerHTML = archive
         ? `<div class="flex items-center justify-between flex-wrap gap-3 bg-amber-50 dark:bg-amber-950/20 border border-amber-200 dark:border-amber-800/40 rounded-2xl px-4 py-3">
-             <p class="text-sm text-amber-800 dark:text-amber-300"><i class="fa-solid fa-eye mr-2"></i>Viewing snapshot <strong>${escHtml(archive.label)}</strong> — read-only. The <strong>live database is untouched</strong> and still running; every other tab still shows live data.</p>
+             <p class="text-sm text-amber-800 dark:text-amber-300"><i class="fa-solid fa-eye mr-2"></i>Showing snapshot <strong>${escHtml(archive.label)}</strong> in the regular tabs — read-only. Open <strong>Residents</strong>, <strong>Room Management</strong>, <strong>Billing</strong>… to review it. The <strong>live database is untouched</strong> and still serving everyone else.</p>
              <button onclick="deactivateDbArchive()" class="text-xs font-semibold text-white bg-green-600 hover:bg-green-700 px-3 py-1.5 rounded-lg transition-colors"><i class="fa-solid fa-power-off mr-1"></i>Back to Live Database</button>
            </div>`
         : `<div class="flex items-center gap-2 bg-green-50 dark:bg-green-950/20 border border-green-200 dark:border-green-800/40 rounded-2xl px-4 py-3">
              <span class="w-2 h-2 rounded-full bg-green-500"></span>
-             <p class="text-sm text-green-800 dark:text-green-300"><strong>Live database is active.</strong> Pick a snapshot below and press <em>Set Active</em> to browse its old records — nothing gets overwritten.</p>
+             <p class="text-sm text-green-800 dark:text-green-300"><strong>Live database is active.</strong> Pick a snapshot below and press <em>Set Active</em> to review its old records in the regular tabs — nothing gets overwritten.</p>
            </div>`;
     }
+
     // Small dot on the sidebar item so you can't forget you are on an old snapshot.
     const nav = document.getElementById('nav-db-archives');
     if (nav) {
@@ -4280,6 +4284,24 @@
       }
     }
   }
+
+  // The server refuses every write while a snapshot is shown (403 ARCHIVE_READ_ONLY). Whatever
+  // message each tab's own handler shows, also make the banner pulse so the reason is obvious.
+  (function watchArchiveReadOnly() {
+    const origFetch = window.fetch.bind(window);
+    window.fetch = async (...args) => {
+      const res = await origFetch(...args);
+      if (res.status === 403) {
+        res.clone().json().then(d => {
+          if (d && d.code === 'ARCHIVE_READ_ONLY') {
+            const b = document.getElementById('archive-banner');
+            if (b) { b.classList.remove('flash'); void b.offsetWidth; b.classList.add('flash'); }
+          }
+        }).catch(() => {});
+      }
+      return res;
+    };
+  })();
 
   function renderDbArchives(archives) {
     const tbody = document.getElementById('db-archives-tbody');
@@ -4362,114 +4384,14 @@
     }).join('');
   }
 
-  // ── Archive viewer (read-only, static) ───────────────
-  function hideArchiveViewer() {
-    archiveViewData = null;
-    document.getElementById('db-archive-viewer')?.classList.add('hidden');
-  }
-
-  async function loadArchiveViewer(id) {
-    const panel = document.getElementById('db-archive-viewer');
-    const body  = document.getElementById('db-archive-viewer-body');
-    if (!panel || !body) return;
-    panel.classList.remove('hidden');
-    body.innerHTML = '<div class="py-8 text-center"><div class="inline-block w-5 h-5 border-2 border-brand-400 border-t-transparent rounded-full animate-spin"></div><p class="text-xs text-slate-400 mt-2">Opening snapshot…</p></div>';
-    try {
-      const r = await fetch(`/api/admin/db-archives/${id}/view`);
-      const d = await r.json();
-      if (!r.ok || d.error) throw new Error(d.error || r.statusText);
-      archiveViewData = d;
-      const search = document.getElementById('db-archive-viewer-search');
-      if (search) search.value = '';
-      document.getElementById('db-archive-viewer-title').textContent = `Archived records — ${d.archive.label}`;
-      const sm = d.summary || {};
-      const chip = (label, value) => `<div class="rounded-xl border border-slate-100 dark:border-slate-800 px-3 py-2"><p class="text-[10px] uppercase tracking-wider text-slate-400">${label}</p><p class="text-lg font-bold text-slate-800 dark:text-slate-100">${value}</p></div>`;
-      document.getElementById('db-archive-viewer-summary').innerHTML =
-        chip('Residents', sm.residents ?? 0) + chip('Admins', sm.admins ?? 0) +
-        chip('Beds occupied', `${sm.bedsOccupied ?? 0}`) +
-        chip('Billing paid', '₱' + Number(sm.billingPaid || 0).toLocaleString());
-      const warn = document.getElementById('db-archive-viewer-warnings');
-      warn.innerHTML = (d.warnings || []).length
-        ? `<div class="text-xs text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/20 border border-amber-200 dark:border-amber-800/40 rounded-lg px-3 py-2"><i class="fa-solid fa-triangle-exclamation mr-1"></i>This snapshot is missing some data (likely made by an older version): ${d.warnings.map(escHtml).join(' · ')}</div>`
-        : '';
-      renderArchiveViewer();
-    } catch (e) {
-      archiveViewData = null;
-      body.innerHTML = `<p class="py-6 text-center text-sm text-red-400">${escHtml(e.message)}</p>`;
-    }
-  }
-
-  function setArchiveViewTab(tab) {
-    archiveViewTab = tab;
-    renderArchiveViewer();
-  }
-
-  function renderArchiveViewer() {
-    const body = document.getElementById('db-archive-viewer-body');
-    if (!body || !archiveViewData) return;
-
-    // tab button styling
-    ['residents', 'rooms', 'billing'].forEach(t => {
-      const el = document.getElementById('avtab-' + t);
-      if (!el) return;
-      el.className = 'text-xs font-semibold px-3 py-1.5 rounded-lg border transition-colors ' + (t === archiveViewTab
-        ? 'bg-brand-600 text-white border-brand-600'
-        : 'text-slate-600 dark:text-slate-300 border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800');
-    });
-
-    const q = (document.getElementById('db-archive-viewer-search')?.value || '').trim().toLowerCase();
-    const has = (...vals) => !q || vals.some(v => String(v ?? '').toLowerCase().includes(q));
-    const fullName = u => [u.last_name, u.first_name].filter(Boolean).join(', ') + (u.middle_name ? ' ' + u.middle_name.charAt(0) + '.' : '');
-    const th = t => `<th class="px-3 py-2 font-semibold">${t}</th>`;
-    const td = t => `<td class="px-3 py-2 text-sm text-slate-600 dark:text-slate-300 whitespace-nowrap">${t}</td>`;
-    const empty = msg => `<p class="py-6 text-center text-sm text-slate-400">${msg}</p>`;
-    const head = cols => `<thead><tr class="text-left text-xs text-slate-500 dark:text-slate-400 uppercase tracking-wider">${cols.map(th).join('')}</tr></thead>`;
-
-    if (archiveViewTab === 'residents') {
-      const rows = archiveViewData.residents.filter(u => has(fullName(u), u.username, u.email, u.year_level, u.location, u.school_name, u.room_number));
-      body.innerHTML = rows.length
-        ? `<table class="w-full">${head(['Resident', 'Email', 'Year level', 'Municipality', 'Room / Bed', 'Status', 'Joined'])}<tbody>${rows.map(u => `<tr class="border-t border-slate-50 dark:border-slate-800">
-            ${td(`<p class="font-semibold text-slate-700 dark:text-slate-200">${escHtml(fullName(u))}</p><p class="text-xs text-slate-400">@${escHtml(u.username)}</p>`)}
-            ${td(escHtml(u.email))}
-            ${td(escHtml(u.year_level || '—'))}
-            ${td(escHtml(u.location || '—'))}
-            ${td(u.room_number ? `Room ${escHtml(u.room_number)} · Bed ${escHtml(u.bed_number)}` : '—')}
-            ${td(escHtml(u.account_status || '—'))}
-            ${td(u.created_at ? dayjs(u.created_at).format('MMM D, YYYY') : '—')}
-          </tr>`).join('')}</tbody></table>`
-        : empty('No residents in this snapshot match.');
-    } else if (archiveViewTab === 'rooms') {
-      const rooms = archiveViewData.rooms.filter(r => has('room ' + r.room_number, r.gender, ...r.occupants.map(o => `${o.first_name} ${o.last_name} ${o.username}`)));
-      body.innerHTML = rooms.length
-        ? `<div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">${rooms.map(r => `<div class="rounded-xl border border-slate-100 dark:border-slate-800 p-3">
-            <div class="flex items-center justify-between mb-2"><p class="text-sm font-bold text-slate-700 dark:text-slate-200">Room ${escHtml(r.room_number)}</p><span class="text-xs text-slate-400">${escHtml(r.gender || '')} · ${r.occupants.length}/${escHtml(r.capacity ?? '?')} beds</span></div>
-            ${r.occupants.length
-              ? r.occupants.map(o => `<p class="text-xs text-slate-600 dark:text-slate-300">Bed ${escHtml(o.bed_number)} — ${escHtml([o.first_name, o.last_name].filter(Boolean).join(' ') || 'Unknown')} <span class="text-slate-400">@${escHtml(o.username || '')}</span></p>`).join('')
-              : '<p class="text-xs text-slate-400">No occupants</p>'}
-          </div>`).join('')}</div>`
-        : empty('No rooms in this snapshot match.');
-    } else {
-      const rows = archiveViewData.billing.filter(b => has(b.month, b.first_name, b.last_name, b.username, b.status));
-      const stCls = { paid: 'text-green-600', unpaid: 'text-red-500', waived: 'text-slate-500' };
-      body.innerHTML = rows.length
-        ? `<table class="w-full">${head(['Month', 'Resident', 'Amount', 'Status', 'Paid at'])}<tbody>${rows.map(b => `<tr class="border-t border-slate-50 dark:border-slate-800">
-            ${td(escHtml(b.month))}
-            ${td(`${escHtml([b.last_name, b.first_name].filter(Boolean).join(', ') || 'Unknown')} <span class="text-xs text-slate-400">@${escHtml(b.username || '')}</span>`)}
-            ${td('₱' + Number(b.amount || 0).toLocaleString())}
-            ${td(`<span class="font-semibold ${stCls[b.status] || ''}">${escHtml(b.status)}</span>`)}
-            ${td(b.paid_at ? dayjs(b.paid_at).format('MMM D, YYYY') : '—')}
-          </tr>`).join('')}</tbody></table>`
-        : empty('No billing records in this snapshot match.');
-    }
-  }
-
   async function activateDbArchive(id, label) {
     try {
       const r = await fetch(`/api/admin/db-archives/${id}/activate`, { method: 'POST' });
       const d = await r.json();
       if (!r.ok || d.error) throw new Error(d.error || r.statusText);
-      toast(`Viewing "${label}" — read-only. Live database untouched.`, 'info');
-      loadDbArchives();
+      // Reload: every tab (and any cached list/chart) must re-read from the snapshot. Lands on the Dashboard.
+      sessionStorage.setItem('damis_archive_msg', JSON.stringify({ text: `Now showing "${label}" — read-only. Live database untouched.`, type: 'info' }));
+      location.reload();
     } catch (e) {
       toast('Could not open snapshot: ' + e.message, 'error');
     }
@@ -4480,8 +4402,8 @@
       const r = await fetch('/api/admin/db-archives/live', { method: 'POST' });
       const d = await r.json();
       if (!r.ok || d.error) throw new Error(d.error || r.statusText);
-      toast('Live database is active again ✅');
-      loadDbArchives();
+      sessionStorage.setItem('damis_archive_msg', JSON.stringify({ text: 'Live database is active again ✅', type: 'success' }));
+      location.reload();
     } catch (e) {
       toast('Could not switch back: ' + e.message, 'error');
     }
@@ -4545,11 +4467,16 @@
     });
   }
 
-  // Show the amber dot on the sidebar immediately if this session is still browsing a snapshot.
+  // On every page load: if this session is showing a snapshot, put the banner up on whatever tab
+  // is open, and show the one-shot message left by Set Active / Back to Live.
   document.addEventListener('DOMContentLoaded', () => {
+    try {
+      const raw = sessionStorage.getItem('damis_archive_msg');
+      if (raw) { sessionStorage.removeItem('damis_archive_msg'); const m = JSON.parse(raw); toast(m.text, m.type || 'info'); }
+    } catch (_) {}
     fetch('/api/admin/db-archives/active')
       .then(r => r.ok ? r.json() : null)
-      .then(a => { if (a && a.mode === 'archive') { dbArchiveActiveId = a.archive.id; renderArchiveStatus(a.archive); } })
+      .then(a => { if (a && a.mode === 'archive') applyArchiveMode(a.archive); })
       .catch(() => {});
   });
 

@@ -22,8 +22,37 @@ const path     = require('path');
 const { randomUUID } = require('crypto');
 const log      = require('./logger');
 
+const { AsyncLocalStorage } = require('async_hooks');
+
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, '..');
-const db = new Database(path.join(DATA_DIR, 'connecthub.db'));
+
+// ── The real, live database file ──────────────────────────────────────────
+// `liveDb` is the one true handle. Nothing in this app ever replaces or closes it.
+const liveDb = new Database(path.join(DATA_DIR, 'connecthub.db'));
+
+// ── Per-request database switch (Archive DB → "Set Active") ───────────────
+// Everything in the app imports `db` from this module. `db` is a thin proxy:
+//   • normally (and ALWAYS for residents, sockets, schedulers) it forwards to `liveDb`;
+//   • inside `runWithDb(snapshotHandle, fn)` — called ONLY by utils/archiveView.js,
+//     for an admin who has an archived snapshot set Active — it forwards to that
+//     READ-ONLY snapshot, for that one request only (AsyncLocalStorage keeps the
+//     choice scoped to the request, including across awaits).
+// That is what lets the real admin tabs (Residents, Billing, …) show old records
+// without rewriting a single route, and without touching the live file.
+//
+// ⚠ Anything that must NEVER follow the switch has to use `liveDb` directly —
+//   today that is the session store (server.js). A statement prepared at module
+//   load via `db.prepare(...)` would also stay bound to whichever handle was
+//   active at that moment; this codebase has none (verified), keep it that way.
+const viewAls = new AsyncLocalStorage();
+function runWithDb(handle, fn) { return viewAls.run({ db: handle }, fn); }
+const db = new Proxy(liveDb, {
+  get(_target, prop) {
+    const target = viewAls.getStore()?.db || liveDb;
+    const value  = target[prop];
+    return typeof value === 'function' ? value.bind(target) : value;
+  },
+});
 
 // ── Performance: WAL mode makes reads faster ──────────
 db.pragma('journal_mode = WAL');
@@ -2431,7 +2460,7 @@ function deleteDbArchiveById(id) {
 }
 
 module.exports = {
-  db, genId,
+  db, liveDb, runWithDb, genId,
   // User
   users, findUserByEmail, findUserById, findUserByUsername, findUserByPhone,
   createUser, updateUser,

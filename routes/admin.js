@@ -33,6 +33,7 @@ const {
   createDbArchive, getDbArchives, getDbArchiveById, deleteDbArchiveById,
 } = require('../utils/db');
 const { sendAccountApprovedEmail, sendAccountRejectedEmail } = require('../utils/emailService');
+const { getViewingArchive, getArchiveHandle, closeArchiveHandle } = require('../utils/archiveView');
 const { multerUpload, toCloudinary, resizeImage, hasCloudinary } = require('../middleware/upload');
 
 // Dedicated multer for .db backup file uploads — no image filter, memory storage only
@@ -2092,76 +2093,19 @@ router.get('/api/admin/db-archives/:id/download', requireAdmin, async (req, res)
   } catch (err) { send500(res, err); }
 });
 
-// ── Archive viewer (READ-ONLY) ─────────────────────────────────────────────
-// "Setting a snapshot active" never touches connecthub.db. The snapshot file is
-// opened READONLY, in its own handle, only for the duration of a request. The live
-// database keeps serving residents and every other admin tab the whole time.
-// Which snapshot an admin is browsing is remembered in THEIR session only
-// (req.session.viewingArchiveId), so it cannot affect other admins or residents,
-// and it simply disappears on logout / session expiry (= back to live).
+// ── Archive viewing (READ-ONLY) ────────────────────────────────────────────
+// "Set Active" never touches connecthub.db. It only records, in THIS admin's
+// session, which snapshot to show; utils/archiveView.js (mounted in server.js on
+// /api/admin) then answers this admin's /api/admin/* reads from that snapshot,
+// opened read-only, so the real tabs (Residents, Room Management, Billing, …)
+// display the old records in their normal places — static, nothing writable.
+// The routes below are the switch itself, so they always run against the live DB.
 //
 // The old "Load" endpoint (POST /api/admin/db-archives/:id/restore) overwrote the
 // live DB file while the server still held it open. It was removed on purpose.
 // Disaster-recovery restores remain available from Backup & Restore.
 
-/** Where a cloud snapshot is cached locally while it is being viewed. */
-function archiveCachePath(archiveId) {
-  const path = require('path');
-  const os   = require('os');
-  return path.join(os.tmpdir(), 'damis-archive-view', `${String(archiveId).replace(/[^a-zA-Z0-9_-]/g, '')}.db`);
-}
-
-/** Return a local filesystem path for a snapshot (downloading + caching it if it lives in Cloudinary). */
-async function resolveArchiveFile(rec) {
-  const fs   = require('fs');
-  const path = require('path');
-
-  if (rec.storage !== 'cloudinary') {
-    if (!rec.file_url || !fs.existsSync(rec.file_url)) {
-      const err = new Error('Archive file is missing from local disk.');
-      err.status = 404;
-      throw err;
-    }
-    return rec.file_url;
-  }
-
-  const cached = archiveCachePath(rec.id);
-  if (fs.existsSync(cached) && fs.statSync(cached).size > 0) return cached;
-
-  fs.mkdirSync(path.dirname(cached), { recursive: true });
-  const upstream = await fetch(rec.file_url);
-  if (!upstream.ok) throw new Error(`Cloudinary fetch failed (${upstream.status})`);
-  const part = `${cached}.${process.pid}.${Date.now()}.part`;
-  fs.writeFileSync(part, Buffer.from(await upstream.arrayBuffer()));
-  fs.renameSync(part, cached); // atomic: a half-written file is never used
-  return cached;
-}
-
-/** Open a snapshot strictly read-only and sanity-check it. Caller MUST close(). */
-function openArchiveReadonly(file) {
-  const Database = require('better-sqlite3');
-  const snap = new Database(file, { readonly: true, fileMustExist: true });
-  try {
-    snap.prepare('SELECT COUNT(*) FROM users').get();
-  } catch (e) {
-    snap.close();
-    const err = new Error(`Archived file appears corrupt: ${e.message}`);
-    err.status = 400;
-    throw err;
-  }
-  return snap;
-}
-
-/** Which snapshot (if any) is this admin session currently viewing? Clears stale ids. */
-function getViewingArchive(req) {
-  const id = req.session?.viewingArchiveId;
-  if (!id) return null;
-  const rec = getDbArchiveById(id);
-  if (!rec) { delete req.session.viewingArchiveId; return null; } // snapshot was purged
-  return rec;
-}
-
-/** GET /api/admin/db-archives/active — is this admin on the live DB or browsing a snapshot? */
+/** GET /api/admin/db-archives/active — is this admin on the live DB or viewing a snapshot? */
 router.get('/api/admin/db-archives/active', requireAdmin, (req, res) => {
   try {
     const rec = getViewingArchive(req);
@@ -2182,100 +2126,24 @@ router.post('/api/admin/db-archives/live', requireAdmin, (req, res) => {
   } catch (err) { send500(res, err, 'archive deactivate'); }
 });
 
-/** POST /api/admin/db-archives/:id/activate — start browsing a snapshot (static, read-only). Live DB untouched. */
+/** POST /api/admin/db-archives/:id/activate — show this snapshot in the admin tabs (static, read-only). */
 router.post('/api/admin/db-archives/:id/activate', requireAdmin, async (req, res) => {
-  let snap;
   try {
     const rec = getDbArchiveById(req.params.id);
     if (!rec) return res.status(404).json({ error: 'Archive not found.' });
 
-    const file = await resolveArchiveFile(rec);
-    snap = openArchiveReadonly(file); // validates before we commit to this snapshot
+    // Download / open / validate NOW, so a missing or corrupt file fails here with a
+    // clear message instead of on every later tab load.
+    await getArchiveHandle(rec);
     req.session.viewingArchiveId = rec.id;
 
     logAdminAction(req.user.id, 'db_archive_view_started', 'system', rec.id, rec.label);
     log.admin(`🔎 Archive view started: "${rec.label}" (read-only; live DB untouched) — by @${req.user.username}`);
     res.json({ success: true, mode: 'archive', archive: rec });
   } catch (err) {
+    log.error(`Archive activate failed: ${err.message}`);
     if (err.status) return res.status(err.status).json({ error: err.message });
     send500(res, err, 'archive activate');
-  } finally {
-    try { snap?.close(); } catch (_) {}
-  }
-});
-
-/**
- * GET /api/admin/db-archives/:id/view — static records of a snapshot:
- * summary, residents (+ room/bed), rooms (+ occupants) and billing.
- * Credentials (password hash, google_id) are never sent. Each section is queried
- * defensively: an older snapshot that lacks a table/column yields a warning for
- * that section instead of failing the whole view.
- */
-router.get('/api/admin/db-archives/:id/view', requireAdmin, async (req, res) => {
-  let snap;
-  try {
-    const rec = getDbArchiveById(req.params.id);
-    if (!rec) return res.status(404).json({ error: 'Archive not found.' });
-
-    snap = openArchiveReadonly(await resolveArchiveFile(rec));
-    const warnings = [];
-    const all = (label, sql) => {
-      try { return snap.prepare(sql).all(); }
-      catch (e) { warnings.push(`${label}: ${e.message}`); return []; }
-    };
-
-    const USER_KEYS = ['id','first_name','middle_name','last_name','suffix','username','email','phone','sex',
-      'location','present_address','year_level','course','school_name','role','account_status','is_active',
-      'created_at','room_number','bed_number'];
-    const pick = (row) => Object.fromEntries(USER_KEYS.map(k => [k, row[k] ?? null]));
-
-    const users = all('users', `
-      SELECT u.*, dr.room_number AS room_number, ba.bed_number AS bed_number
-      FROM users u
-      LEFT JOIN bed_assignments ba ON ba.user_id = u.id
-      LEFT JOIN dorm_rooms dr      ON dr.id = ba.room_id
-      ORDER BY u.last_name, u.first_name`).map(pick);
-
-    const residents = users.filter(u => u.role === 'user');
-    const admins    = users.filter(u => u.role !== 'user');
-
-    const roomRows = all('rooms', 'SELECT * FROM dorm_rooms ORDER BY room_number');
-    const beds = all('beds', `
-      SELECT ba.room_id, ba.bed_number, u.first_name, u.last_name, u.username
-      FROM bed_assignments ba LEFT JOIN users u ON u.id = ba.user_id
-      ORDER BY ba.room_id, ba.bed_number`);
-    const rooms = roomRows.map(r => ({
-      room_number: r.room_number, gender: r.gender, capacity: r.capacity,
-      occupants: beds.filter(b => b.room_id === r.id).map(b => ({
-        bed_number: b.bed_number, first_name: b.first_name, last_name: b.last_name, username: b.username,
-      })),
-    }));
-
-    const BILLING_LIMIT = 5000;
-    const billing = all('billing', `
-      SELECT b.month, b.amount, b.status, b.paid_at, u.first_name, u.last_name, u.username
-      FROM dorm_billing b LEFT JOIN users u ON u.id = b.user_id
-      ORDER BY b.month DESC, u.last_name LIMIT ${BILLING_LIMIT}`);
-    if (billing.length === BILLING_LIMIT) warnings.push(`billing: showing the newest ${BILLING_LIMIT} rows only`);
-
-    const sumBy = (st) => billing.filter(b => b.status === st).reduce((t, b) => t + (Number(b.amount) || 0), 0);
-    const summary = {
-      residents: residents.filter(u => u.account_status === 'approved').length,
-      residentsTotal: residents.length,
-      admins: admins.length,
-      rooms: rooms.length,
-      bedsOccupied: beds.length,
-      billingRows: billing.length,
-      billingPaid: sumBy('paid'),
-      billingUnpaid: sumBy('unpaid'),
-    };
-
-    res.json({ readOnly: true, archive: rec, summary, residents, admins, rooms, billing, warnings });
-  } catch (err) {
-    if (err.status) return res.status(err.status).json({ error: err.message });
-    send500(res, err, 'archive view');
-  } finally {
-    try { snap?.close(); } catch (_) {}
   }
 });
 
@@ -2291,12 +2159,15 @@ router.delete('/api/admin/db-archives/:id', requireAdmin, async (req, res) => {
         await cloudinary.uploader.destroy(rec.cloudinary_public_id, { resource_type: 'raw' });
       } catch (e) { log.warn(`Cloudinary purge failed (non-fatal): ${e.message}`); }
     } else if (rec.storage === 'local' && rec.file_url) {
-      require('fs').unlink(rec.file_url, () => {});
+      const fsx = require('fs');
+      fsx.unlink(rec.file_url, () => {});
+      fsx.unlink(rec.file_url + '-wal', () => {});   // SQLite side files from read-only viewing (ignore if absent)
+      fsx.unlink(rec.file_url + '-shm', () => {});
     }
 
     deleteDbArchiveById(rec.id);
     if (req.session?.viewingArchiveId === rec.id) delete req.session.viewingArchiveId;
-    require('fs').unlink(archiveCachePath(rec.id), () => {}); // cached copy of a cloud snapshot (ignore if absent)
+    closeArchiveHandle(rec.id, { dropCache: true }); // close the read-only connection + drop any cached cloud copy
     logAdminAction(req.user.id, 'db_archive_purged', 'system', rec.id, rec.label);
     log.admin(`🗑 DB archive purged: "${rec.label}" — by @${req.user.username}`);
     res.json({ success: true });
