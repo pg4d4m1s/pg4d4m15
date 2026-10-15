@@ -4,11 +4,15 @@
  * Same logic as before — only changed:
  *   - Import from utils/db.js instead of utils/userStore.js
  *   - deserializeUser uses findUserById (DB lookup, not array.find)
+ *   - Google accounts whose google_id was lost (restored from an archive made before
+ *     the archives stored it) are re-linked on their next Google sign-in instead of
+ *     being rejected with "email_taken".
  */
 
 const passport       = require('passport');
 const GoogleStrategy = require('passport-google-oauth20').Strategy;
 const { findUserByEmail, findUserById } = require('./db');
+const log            = require('./logger');
 
 passport.serializeUser((user, done) => done(null, user.id));
 
@@ -16,6 +20,21 @@ passport.deserializeUser((id, done) => {
   const user = findUserById(id);
   done(null, user || null);
 });
+
+/** Shared status gate: suspended / pending / rejected → block, otherwise log in. */
+function gateByStatus(user, done) {
+  if (!user.isActive) {
+    return done(null, false, { message: 'account_suspended' });
+  }
+  if (user.accountStatus === 'pending') {
+    return done(null, false, { message: 'account_pending' });
+  }
+  if (user.accountStatus === 'rejected') {
+    return done(null, false, { message: 'account_rejected' });
+  }
+  console.log(`Google login ✅  ${user.email}`);
+  return done(null, user);
+}
 
 passport.use(new GoogleStrategy(
   {
@@ -33,22 +52,25 @@ passport.use(new GoogleStrategy(
       const { db } = require('./db');
       const existing = db.prepare('SELECT * FROM users WHERE google_id = ?').get(googleId);
       if (existing) {
-        const user = findUserById(existing.id);
-        if (!user.isActive) {
-          return done(null, false, { message: 'account_suspended' });
-        }
-        if (user.accountStatus === 'pending') {
-          return done(null, false, { message: 'account_pending' });
-        }
-        if (user.accountStatus === 'rejected') {
-          return done(null, false, { message: 'account_rejected' });
-        }
-        console.log(`Google login ✅  ${user.email}`);
-        return done(null, user);
+        return gateByStatus(findUserById(existing.id), done);
       }
 
-      // Email exists but registered locally → block
-      if (findUserByEmail(email)) {
+      const byEmail = email ? findUserByEmail(email) : null;
+      if (byEmail) {
+        // Self-heal: the account was created via Google but its google_id is missing
+        // (restore from the deleted/rejected archive used to drop it). Google has just
+        // authenticated this exact email, so it is safe to re-link — but ONLY for
+        // google-provider accounts and ONLY when Google says the email is verified.
+        const emailVerified = String(profile.emails?.[0]?.verified) !== 'false';
+        if (byEmail.authProvider === 'google' && !byEmail.googleId && emailVerified) {
+          db.prepare(`UPDATE users SET google_id = ?, updated_at = datetime('now') WHERE id = ?`)
+            .run(googleId, byEmail.id);
+          log.auth(`Google re-linked: @${byEmail.username} (${email}) — google_id was missing`);
+          return gateByStatus(findUserById(byEmail.id), done);
+        }
+
+        // Email exists but registered locally (or linked to a different Google id) → block
+        log.warn(`Google login BLOCKED [email_taken]: ${email} provider=${byEmail.authProvider} hasGoogleId=${!!byEmail.googleId}`);
         return done(null, false, { message: `email_taken:${email}` });
       }
 

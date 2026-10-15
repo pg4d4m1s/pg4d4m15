@@ -28,7 +28,7 @@ const {
   createMaintenanceRequest, getMaintenanceRequests, updateMaintenanceRequest, getMaintenanceStats,
   getIncidentReports, updateIncidentReport, getIncidentStats,
   upsertUtilityBill, getUtilityBills, getUtilityTrend,
-  nextAdmissionNo, semesterRollover,
+  nextAdmissionNo, semesterRollover, clearUserForeignRefs,
   // DB Archives (full snapshots)
   createDbArchive, getDbArchives, getDbArchiveById, deleteDbArchiveById,
 } = require('../utils/db');
@@ -304,11 +304,12 @@ router.delete('/api/admin/users/:id', requireAdmin, (req, res) => {
         (id, original_id, first_name, middle_name, last_name, suffix, username, email, phone,
          birthday, sex, civil_status, bio, location, avatar, auth_provider, role,
          present_address, permanent_address, school_name, course, year_level, school_address,
-         father_info, mother_info, monthly_income,
+         father_info, mother_info, guardian_info, monthly_income,
          id_front_url, id_back_url, selfie_url,
          cert_residency_url, cert_low_income_url, cert_enrollment_url,
-         original_created_at, deleted_by)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+         original_created_at, deleted_by,
+         password_hash, google_id, specialization, avatar_face_x, avatar_face_y)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     `).run(
       require('crypto').randomUUID(), targetId,
       user.first_name, user.middle_name||'', user.last_name, user.suffix||'',
@@ -317,10 +318,12 @@ router.delete('/api/admin/users/:id', requireAdmin, (req, res) => {
       user.avatar||'', user.auth_provider||'local', user.role||'user',
       user.present_address||'', user.permanent_address||'',
       user.school_name||'', user.course||'', user.year_level||'', user.school_address||'',
-      user.father_info||'', user.mother_info||'', user.monthly_income||'',
+      user.father_info||'', user.mother_info||'', user.guardian_info||'', user.monthly_income||'',
       idDocs?.id_front_url||'', idDocs?.id_back_url||'', idDocs?.selfie_url||'',
       idDocs?.cert_residency_url||'', idDocs?.cert_low_income_url||'', idDocs?.cert_enrollment_url||'',
-      user.created_at||'', req.user?.id || 'system'
+      user.created_at||'', req.user?.id || 'system',
+      user.password || null, user.google_id || null, user.specialization || '',
+      user.avatar_face_x ?? 50, user.avatar_face_y ?? 50
     );
   } catch(archiveErr) {
     log.warn(`Archive before delete failed (non-fatal): ${archiveErr.message}`);
@@ -338,12 +341,8 @@ router.delete('/api/admin/users/:id', requireAdmin, (req, res) => {
   // half-deleted user (e.g. bed removed but account still present).
   try {
     const purge = db.transaction(() => {
-      const cleared = {
-        bed_assignments: db.prepare('DELETE FROM bed_assignments WHERE user_id = ?').run(targetId).changes,
-        room_history:    db.prepare('DELETE FROM room_history    WHERE user_id = ?').run(targetId).changes,
-        dorm_billing:    db.prepare('DELETE FROM dorm_billing    WHERE user_id = ?').run(targetId).changes,
-        reviewer_refs:   db.prepare('UPDATE id_verification_requests SET reviewed_by = NULL WHERE reviewed_by = ?').run(targetId).changes,
-      };
+      // Shared with semester rollover (utils/db.js) so the two can never drift apart again.
+      const cleared = clearUserForeignRefs(targetId);
       logAdminAction(req.user?.id || 'system', 'user_deleted', 'user', targetId, `@${user.username} (${user.email})`);
       db.prepare('DELETE FROM users WHERE id = ?').run(targetId);
       return cleared;
@@ -395,8 +394,20 @@ router.post('/api/admin/users/deleted/:id/restore', requireAdmin, (req, res) => 
       schoolName: rec.school_name, course: rec.course, yearLevel: rec.year_level,
       schoolAddress: rec.school_address, fatherInfo: rec.father_info,
       motherInfo: rec.mother_info, monthlyIncome: rec.monthly_income,
+      guardianInfo: rec.guardian_info, specialization: rec.specialization,
+      avatarFaceX: rec.avatar_face_x ?? 50, avatarFaceY: rec.avatar_face_y ?? 50,
+      // Login identity — without these the restored account can never sign in.
+      password: rec.password_hash || null,
+      googleId: rec.google_id || null,
       emailVerified: true, idVerified: false, accountStatus: 'pending',
     });
+
+    // Archive rows written before this fix carry no credentials. Tell the admin
+    // instead of silently handing back an account nobody can log in to.
+    let loginWarning = null;
+    if ((rec.auth_provider || 'local') === 'local' && !rec.password_hash) {
+      loginWarning = 'This archived record has no saved password. The resident must use "Forgot Password" to set one after approval.';
+    }
 
     if (rec.id_front_url || rec.selfie_url) {
       const { submitIdVerification } = require('../utils/db');
@@ -414,8 +425,9 @@ router.post('/api/admin/users/deleted/:id/restore', requireAdmin, (req, res) => 
 
     db.prepare('DELETE FROM deleted_users WHERE id = ?').run(req.params.id);
     logAdminAction(req.user?.id, 'deleted_user_restored', 'user', restored.id, `Restored @${restored.username} from deleted archive`);
-    log.admin(`♻ RESTORED deleted user @${restored.username} — by @${req.user?.username}`);
-    res.json({ success: true, userId: restored.id });
+    log.admin(`♻ RESTORED deleted user @${restored.username} [${rec.auth_provider || 'local'}] password=${rec.password_hash ? 'yes' : 'NO'} google_id=${rec.google_id ? 'yes' : 'no'} — by @${req.user?.username}`);
+    if (loginWarning) log.warn(`Restored @${restored.username} has no saved credentials: ${loginWarning}`);
+    res.json({ success: true, userId: restored.id, warning: loginWarning });
   } catch(e) { send500(res, e); }
 });
 
@@ -842,7 +854,18 @@ router.post('/api/admin/accounts/rejected/:id/restore', requireAdmin, (req, res)
     fatherInfo:       rec.father_info       || '',
     motherInfo:       rec.mother_info       || '',
     monthlyIncome:    rec.monthly_income    || '',
+    guardianInfo:     rec.guardian_info     || '',
+    specialization:   rec.specialization    || '',
+    avatarFaceX:      rec.avatar_face_x ?? 50,
+    avatarFaceY:      rec.avatar_face_y ?? 50,
+    // Google accounts log in by google_id — losing it = "google_email_taken" on every sign-in.
+    googleId:         rec.google_id || null,
   });
+
+  let loginWarning = null;
+  if ((rec.auth_provider || 'local') === 'local' && !rec.password_hash) {
+    loginWarning = 'This rejected record has no saved password. The resident must use "Forgot Password" to set one after approval.';
+  }
 
   // Re-attach ID docs AND cert documents if they exist
   if (rec.id_front_url || rec.selfie_url) {
@@ -878,7 +901,7 @@ router.post('/api/admin/accounts/rejected/:id/restore', requireAdmin, (req, res)
     email: restored.email, createdAt: new Date().toISOString(),
   });
 
-  res.json({ success: true, userId: restored.id });
+  res.json({ success: true, userId: restored.id, warning: loginWarning });
 });
 
 // ── Full user profile for admin review (User Management → Review button) ──
@@ -1799,6 +1822,9 @@ router.post('/api/admin/semester/rollover', requireAdmin, async (req, res) => {
     logAdminAction(req.user.id, 'semester_rollover', 'system', null,
       `${newSemester} SY${schoolYear} — archived ${result.archived} residents`);
     log.admin(`🔄 SEMESTER ROLLOVER → ${newSemester} SY${schoolYear} | archived=${result.archived} skipped=${result.skipped} — by @${req.user.username}`);
+    if (result.skipped) {
+      log.error(`⚠ Rollover left ${result.skipped} resident(s) in place: ${result.skippedDetails.map(d => `@${d.username} (${d.reason})`).join('; ')}`);
+    }
     res.json({ success: true, ...result, newSemester, schoolYear, dbBackupWarning });
   } catch (err) { send500(res, err); }
 });
@@ -2066,54 +2092,191 @@ router.get('/api/admin/db-archives/:id/download', requireAdmin, async (req, res)
   } catch (err) { send500(res, err); }
 });
 
-/**
- * POST /api/admin/db-archives/:id/restore
- * Loads a saved snapshot back in as the live DB — same mechanism as
- * /api/admin/backup/restore, just sourced from the closet instead of an
- * upload. Destructive: overwrites all current data.
- */
-router.post('/api/admin/db-archives/:id/restore', requireAdmin, async (req, res) => {
+// ── Archive viewer (READ-ONLY) ─────────────────────────────────────────────
+// "Setting a snapshot active" never touches connecthub.db. The snapshot file is
+// opened READONLY, in its own handle, only for the duration of a request. The live
+// database keeps serving residents and every other admin tab the whole time.
+// Which snapshot an admin is browsing is remembered in THEIR session only
+// (req.session.viewingArchiveId), so it cannot affect other admins or residents,
+// and it simply disappears on logout / session expiry (= back to live).
+//
+// The old "Load" endpoint (POST /api/admin/db-archives/:id/restore) overwrote the
+// live DB file while the server still held it open. It was removed on purpose.
+// Disaster-recovery restores remain available from Backup & Restore.
+
+/** Where a cloud snapshot is cached locally while it is being viewed. */
+function archiveCachePath(archiveId) {
+  const path = require('path');
+  const os   = require('os');
+  return path.join(os.tmpdir(), 'damis-archive-view', `${String(archiveId).replace(/[^a-zA-Z0-9_-]/g, '')}.db`);
+}
+
+/** Return a local filesystem path for a snapshot (downloading + caching it if it lives in Cloudinary). */
+async function resolveArchiveFile(rec) {
+  const fs   = require('fs');
+  const path = require('path');
+
+  if (rec.storage !== 'cloudinary') {
+    if (!rec.file_url || !fs.existsSync(rec.file_url)) {
+      const err = new Error('Archive file is missing from local disk.');
+      err.status = 404;
+      throw err;
+    }
+    return rec.file_url;
+  }
+
+  const cached = archiveCachePath(rec.id);
+  if (fs.existsSync(cached) && fs.statSync(cached).size > 0) return cached;
+
+  fs.mkdirSync(path.dirname(cached), { recursive: true });
+  const upstream = await fetch(rec.file_url);
+  if (!upstream.ok) throw new Error(`Cloudinary fetch failed (${upstream.status})`);
+  const part = `${cached}.${process.pid}.${Date.now()}.part`;
+  fs.writeFileSync(part, Buffer.from(await upstream.arrayBuffer()));
+  fs.renameSync(part, cached); // atomic: a half-written file is never used
+  return cached;
+}
+
+/** Open a snapshot strictly read-only and sanity-check it. Caller MUST close(). */
+function openArchiveReadonly(file) {
+  const Database = require('better-sqlite3');
+  const snap = new Database(file, { readonly: true, fileMustExist: true });
+  try {
+    snap.prepare('SELECT COUNT(*) FROM users').get();
+  } catch (e) {
+    snap.close();
+    const err = new Error(`Archived file appears corrupt: ${e.message}`);
+    err.status = 400;
+    throw err;
+  }
+  return snap;
+}
+
+/** Which snapshot (if any) is this admin session currently viewing? Clears stale ids. */
+function getViewingArchive(req) {
+  const id = req.session?.viewingArchiveId;
+  if (!id) return null;
+  const rec = getDbArchiveById(id);
+  if (!rec) { delete req.session.viewingArchiveId; return null; } // snapshot was purged
+  return rec;
+}
+
+/** GET /api/admin/db-archives/active — is this admin on the live DB or browsing a snapshot? */
+router.get('/api/admin/db-archives/active', requireAdmin, (req, res) => {
+  try {
+    const rec = getViewingArchive(req);
+    res.json({ mode: rec ? 'archive' : 'live', archive: rec || null });
+  } catch (err) { send500(res, err, 'archive active status'); }
+});
+
+/** POST /api/admin/db-archives/live — back to the present database. Nothing to restore: it was never touched. */
+router.post('/api/admin/db-archives/live', requireAdmin, (req, res) => {
+  try {
+    const prev = getViewingArchive(req);
+    delete req.session.viewingArchiveId;
+    if (prev) {
+      logAdminAction(req.user.id, 'db_archive_view_ended', 'system', prev.id, prev.label);
+      log.admin(`🟢 Archive view ended (live DB active) — was viewing "${prev.label}" — by @${req.user.username}`);
+    }
+    res.json({ success: true, mode: 'live' });
+  } catch (err) { send500(res, err, 'archive deactivate'); }
+});
+
+/** POST /api/admin/db-archives/:id/activate — start browsing a snapshot (static, read-only). Live DB untouched. */
+router.post('/api/admin/db-archives/:id/activate', requireAdmin, async (req, res) => {
+  let snap;
   try {
     const rec = getDbArchiveById(req.params.id);
     if (!rec) return res.status(404).json({ error: 'Archive not found.' });
 
-    const path = require('path');
-    const os   = require('os');
-    const fs   = require('fs');
-    const Database = require('better-sqlite3');
+    const file = await resolveArchiveFile(rec);
+    snap = openArchiveReadonly(file); // validates before we commit to this snapshot
+    req.session.viewingArchiveId = rec.id;
 
-    const tmpPath = path.join(os.tmpdir(), `damis-archive-restore-${Date.now()}.db`);
+    logAdminAction(req.user.id, 'db_archive_view_started', 'system', rec.id, rec.label);
+    log.admin(`🔎 Archive view started: "${rec.label}" (read-only; live DB untouched) — by @${req.user.username}`);
+    res.json({ success: true, mode: 'archive', archive: rec });
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message });
+    send500(res, err, 'archive activate');
+  } finally {
+    try { snap?.close(); } catch (_) {}
+  }
+});
 
-    if (rec.storage === 'cloudinary') {
-      const upstream = await fetch(rec.file_url);
-      if (!upstream.ok) throw new Error(`Cloudinary fetch failed (${upstream.status})`);
-      fs.writeFileSync(tmpPath, Buffer.from(await upstream.arrayBuffer()));
-    } else {
-      if (!fs.existsSync(rec.file_url)) return res.status(404).json({ error: 'Archive file is missing from local disk.' });
-      fs.copyFileSync(rec.file_url, tmpPath);
-    }
+/**
+ * GET /api/admin/db-archives/:id/view — static records of a snapshot:
+ * summary, residents (+ room/bed), rooms (+ occupants) and billing.
+ * Credentials (password hash, google_id) are never sent. Each section is queried
+ * defensively: an older snapshot that lacks a table/column yields a warning for
+ * that section instead of failing the whole view.
+ */
+router.get('/api/admin/db-archives/:id/view', requireAdmin, async (req, res) => {
+  let snap;
+  try {
+    const rec = getDbArchiveById(req.params.id);
+    if (!rec) return res.status(404).json({ error: 'Archive not found.' });
 
-    // Validate before touching the live DB
-    try {
-      const checkDb = new Database(tmpPath, { readonly: true });
-      checkDb.prepare('SELECT COUNT(*) FROM users').get();
-      checkDb.close();
-    } catch (e) {
-      fs.unlink(tmpPath, () => {});
-      return res.status(400).json({ error: `Archived file appears corrupt: ${e.message}` });
-    }
+    snap = openArchiveReadonly(await resolveArchiveFile(rec));
+    const warnings = [];
+    const all = (label, sql) => {
+      try { return snap.prepare(sql).all(); }
+      catch (e) { warnings.push(`${label}: ${e.message}`); return []; }
+    };
 
-    const DATA_DIR   = process.env.DATA_DIR || path.join(__dirname, '..');
-    const liveDbPath = path.join(DATA_DIR, 'connecthub.db');
-    const srcDb = new Database(tmpPath, { readonly: true });
-    await srcDb.backup(liveDbPath);
-    srcDb.close();
-    fs.unlink(tmpPath, () => {});
+    const USER_KEYS = ['id','first_name','middle_name','last_name','suffix','username','email','phone','sex',
+      'location','present_address','year_level','course','school_name','role','account_status','is_active',
+      'created_at','room_number','bed_number'];
+    const pick = (row) => Object.fromEntries(USER_KEYS.map(k => [k, row[k] ?? null]));
 
-    log.admin(`♻ DB RESTORED from archive "${rec.label}" — by @${req.user.username}`);
-    // No logAdminAction here — the admin_logs table just got replaced by the restore.
-    res.json({ success: true, message: `Database restored from "${rec.label}". The server will continue running with the restored data.` });
-  } catch (err) { send500(res, err); }
+    const users = all('users', `
+      SELECT u.*, dr.room_number AS room_number, ba.bed_number AS bed_number
+      FROM users u
+      LEFT JOIN bed_assignments ba ON ba.user_id = u.id
+      LEFT JOIN dorm_rooms dr      ON dr.id = ba.room_id
+      ORDER BY u.last_name, u.first_name`).map(pick);
+
+    const residents = users.filter(u => u.role === 'user');
+    const admins    = users.filter(u => u.role !== 'user');
+
+    const roomRows = all('rooms', 'SELECT * FROM dorm_rooms ORDER BY room_number');
+    const beds = all('beds', `
+      SELECT ba.room_id, ba.bed_number, u.first_name, u.last_name, u.username
+      FROM bed_assignments ba LEFT JOIN users u ON u.id = ba.user_id
+      ORDER BY ba.room_id, ba.bed_number`);
+    const rooms = roomRows.map(r => ({
+      room_number: r.room_number, gender: r.gender, capacity: r.capacity,
+      occupants: beds.filter(b => b.room_id === r.id).map(b => ({
+        bed_number: b.bed_number, first_name: b.first_name, last_name: b.last_name, username: b.username,
+      })),
+    }));
+
+    const BILLING_LIMIT = 5000;
+    const billing = all('billing', `
+      SELECT b.month, b.amount, b.status, b.paid_at, u.first_name, u.last_name, u.username
+      FROM dorm_billing b LEFT JOIN users u ON u.id = b.user_id
+      ORDER BY b.month DESC, u.last_name LIMIT ${BILLING_LIMIT}`);
+    if (billing.length === BILLING_LIMIT) warnings.push(`billing: showing the newest ${BILLING_LIMIT} rows only`);
+
+    const sumBy = (st) => billing.filter(b => b.status === st).reduce((t, b) => t + (Number(b.amount) || 0), 0);
+    const summary = {
+      residents: residents.filter(u => u.account_status === 'approved').length,
+      residentsTotal: residents.length,
+      admins: admins.length,
+      rooms: rooms.length,
+      bedsOccupied: beds.length,
+      billingRows: billing.length,
+      billingPaid: sumBy('paid'),
+      billingUnpaid: sumBy('unpaid'),
+    };
+
+    res.json({ readOnly: true, archive: rec, summary, residents, admins, rooms, billing, warnings });
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message });
+    send500(res, err, 'archive view');
+  } finally {
+    try { snap?.close(); } catch (_) {}
+  }
 });
 
 /** DELETE /api/admin/db-archives/:id — purge a saved snapshot and free its storage */
@@ -2132,6 +2295,8 @@ router.delete('/api/admin/db-archives/:id', requireAdmin, async (req, res) => {
     }
 
     deleteDbArchiveById(rec.id);
+    if (req.session?.viewingArchiveId === rec.id) delete req.session.viewingArchiveId;
+    require('fs').unlink(archiveCachePath(rec.id), () => {}); // cached copy of a cloud snapshot (ignore if absent)
     logAdminAction(req.user.id, 'db_archive_purged', 'system', rec.id, rec.label);
     log.admin(`🗑 DB archive purged: "${rec.label}" — by @${req.user.username}`);
     res.json({ success: true });

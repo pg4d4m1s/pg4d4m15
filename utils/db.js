@@ -1100,8 +1100,8 @@ function archiveRejectedRegistration({ user, idDocs, reason, rejectedBy }) {
        id_front_url, id_back_url, selfie_url, id_type,
        cert_residency_url, cert_low_income_url, cert_enrollment_url,
        rejection_reason, rejected_by, original_created_at, password_hash,
-       avatar_face_x, avatar_face_y)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+       avatar_face_x, avatar_face_y, google_id)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
   `).run(
     id, user.id, user.firstName, user.middleName||'', user.lastName, user.suffix||'',
     user.username, user.email, user.phone||'', user.birthday||'', user.sex||'',
@@ -1115,7 +1115,8 @@ function archiveRejectedRegistration({ user, idDocs, reason, rejectedBy }) {
     idDocs?.cert_residency_url||'', idDocs?.cert_low_income_url||'', idDocs?.cert_enrollment_url||'',
     reason||'', rejectedBy, user.createdAt||'',
     user.password||null,
-    user.avatarFaceX ?? 50, user.avatarFaceY ?? 50
+    user.avatarFaceX ?? 50, user.avatarFaceY ?? 50,
+    user.googleId || null
   );
   return id;
 }
@@ -2078,6 +2079,15 @@ migrate(`ALTER TABLE utility_bills ADD COLUMN image_url TEXT DEFAULT ''`);
 // Semester tag on deleted_users so we can filter by semester for re-enrollment
 migrate(`ALTER TABLE deleted_users ADD COLUMN semester_tag TEXT DEFAULT ''`);
 migrate(`ALTER TABLE deleted_users ADD COLUMN guardian_info TEXT DEFAULT ''`);
+// Login identity + profile extras. Without these a restored resident came back
+// with NO password and NO google_id, so they could never log in again
+// (Google users hit "google_email_taken", local users hit "no password set").
+migrate(`ALTER TABLE deleted_users ADD COLUMN password_hash  TEXT DEFAULT NULL`);
+migrate(`ALTER TABLE deleted_users ADD COLUMN google_id      TEXT DEFAULT NULL`);
+migrate(`ALTER TABLE deleted_users ADD COLUMN specialization TEXT DEFAULT ''`);
+migrate(`ALTER TABLE deleted_users ADD COLUMN avatar_face_x  INTEGER DEFAULT 50`);
+migrate(`ALTER TABLE deleted_users ADD COLUMN avatar_face_y  INTEGER DEFAULT 50`);
+migrate(`ALTER TABLE rejected_registrations ADD COLUMN google_id TEXT DEFAULT NULL`);
 // Per-user admission slip serial counter (reset each semester rollover)
 migrate(`ALTER TABLE users ADD COLUMN admission_no TEXT DEFAULT ''`);
 
@@ -2273,10 +2283,39 @@ function nextAdmissionNo() {
 }
 
 /**
+ * Detach/clear every row that points at a user WITHOUT "ON DELETE CASCADE",
+ * so `DELETE FROM users` cannot abort with "FOREIGN KEY constraint failed".
+ * Single source of truth — used by the admin Delete button AND semester rollover
+ * (rollover used to keep its own, shorter list: it forgot room_history, so any
+ * resident who had ever been unassigned/moved silently survived the rollover).
+ *
+ * Keep in sync with the schema: any new table with `REFERENCES users(id)` and no
+ * ON DELETE CASCADE must be added here. Find offenders with:
+ *   PRAGMA foreign_key_check;
+ * MUST be called inside a transaction (callers own it).
+ * Returns per-table change counts for logging.
+ */
+function clearUserForeignRefs(userId) {
+  return {
+    bed_assignments: db.prepare('DELETE FROM bed_assignments WHERE user_id = ?').run(userId).changes,
+    room_history:    db.prepare('DELETE FROM room_history    WHERE user_id = ?').run(userId).changes,
+    dorm_billing:    db.prepare('DELETE FROM dorm_billing    WHERE user_id = ?').run(userId).changes,
+    reviewer_refs:   db.prepare('UPDATE id_verification_requests SET reviewed_by = NULL WHERE reviewed_by = ?').run(userId).changes,
+  };
+}
+
+/**
  * Semester rollover: archive all current approved residents to deleted_users,
  * reset the admission counter, and update the semester setting.
  * Called by the admin "New Semester" action.
- * Returns { archived, skipped } counts.
+ *
+ * Each resident is archived + removed in its OWN nested transaction (a SAVEPOINT
+ * inside the outer one). If anything fails for one resident, only that resident
+ * is rolled back — they are NOT left half-archived (archive row written but the
+ * account still live, which is what produced duplicates before) — and the exact
+ * reason is logged and returned in `skippedDetails`.
+ *
+ * Returns { archived, skipped, skippedDetails: [{ username, email, reason }] }.
  */
 function semesterRollover(newSemester, schoolYear, newSlipValidTo, adminId) {
   const { randomUUID } = require('crypto');
@@ -2291,6 +2330,7 @@ function semesterRollover(newSemester, schoolYear, newSlipValidTo, adminId) {
   ).all();
 
   let archived = 0, skipped = 0;
+  const skippedDetails = [];
 
   const insertArchive = db.prepare(`
     INSERT OR IGNORE INTO deleted_users
@@ -2300,33 +2340,43 @@ function semesterRollover(newSemester, schoolYear, newSlipValidTo, adminId) {
        father_info, mother_info, guardian_info, monthly_income,
        id_front_url, id_back_url, selfie_url,
        cert_residency_url, cert_low_income_url, cert_enrollment_url,
-       original_created_at, deleted_by, semester_tag)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+       original_created_at, deleted_by, semester_tag,
+       password_hash, google_id, specialization, avatar_face_x, avatar_face_y)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
   `);
+
+  // Nested call inside the outer transaction below → better-sqlite3 turns it into a savepoint.
+  const archiveOne = db.transaction((u) => {
+    const ins = insertArchive.run(
+      randomUUID(), u.id,
+      u.first_name, u.middle_name || '', u.last_name, u.suffix || '',
+      u.username, u.email, u.phone || '',
+      u.birthday || '', u.sex || '', u.civil_status || '', u.bio || '', u.location || '',
+      u.avatar || '', u.auth_provider || 'local', u.role || 'user',
+      u.present_address || '', u.permanent_address || '',
+      u.school_name || '', u.course || '', u.year_level || '', u.school_address || '',
+      u.father_info || '', u.mother_info || '', u.guardian_info || '', u.monthly_income || '',
+      u.id_front_url || '', u.id_back_url || '', u.selfie_url || '',
+      u.cert_residency_url || '', u.cert_low_income_url || '', u.cert_enrollment_url || '',
+      u.created_at || '', adminId, semesterTag,
+      u.password || null, u.google_id || null, u.specialization || '',
+      u.avatar_face_x ?? 50, u.avatar_face_y ?? 50
+    );
+    // INSERT OR IGNORE swallows constraint errors silently — never delete a user we failed to archive.
+    if (ins.changes !== 1) throw new Error('archive row was not written (INSERT OR IGNORE ignored it)');
+    clearUserForeignRefs(u.id);
+    db.prepare('DELETE FROM users WHERE id = ?').run(u.id);
+  });
 
   db.transaction(() => {
     for (const u of residents) {
       try {
-        insertArchive.run(
-          randomUUID(), u.id,
-          u.first_name, u.middle_name || '', u.last_name, u.suffix || '',
-          u.username, u.email, u.phone || '',
-          u.birthday || '', u.sex || '', u.civil_status || '', u.bio || '', u.location || '',
-          u.avatar || '', u.auth_provider || 'local', u.role || 'user',
-          u.present_address || '', u.permanent_address || '',
-          u.school_name || '', u.course || '', u.year_level || '', u.school_address || '',
-          u.father_info || '', u.mother_info || '', u.guardian_info || '', u.monthly_income || '',
-          u.id_front_url || '', u.id_back_url || '', u.selfie_url || '',
-          u.cert_residency_url || '', u.cert_low_income_url || '', u.cert_enrollment_url || '',
-          u.created_at || '', adminId, semesterTag
-        );
-        // Clear FK-constrained rows, then hard-delete
-        db.prepare('DELETE FROM bed_assignments WHERE user_id = ?').run(u.id);
-        db.prepare('DELETE FROM dorm_billing WHERE user_id = ?').run(u.id);
-        db.prepare('DELETE FROM users WHERE id = ?').run(u.id);
+        archiveOne(u);
         archived++;
       } catch (e) {
         skipped++;
+        skippedDetails.push({ username: u.username, email: u.email, reason: e.message });
+        log.error(`[rollover] SKIPPED @${u.username} (${u.email}) — ${e.message}`);
       }
     }
   })();
@@ -2337,7 +2387,7 @@ function semesterRollover(newSemester, schoolYear, newSlipValidTo, adminId) {
   setSetting('slip_valid_to', newSlipValidTo || '');
   setSetting('admission_counter', '0'); // reset counter for new semester
 
-  return { archived, skipped };
+  return { archived, skipped, skippedDetails };
 }
 
 // ── DB Archives (full-db snapshot metadata) ────────────────────────────────
@@ -2442,7 +2492,7 @@ module.exports = {
   // GCash / billing receipts
   setBillReceipt, clearBillReceipt,
   // Admission Slip / Semester
-  nextAdmissionNo, semesterRollover,
+  nextAdmissionNo, semesterRollover, clearUserForeignRefs,
   // DB Archives (full snapshots)
   createDbArchive, getDbArchives, getDbArchiveById, deleteDbArchiveById,
 };
