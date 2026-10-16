@@ -10,6 +10,9 @@
  *   6. Residents who have not yet answered the current questionnaire
  *   7. Respondent profile (age, sex, year level, program, school, origin)
  *
+ * Also hosts the survey ON/OFF switch (injected at the top of the tab, see loadSurveySwitch).
+ * OFF hides the questionnaire from residents' feeds and from the admin dashboard; results stay.
+ *
  * Exports: a multi-sheet Excel workbook (results, profile, per-respondent responses,
  * comments, report info) and a multi-section PDF (profile, acceptability, item analysis,
  * comments). The Dormitory Manager panel lives in admin-manager-survey.js and reuses
@@ -32,6 +35,9 @@
   var _loading    = false;
   var _profile    = null;   // { n, ageStats, tables{…}, respondents[] } from /api/admin/research/profile
   var _profById   = {};     // response id → enriched respondent row
+
+  var _surveyEnabled = null;   // null = not loaded yet
+  var _switchBusy    = false;
 
   function $id(id) { return document.getElementById(id); }
 
@@ -425,7 +431,97 @@
   // LOAD
   // ═══════════════════════════════════════════════════
 
+  // ═══════════════════════════════════════════════════
+  // SURVEY ON/OFF SWITCH (markup is injected so admin.html does not need to change)
+  // ═══════════════════════════════════════════════════
+
+  async function switchRequest(method, body) {
+    var res  = await fetch('/api/admin/research/survey-switch', {
+      method: method,
+      headers: { 'Content-Type': 'application/json' },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    var data = await res.json().catch(function () { return {}; });
+    if (!res.ok || data.error) throw new Error(data.error || ('HTTP ' + res.status));
+    return data;
+  }
+
+  function renderSurveySwitch(errMsg) {
+    var tab = $id('tab-research');
+    if (!tab) return;
+    var host = $id('research-survey-switch');
+    if (!host) {
+      host = document.createElement('div');
+      host.id = 'research-survey-switch';
+      host.className = 'mb-6';
+      tab.insertBefore(host, tab.firstChild);
+    }
+
+    var known = _surveyEnabled !== null;
+    var on    = _surveyEnabled === true;
+    var desc  = errMsg ? 'Could not load the survey setting: ' + errMsg
+      : !known ? 'Loading…'
+      : on  ? 'ON — residents see the survey card on their feed, and the Dormitory Manager card shows on the admin dashboard.'
+            : 'OFF — the survey is hidden from residents and from the admin dashboard, and new submissions are blocked. Collected responses and the results below are kept.';
+
+    host.innerHTML =
+      '<div class="flex items-center justify-between gap-4 flex-wrap rounded-2xl border px-5 py-4 bg-white dark:bg-slate-800 ' +
+        (on ? 'border-green-200 dark:border-green-900/50' : 'border-slate-200 dark:border-slate-700') + '">' +
+        '<div class="flex items-center gap-3 min-w-0">' +
+          '<div class="w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0 ' +
+            (on ? 'bg-green-500 text-white' : 'bg-slate-200 dark:bg-slate-700 text-slate-500') + '"><i class="fa-solid fa-clipboard-question"></i></div>' +
+          '<div class="min-w-0">' +
+            '<p class="text-sm font-semibold text-slate-700 dark:text-slate-200">Survey availability</p>' +
+            '<p class="text-xs ' + (errMsg ? 'text-red-500' : 'text-slate-400') + '">' + esc(desc) + '</p>' +
+          '</div>' +
+        '</div>' +
+        '<button id="research-survey-switch-btn" role="switch" aria-checked="' + on + '" ' +
+          'class="relative w-12 h-6 rounded-full transition-colors duration-200 flex-shrink-0 ' +
+          (on ? 'bg-brand-600' : 'bg-slate-200 dark:bg-slate-700') + (known && !_switchBusy ? '' : ' opacity-50 cursor-not-allowed') + '" ' +
+          'title="' + (on ? 'Turn the survey off' : 'Turn the survey on') + '"' + (known && !_switchBusy ? '' : ' disabled') + '>' +
+          '<span class="absolute left-1 top-1 w-4 h-4 rounded-full bg-white shadow transition-transform duration-200" ' +
+            'style="transform:' + (on ? 'translateX(24px)' : 'translateX(0)') + '"></span>' +
+        '</button>' +
+      '</div>';
+
+    var btn = $id('research-survey-switch-btn');
+    if (btn) btn.addEventListener('click', toggleSurveySwitch);
+  }
+
+  async function loadSurveySwitch() {
+    try {
+      var data = await switchRequest('GET');
+      _surveyEnabled = !!data.enabled;
+      renderSurveySwitch();
+    } catch (e) {
+      console.error('[Research] Survey switch load failed:', e);
+      renderSurveySwitch(e.message);
+    }
+  }
+
+  async function toggleSurveySwitch() {
+    if (_switchBusy || _surveyEnabled === null) return;
+    var next = !_surveyEnabled;
+    _switchBusy = true;
+    renderSurveySwitch();
+    try {
+      var data = await switchRequest('PUT', { enabled: next });
+      _surveyEnabled = !!data.enabled;
+      notify(_surveyEnabled ? 'Survey turned ON — it is visible again.' : 'Survey turned OFF — hidden from residents and admin.');
+      console.log('[Research] Survey switch → ' + (_surveyEnabled ? 'ON' : 'OFF'));
+      // Refresh the dashboard's Dormitory Manager card so it shows/hides immediately.
+      if (typeof window.loadManagerCard === 'function') window.loadManagerCard();
+    } catch (e) {
+      console.error('[Research] Survey switch change failed:', e);
+      notify('Could not change the survey setting: ' + e.message, 'error');
+    } finally {
+      _switchBusy = false;
+      renderSurveySwitch();
+    }
+  }
+
   async function loadResearchTab() {
+    loadSurveySwitch();   // independent of the results below; handles its own errors
     if (_loading) return;
     _loading = true;
 

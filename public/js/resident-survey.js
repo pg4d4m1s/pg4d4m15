@@ -9,6 +9,7 @@
  *   2. If not answered, and not currently snoozed (a local, per-browser
  *      timestamp — "Later" hides the card for a few days), renders a small
  *      dismissible card into #resident-survey-card.
+ *   (If the admin has switched the survey OFF, /status reports enabled:false and nothing renders.)
  *   3. "Later" snoozes. "Take the survey" opens a modal with the full
  *      instrument, fetched from /api/research/questionnaire so wording is
  *      never duplicated. Only a successful submission removes the card
@@ -33,6 +34,7 @@ window.ResidentSurvey = (function () {
   var spec       = null;
   var loadFailed = false;
   var submitted  = false;
+  var closed     = false;   // server says the survey is switched OFF
 
   function el(id) { return document.getElementById(id); }
 
@@ -265,6 +267,7 @@ window.ResidentSurvey = (function () {
     try {
       var res  = await fetch('/api/research/questionnaire');
       var data = await res.json();
+      if (res.status === 403 && data.disabled) { closed = true; return; }
       if (!res.ok || !data.questionnaire) throw new Error(data.error || 'HTTP ' + res.status);
       spec = data.questionnaire;
     } catch (e) {
@@ -277,6 +280,7 @@ window.ResidentSurvey = (function () {
     injectStyles();
     if (!el(MODAL_ID)) return;
     await ensureSpec();
+    if (closed) { hideCard(); toast('The survey is currently closed.', 'info'); return; }
     renderModal();
     document.body.style.overflow = 'hidden';
   }
@@ -347,6 +351,11 @@ window.ResidentSurvey = (function () {
       });
       var data = await res.json().catch(function () { return {}; });
 
+      if (res.status === 403 && data.disabled) {
+        closed = true; hideCard(); close();
+        toast('The survey has just been closed. Your answers were not saved.', 'info');
+        return;
+      }
       if (!res.ok) {
         toast(data.error || 'Could not save your answers. Please try again.', 'error');
         if (btn) { btn.disabled = false; btn.textContent = 'Submit'; }
@@ -376,6 +385,7 @@ window.ResidentSurvey = (function () {
       var res  = await fetch('/api/research/survey/status');
       var data = await res.json();
       if (!res.ok) return; // not logged in, etc. — stay silent
+      if (data.enabled === false) { hideCard(); return; } // admin switched the survey OFF
 
       if (data.answered) {
         localStorage.removeItem(SNOOZE_KEY); // no reason to keep this around

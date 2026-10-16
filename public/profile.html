@@ -99,6 +99,7 @@
           <i class="fa-solid fa-pen text-xs"></i>Edit Profile
         </button>
         <div id="own-rep-badge" class="hidden items-center gap-1.5 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl px-3 py-2"></div>
+        <div id="own-views-badge" class="hidden items-center gap-1.5 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl px-3 py-2"></div>
         <button id="follow-btn" onclick="toggleFollow()" class="hidden text-sm font-semibold px-5 py-2 rounded-xl transition-colors">Add Friend</button>
         <button id="follow-only-btn" class="hidden text-sm font-semibold px-4 py-2 rounded-xl transition-colors">Follow</button>
         <button id="message-btn" class="hidden bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 text-sm font-semibold px-4 py-2 rounded-xl flex items-center gap-2 transition-colors">
@@ -365,7 +366,15 @@
     const r2=await fetch(`/api/users/${uname}`);
     if(!r2.ok){document.body.innerHTML='<div class="flex items-center justify-center h-screen"><div class="text-center"><div class="text-5xl mb-4">👤</div><p class="font-semibold text-slate-600 dark:text-slate-400">User not found</p><a href="/feed.html" class="text-brand-600 text-sm mt-2 inline-block hover:underline">Back to feed</a></div></div>';return;}
     const d2=await r2.json();profileUser=d2.user;isOwn=currentUser.id===profileUser.id;
-    renderProfile();await loadPosts();
+    renderProfile();recordProfileView();await loadPosts();
+  }
+
+  // Tell the server a resident opened this profile. Fire-and-forget: a failure here must never
+  // affect the page. The server is authoritative (ignores self, admins, and rapid repeat views).
+  function recordProfileView(){
+    if(isOwn||!profileUser||['admin','superadmin'].includes(currentUser.role))return;
+    fetch(`/api/users/${encodeURIComponent(profileUser.username)}/view`,{method:'POST'})
+      .catch(e=>console.warn('[ProfileView] not recorded:',e.message));
   }
 
   async function loadNavCounts(){
@@ -413,6 +422,14 @@
       document.getElementById('avatar-edit-btn').classList.remove('hidden');
       document.getElementById('cover-edit-btn').classList.remove('hidden');
       initVerifyTab();
+      // Profile view counter (owner only — the API omits it for other viewers)
+      const viewsBadge=document.getElementById('own-views-badge');
+      if(viewsBadge&&u.profileViews){
+        const t=u.profileViews.total|0, q=u.profileViews.unique|0;
+        viewsBadge.classList.remove('hidden');viewsBadge.style.display='flex';
+        viewsBadge.title=`${q} resident${q!==1?'s':''} viewed your profile`;
+        viewsBadge.innerHTML=`<i class="fa-solid fa-eye text-brand-500 text-xs"></i><span class="text-sm font-bold text-slate-600 dark:text-slate-300">${t} view${t!==1?'s':''}</span>`;
+      }
       // Show own reputation as read-only score badge
       const ownRepBadge = document.getElementById('own-rep-badge');
       if (ownRepBadge) {

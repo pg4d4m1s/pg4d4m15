@@ -15,6 +15,12 @@
  *   GET  /api/admin/research/profile           respondent profile (age, sex, year level, program, origin)
  *                                              frequency tables + enriched per-respondent rows
  *
+ * Survey on/off switch (utils/surveySwitch.js) — when OFF the questionnaires are hidden and
+ * submissions are refused with 403 {disabled:true}; stored responses are untouched:
+ *   GET    /api/research/survey/status                 now also returns { enabled }
+ *   GET    /api/admin/research/survey-switch           current state
+ *   PUT    /api/admin/research/survey-switch           body { enabled: boolean }
+ *
  * Dormitory Manager questionnaire (separate table + stats, never mixed with residents):
  *   GET    /api/admin/research/manager/questionnaire   instrument spec
  *   GET    /api/admin/research/manager/mine            the signed-in admin's own answers (prefill + card state)
@@ -39,7 +45,8 @@ const express = require('express');
 const router  = express.Router();
 
 const log = require('../utils/logger');
-const { db } = require('../utils/db');
+const { db, logAdminAction } = require('../utils/db');
+const survey = require('../utils/surveySwitch');
 const {
   getQuestionnaire,
   validateAnswers,
@@ -101,6 +108,7 @@ function send500(res, err, label = '') {
  */
 router.get('/api/research/questionnaire', (req, res) => {
   try {
+    if (!survey.isEnabled()) return survey.sendDisabled(res);
     return res.json({ success: true, questionnaire: getQuestionnaire() });
   } catch (err) {
     return send500(res, err, 'research/questionnaire');
@@ -113,6 +121,11 @@ router.get('/api/research/questionnaire', (req, res) => {
  */
 router.post('/api/research/survey', (req, res) => {
   try {
+    if (!survey.isEnabled()) {
+      log.info('[Research] Submission refused — survey is switched OFF');
+      return survey.sendDisabled(res);
+    }
+
     // ── Resolve the respondent's email server-side ──────────────────────
     const pending = req.session?.pendingRegistration;
     let email = '';
@@ -173,10 +186,11 @@ router.post('/api/research/survey', (req, res) => {
  */
 router.get('/api/research/survey/status', (req, res) => {
   try {
+    if (!survey.isEnabled()) return res.json({ success: true, enabled: false, answered: false });
     const email = req.user?.email
       || (req.session?.pendingRegistration?.emailVerified ? req.session.pendingRegistration.email : '');
-    if (!email) return res.json({ success: true, answered: false });
-    return res.json({ success: true, answered: hasResponded(email) });
+    if (!email) return res.json({ success: true, enabled: true, answered: false });
+    return res.json({ success: true, enabled: true, answered: hasResponded(email) });
   } catch (err) {
     return send500(res, err, 'research/survey/status');
   }
@@ -191,6 +205,31 @@ function wantsAnonymize(req) {
   const v = String(req.query.anonymize ?? '1').toLowerCase();
   return !(v === '0' || v === 'false');
 }
+
+// Survey on/off switch. Results/exports below stay readable while OFF, so the switch
+// itself (and the data) remain reachable from the Research tab.
+router.get('/api/admin/research/survey-switch', requireAdmin, (req, res) => {
+  try {
+    return res.json({ success: true, ...survey.getState() });
+  } catch (err) {
+    return send500(res, err, 'admin/research/survey-switch');
+  }
+});
+
+router.put('/api/admin/research/survey-switch', requireAdmin, (req, res) => {
+  try {
+    const enabled = req.body?.enabled;
+    if (typeof enabled !== 'boolean') {
+      return res.status(400).json({ error: '"enabled" must be true or false.' });
+    }
+    const state = survey.setEnabled(enabled, req.user?.username || '');
+    logAdminAction(req.user.id, 'research_survey_switch', 'setting', 'research_survey_enabled',
+      `Research survey turned ${enabled ? 'ON' : 'OFF'}`);
+    return res.json({ success: true, ...state });
+  } catch (err) {
+    return send500(res, err, 'admin/research/survey-switch');
+  }
+});
 
 router.get('/api/admin/research/stats', requireAdmin, (req, res) => {
   try {
@@ -249,7 +288,7 @@ router.get('/api/admin/research/manager/questionnaire', requireAdmin, (req, res)
 router.get('/api/admin/research/manager/mine', requireAdmin, (req, res) => {
   try {
     if (!req.user?.email) return res.status(400).json({ error: 'Your account has no email address on file.' });
-    return res.json({ success: true, ...manager.getMine(req.user.email), instrumentVersion: manager.INSTRUMENT_VERSION });
+    return res.json({ success: true, enabled: survey.isEnabled(), ...manager.getMine(req.user.email), instrumentVersion: manager.INSTRUMENT_VERSION });
   } catch (err) {
     return send500(res, err, 'admin/research/manager/mine');
   }
@@ -258,6 +297,7 @@ router.get('/api/admin/research/manager/mine', requireAdmin, (req, res) => {
 /** Body: { answers: { FS1: 1..5, … }, comments?: string, consentGiven: boolean } */
 router.post('/api/admin/research/manager/survey', requireAdmin, (req, res) => {
   try {
+    if (!survey.isEnabled()) return survey.sendDisabled(res);
     const email = req.user?.email;
     if (!email) return res.status(400).json({ error: 'Your account has no email address on file.' });
 

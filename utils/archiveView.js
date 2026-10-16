@@ -24,6 +24,8 @@
  *   /api/admin/backup/*           a backup must be of the live data, never a snapshot
  *   /api/admin/research/manager/* the admin's own survey answers (tied to their
  *                                 live account, not to the dormitory's archived data)
+ *   /api/admin/research/survey-switch  the global survey on/off flag (app_settings of the
+ *                                 LIVE db — reading or flipping it must never hit a snapshot)
  *
  * Wiring (server.js) — after session + passport, BEFORE the routers:
  *     app.use('/api/admin', archiveViewMiddleware);
@@ -42,6 +44,7 @@ const ALWAYS_LIVE = [
   /^\/db-archives(\/|$)/,
   /^\/backup(\/|$)/,
   /^\/research\/manager(\/|$)/,
+  /^\/research\/survey-switch(\/|$)/,
 ];
 
 // GET routes that look harmless but WRITE (admission-slip assigns an admission number).

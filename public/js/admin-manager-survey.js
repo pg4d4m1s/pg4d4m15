@@ -49,6 +49,8 @@
     try {
       var r = await getJSON('/api/admin/research/manager/mine');
       _mine = r;
+      // Survey switched OFF in Research → hide the dashboard card entirely.
+      if (r.enabled === false) { box.innerHTML = ''; return; }
       renderCard();
     } catch (e) {
       // The card is a convenience — never let it break the dashboard.
@@ -92,6 +94,7 @@
       if (!_q) _q = (await getJSON('/api/admin/research/manager/questionnaire')).questionnaire;
       var fresh = await getJSON('/api/admin/research/manager/mine');
       _mine = fresh;
+      if (fresh.enabled === false) { closeModal(); loadCard(); notify('The survey is currently switched off.', 'error'); return; }
     } catch (e) {
       notify('Could not open the questionnaire: ' + e.message, 'error');
       return;

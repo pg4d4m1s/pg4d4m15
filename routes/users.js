@@ -8,7 +8,8 @@
  * PUT  /api/users/me/cover        — change cover photo (Cloudinary)
  * GET  /api/users/search?q=...    — search users
  * GET  /api/users/suggested       — suggested people to follow
- * GET  /api/users/:username       — any user's public profile
+ * GET  /api/users/:username       — any user's public profile (owner/admin also get profileViews)
+ * POST /api/users/:username/view  — record that the signed-in user opened this profile
  * GET  /api/users/:username/posts — a user's posts
  * POST /api/users/:id/follow      — follow / unfollow toggle
  */
@@ -36,6 +37,7 @@ const {
 } = require('../utils/db');
 
 const log = require('../utils/logger');
+const profileViews = require('../utils/profileViews');
 
 // ── Location privacy (RA 10173 — data minimisation / proportionality) ─────────
 // Registration stores full addresses as "Barangay, City/Municipality, Province,
@@ -190,6 +192,8 @@ router.get('/api/users/:username', (req, res) => {
   const locationMode = isOwnerOrAdmin ? 'full' : (viewerId ? 'coarse' : 'none');
   const reputationScore = getReputationScore(user.id);
   const myVote          = viewerId ? getMyRepVote(viewerId, user.id) : 0;
+  // View counter: visible to the profile owner and to admins only (not to other residents).
+  const canSeeViewStats = !!viewerId && (viewerId === user.id || profileViews.isAdminRole(req.user.role));
 
   res.json({
     user: publicProfile(user, {
@@ -202,8 +206,32 @@ router.get('/api/users/:username', (req, res) => {
       friendCount:         getFriendCount(user.id),
       reputationScore,
       myVote,
+      profileViews: canSeeViewStats ? profileViews.getStats(user.id) : undefined,
     }, locationMode)
   });
+});
+
+// ════════════════════════════════════════════════════
+// RECORD A PROFILE VIEW   POST /api/users/:username/view
+// Called explicitly by profile.html — NOT inside GET /api/users/:username, because other
+// pages (e.g. messages.html) call that GET just to load a name/avatar and are not "views".
+// All rules (self / admin / throttle / notify cooldown) live in utils/profileViews.js.
+// ════════════════════════════════════════════════════
+router.post('/api/users/:username/view', requireAuth, (req, res) => {
+  try {
+    const target = findUserByUsername(req.params.username);
+    if (!target || target.accountStatus !== 'approved') return res.status(404).json({ error: 'User not found.' });
+
+    const result = profileViews.recordView({ viewer: req.user, target });
+    if (result.notified) {
+      const io = req.app.get('io');
+      if (io) io.to(`user:${target.id}`).emit('new-notification', { userId: target.id });
+    }
+    res.json({ success: true, recorded: result.recorded });
+  } catch (err) {
+    log.error(`[ProfileView] POST /api/users/${req.params.username}/view failed: ${err.message}`);
+    res.status(500).json({ error: 'Server error.' });
+  }
 });
 
 // ════════════════════════════════════════════════════
