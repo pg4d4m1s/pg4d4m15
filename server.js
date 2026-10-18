@@ -53,23 +53,40 @@ app.set('io', io);
 // CSP was previously fully disabled (`contentSecurityPolicy: false`), which meant any
 // XSS gap — now or in a future change — had no browser-side backstop (could load a
 // remote <script>, exfiltrate cookies via fetch() to an attacker origin, etc.). The
-// pages are hand-written single-file HTML with inline <script> blocks and inline
-// onclick="..." handlers throughout, so a strict nonce-based CSP would break the UI;
-// 'unsafe-inline' is kept for script-src/style-src as a pragmatic middle ground, but
-// everything else is locked to this app's actual origins (CDNs it really loads from,
-// Cloudinary/UI-Avatars for images, 'self' for API/websocket calls, no <object>/<embed>,
-// no being framed by another site). Migrating inline handlers to addEventListener +
-// a nonce-based CSP (dropping 'unsafe-inline') is the natural next hardening step.
+// pages are hand-written single-file HTML with inline <script> blocks, inline
+// onclick="..." handlers, and inline style="..." attributes throughout, so a strict
+// nonce-based CSP would break the UI; 'unsafe-inline' is kept for script-src/style-src
+// AND for their *-attr variants as a pragmatic middle ground, but everything else is
+// locked to this app's actual origins (CDNs it really loads from, Cloudinary/UI-Avatars
+// for images, 'self' for API/websocket calls, no <object>/<embed>, no being framed by
+// another site). Migrating inline handlers to addEventListener + a nonce-based CSP
+// (dropping 'unsafe-inline') is the natural next hardening step.
+//
+// IMPORTANT: Helmet defaults script-src-attr and style-src-attr to 'none' UNLESS you
+// set them explicitly — they do NOT inherit 'unsafe-inline' from script-src/style-src.
+// script-src-attr governs OnClick-style inline event-handler ATTRIBUTES specifically
+// (a different, more specific rule than script-src, which only governs <script> tags
+// and doesn't cover onclick="..."). Omitting them here silently blocked every
+// onclick="..." handler in admin.html (every button) while reporting as a vague CSP
+// console warning rather than a visible error — this was caught and fixed in testing
+// after the first deploy; keep them in any future edit of this block.
 app.use(helmet({
   contentSecurityPolicy: {
     directives: {
       defaultSrc:  ["'self'"],
       scriptSrc:   ["'self'", "'unsafe-inline'", "'unsafe-eval'",
                     'https://cdn.tailwindcss.com', 'https://cdnjs.cloudflare.com', 'https://cdn.jsdelivr.net'],
+      scriptSrcAttr: ["'unsafe-inline'"], // onclick="..." etc. — see note above
       styleSrc:    ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com', 'https://cdnjs.cloudflare.com', 'https://cdn.jsdelivr.net'],
+      styleSrcAttr: ["'unsafe-inline'"], // style="..." attributes
       fontSrc:     ["'self'", 'https://fonts.gstatic.com', 'https://cdnjs.cloudflare.com'],
       imgSrc:      ["'self'", 'data:', 'blob:', 'https://res.cloudinary.com', 'https://ui-avatars.com'],
-      connectSrc:  ["'self'", 'https://res.cloudinary.com', 'wss:', 'ws:'],
+      // cdn.jsdelivr.net / cdnjs.cloudflare.com are here (not just scriptSrc) because
+      // Chrome DevTools fetches a loaded script's *.js.map sourcemap via fetch(), which
+      // is a connect-src request, not a script-src one — harmless without this (it only
+      // breaks DevTools' "show formatted/original source" view), but it printed CSP
+      // violation spam in the console on every page load, so it's allowed cleanly.
+      connectSrc:  ["'self'", 'https://res.cloudinary.com', 'https://cdn.jsdelivr.net', 'https://cdnjs.cloudflare.com', 'wss:', 'ws:'],
       objectSrc:   ["'none'"],
       baseUri:     ["'self'"],
       frameAncestors: ["'none'"],
