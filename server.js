@@ -87,6 +87,17 @@ app.use(helmet({
       // breaks DevTools' "show formatted/original source" view), but it printed CSP
       // violation spam in the console on every page load, so it's allowed cleanly.
       connectSrc:  ["'self'", 'https://res.cloudinary.com', 'https://cdn.jsdelivr.net', 'https://cdnjs.cloudflare.com', 'wss:', 'ws:'],
+      // The registration form lets an applicant preview a document (ID, certificate)
+      // they just selected, BEFORE it's uploaded anywhere, by wrapping it in a
+      // `blob:` URL (URL.createObjectURL) and putting that in an <iframe> so they can
+      // check it looks right. Framing that blob: URL is governed by frame-src
+      // specifically, which — like script-src-attr/style-src-attr above — does NOT
+      // fall back to default-src's 'self' in a way that includes blob:, so it was
+      // silently blocked (every applicant's document preview was broken, admins never
+      // saw it because the admin panel opens the already-uploaded Cloudinary document
+      // directly instead of framing a local blob: preview). object-src stays 'none' —
+      // nothing here uses <object>/<embed>, only <iframe>.
+      frameSrc:    ["'self'", 'blob:'],
       objectSrc:   ["'none'"],
       baseUri:     ["'self'"],
       frameAncestors: ["'none'"],
