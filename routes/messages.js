@@ -99,21 +99,30 @@ router.put('/api/messages/:userId/read', requireAuth, (req, res) => {
 });
 
 // POST /api/messages/:msgId/react — react to a message
+//
+// SECURITY: a message belongs to exactly two users (sender + receiver). Before this
+// fix, any authenticated resident could react to — or list the reactors of — ANY
+// message ID system-wide, including private DMs between two other residents, because
+// neither route checked that req.user was a participant in that conversation (IDOR /
+// broken object-level authorization, CWE-639). Both routes now 404 unless the
+// requester is the sender or the receiver of that message.
 router.post('/api/messages/:msgId/react', requireAuth, (req, res) => {
-  const { toggleMsgReaction, getMsgReactions } = require('../utils/db');
+  const { toggleMsgReaction, getMsgReactions, db } = require('../utils/db');
   const { emoji = 'like' } = req.body;
+
+  const msg = db.prepare('SELECT sender_id, receiver_id FROM messages WHERE id=?').get(req.params.msgId);
+  if (!msg || (msg.sender_id !== req.user.id && msg.receiver_id !== req.user.id)) {
+    return res.status(404).json({ error: 'Message not found.' });
+  }
+
   const result = toggleMsgReaction(req.user.id, req.params.msgId, emoji);
   const reactions = getMsgReactions(req.params.msgId);
   const io = req.app.get('io');
   if (io) {
     // Broadcast update to both parties
-    // Emit to both sender and receiver rooms
-    const msg = require('../utils/db').db.prepare('SELECT sender_id, receiver_id FROM messages WHERE id=?').get(req.params.msgId);
-    if (msg) {
-      const payload = { msgId: req.params.msgId, reactions, userReaction: result.reacted ? emoji : null, reactorId: req.user.id };
-      io.to(`user:${msg.sender_id}`).emit('msg-reaction-update', payload);
-      io.to(`user:${msg.receiver_id}`).emit('msg-reaction-update', payload);
-    }
+    const payload = { msgId: req.params.msgId, reactions, userReaction: result.reacted ? emoji : null, reactorId: req.user.id };
+    io.to(`user:${msg.sender_id}`).emit('msg-reaction-update', payload);
+    io.to(`user:${msg.receiver_id}`).emit('msg-reaction-update', payload);
   }
   res.json({ ...result, reactions });
 });
@@ -122,6 +131,12 @@ router.post('/api/messages/:msgId/react', requireAuth, (req, res) => {
 router.get('/api/messages/:msgId/reactors', requireAuth, (req, res) => {
   res.set('Cache-Control', 'no-store');
   const { db } = require('../utils/db');
+
+  const msg = db.prepare('SELECT sender_id, receiver_id FROM messages WHERE id=?').get(req.params.msgId);
+  if (!msg || (msg.sender_id !== req.user.id && msg.receiver_id !== req.user.id)) {
+    return res.status(404).json({ error: 'Message not found.' });
+  }
+
   const reactors = db.prepare(`
     SELECT mr.emoji, mr.user_id, u.first_name, u.last_name, u.username, u.avatar
     FROM message_reactions mr JOIN users u ON mr.user_id = u.id

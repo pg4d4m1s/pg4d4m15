@@ -60,6 +60,61 @@ const fileFilter = (req, file, cb) => {
 };
 const multerUpload = multer({ storage, fileFilter, limits: { fileSize: 15 * 1024 * 1024 } });
 
+/**
+ * Verify a file's actual bytes match the type it claims to be, instead of trusting the
+ * client-supplied Content-Type / filename extension alone.
+ *
+ * fileFilter() above only looks at `file.mimetype`, which is whatever the browser (or an
+ * attacker's HTTP client) put in the multipart Content-Type header for that field — it is
+ * NOT derived from the file's actual bytes, so it is trivial to spoof (e.g. upload an
+ * .html/.svg/.php payload with `Content-Type: image/jpeg`). Previously, if that spoofed
+ * file then failed to parse as an image, resizeImage()'s catch block silently fell back to
+ * storing the ORIGINAL, unprocessed bytes — so a disguised file could still end up stored
+ * and served back from Cloudinary (or as a base64 data: URL) under an "image" label.
+ *
+ * This checks the first few bytes (the file's "magic number") against what each accepted
+ * MIME type actually looks like on disk, and rejects anything that doesn't match before it
+ * ever reaches Sharp or Cloudinary. Defense in depth alongside fileFilter(), not a
+ * replacement for it.
+ */
+function magicBytesMatch(buffer, mimetype) {
+  if (!buffer || buffer.length < 4) return false;
+  const b = buffer;
+  switch (mimetype) {
+    case 'image/jpeg': return b[0] === 0xFF && b[1] === 0xD8 && b[2] === 0xFF;
+    case 'image/png':  return b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4E && b[3] === 0x47;
+    case 'image/gif':  return b.slice(0, 3).toString('ascii') === 'GIF';
+    case 'image/webp': return b.slice(0, 4).toString('ascii') === 'RIFF' && b.slice(8, 12).toString('ascii') === 'WEBP';
+    case 'application/pdf': return b.slice(0, 4).toString('ascii') === '%PDF';
+    case 'application/vnd.openxmlformats-officedocument.wordprocessingml.document':
+    case 'application/zip':
+      // .docx is a ZIP container (local file header signature PK\x03\x04)
+      return b[0] === 0x50 && b[1] === 0x4B && (b[2] === 0x03 || b[2] === 0x05 || b[2] === 0x07);
+    case 'application/msword':
+      // legacy .doc — OLE Compound File signature
+      return b[0] === 0xD0 && b[1] === 0xCF && b[2] === 0x11 && b[3] === 0xE0;
+    default:
+      return true; // unknown/unlisted type — let fileFilter's allowlist be the only gate
+  }
+}
+
+/**
+ * Throws the same tagged error shape fileFilter() uses (code: 'BAD_FILE_TYPE') if a
+ * file's bytes don't match its claimed type, so it's handled by the app's existing
+ * uploadDiagnostics error path (proper 415 status + a resident-facing message) rather
+ * than falling through to a generic 500.
+ */
+function assertFileSignature(file) {
+  if (!file) return;
+  if (magicBytesMatch(file.buffer, file.mimetype)) return;
+  const err = new Error('File content does not match its claimed type.');
+  err.code = 'BAD_FILE_TYPE';
+  err.field = file.fieldname;
+  err.mimetype = file.mimetype;
+  log.warn(`[upload] Rejected "${file.originalname}" on field "${file.fieldname}" — bytes don't match claimed type ${file.mimetype}`);
+  throw err;
+}
+
 async function resizeImage(buffer, options = {}) {
   try {
     const sharp = require('sharp');
@@ -122,28 +177,40 @@ function toDataUrl(buf, mime = 'image/jpeg') {
 async function processPostImage(req, res, next) {
   if (!req.file) return next();
   try {
+    assertFileSignature(req.file);
     const buf = await resizeImage(req.file.buffer, { width: 1200, quality: 80 });
     req.cloudinaryUrl = hasCloudinary ? (await toCloudinary(buf, 'pga-damis/posts')).secure_url : toDataUrl(buf, req.file.mimetype);
     next();
-  } catch (err) { console.error('Post image error:', err.message); res.status(500).json({ error: 'Image upload failed.' }); }
+  } catch (err) {
+    console.error('Post image error:', err.message);
+    res.status(err.code === 'BAD_FILE_TYPE' ? 415 : 500).json({ error: err.code === 'BAD_FILE_TYPE' ? err.message : 'Image upload failed.' });
+  }
 }
 
 async function processAvatar(req, res, next) {
   if (!req.file) return next();
   try {
+    assertFileSignature(req.file);
     const buf = await resizeImage(req.file.buffer, { width: 400, height: 400, fit: 'cover', quality: 85 });
     req.cloudinaryUrl = hasCloudinary ? (await toCloudinary(buf, 'pga-damis/avatars')).secure_url : toDataUrl(buf, req.file.mimetype);
     next();
-  } catch (err) { console.error('Avatar error:', err.message); res.status(500).json({ error: 'Avatar upload failed.' }); }
+  } catch (err) {
+    console.error('Avatar error:', err.message);
+    res.status(err.code === 'BAD_FILE_TYPE' ? 415 : 500).json({ error: err.code === 'BAD_FILE_TYPE' ? err.message : 'Avatar upload failed.' });
+  }
 }
 
 async function processCover(req, res, next) {
   if (!req.file) return next();
   try {
+    assertFileSignature(req.file);
     const buf = await resizeImage(req.file.buffer, { width: 1500, height: 500, fit: 'cover', quality: 80 });
     req.cloudinaryUrl = hasCloudinary ? (await toCloudinary(buf, 'pga-damis/covers')).secure_url : toDataUrl(buf, req.file.mimetype);
     next();
-  } catch (err) { console.error('Cover error:', err.message); res.status(500).json({ error: 'Cover upload failed.' }); }
+  } catch (err) {
+    console.error('Cover error:', err.message);
+    res.status(err.code === 'BAD_FILE_TYPE' ? 415 : 500).json({ error: err.code === 'BAD_FILE_TYPE' ? err.message : 'Cover upload failed.' });
+  }
 }
 
 async function processIdDocument(req, res, next) {
@@ -175,6 +242,7 @@ async function processIdDocument(req, res, next) {
     const avatarFile = req.files?.['avatar']?.[0];
     if (avatarFile) {
       currentField = 'avatar';
+      assertFileSignature(avatarFile);
       const sharp = require('sharp');
       const faceX    = parseFloat(req.body?.avatarFaceX)    || 50;
       const faceY    = parseFloat(req.body?.avatarFaceY)    || 50;
@@ -228,6 +296,7 @@ async function processIdDocument(req, res, next) {
       const file = req.files?.[field]?.[0] || (req.file?.fieldname === field ? req.file : null);
       if (!file) continue;
       currentField = field;
+      assertFileSignature(file);
       const isPdf  = file.mimetype === 'application/pdf';
       const isDocx = DOCX_MIMES.has(file.mimetype) || (file.originalname || '').toLowerCase().endsWith('.docx');
       const folder = field.startsWith('cert_') ? 'damis/cert-docs' : 'damis/id-docs';

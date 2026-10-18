@@ -50,14 +50,51 @@ const io         = new Server(httpServer);
 app.set('io', io);
 
 // ── Security headers ──────────────────────────────────
+// CSP was previously fully disabled (`contentSecurityPolicy: false`), which meant any
+// XSS gap — now or in a future change — had no browser-side backstop (could load a
+// remote <script>, exfiltrate cookies via fetch() to an attacker origin, etc.). The
+// pages are hand-written single-file HTML with inline <script> blocks and inline
+// onclick="..." handlers throughout, so a strict nonce-based CSP would break the UI;
+// 'unsafe-inline' is kept for script-src/style-src as a pragmatic middle ground, but
+// everything else is locked to this app's actual origins (CDNs it really loads from,
+// Cloudinary/UI-Avatars for images, 'self' for API/websocket calls, no <object>/<embed>,
+// no being framed by another site). Migrating inline handlers to addEventListener +
+// a nonce-based CSP (dropping 'unsafe-inline') is the natural next hardening step.
 app.use(helmet({
-  contentSecurityPolicy: false,
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc:  ["'self'"],
+      scriptSrc:   ["'self'", "'unsafe-inline'", "'unsafe-eval'",
+                    'https://cdn.tailwindcss.com', 'https://cdnjs.cloudflare.com', 'https://cdn.jsdelivr.net'],
+      styleSrc:    ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com', 'https://cdnjs.cloudflare.com', 'https://cdn.jsdelivr.net'],
+      fontSrc:     ["'self'", 'https://fonts.gstatic.com', 'https://cdnjs.cloudflare.com'],
+      imgSrc:      ["'self'", 'data:', 'blob:', 'https://res.cloudinary.com', 'https://ui-avatars.com'],
+      connectSrc:  ["'self'", 'https://res.cloudinary.com', 'wss:', 'ws:'],
+      objectSrc:   ["'none'"],
+      baseUri:     ["'self'"],
+      frameAncestors: ["'none'"],
+      formAction:  ["'self'"],
+      upgradeInsecureRequests: [],
+    },
+  },
   // CDN resources (Tailwind, Font Awesome, jsDelivr, Google Fonts) are cross-origin.
   // Helmet v7 defaults crossOriginResourcePolicy to 'same-origin', which blocks them.
   // 'cross-origin' restores the pre-Helmet-v7 behaviour for resource loads.
   crossOriginResourcePolicy: { policy: 'cross-origin' },
 }));
-app.use(cors());
+// CORS was previously wide open (cors() with no options = reflects any Origin). This
+// API is cookie/session authenticated, not token authenticated, so an open CORS policy
+// has limited practical blast radius today (browsers refuse credentialed cross-origin
+// reads against a wildcard Access-Control-Allow-Origin) — but it's still an unnecessary
+// hole, and silently stops protecting anything the day someone adds `credentials:true`
+// or a bearer-token route. Restrict it to this app's own configured origin.
+if (!process.env.APP_URL) {
+  console.warn('⚠️  APP_URL is not set — cross-origin requests will be refused by CORS. Set APP_URL in .env / Railway variables.');
+}
+app.use(cors({
+  origin: process.env.APP_URL || false, // false = no cross-origin access rather than silently allowing all
+  credentials: true,
+}));
 
 // ── Rate limiting ─────────────────────────────────────
 // express-rate-limit answers 429 BEFORE morgan / the request logger below ever run, so a
@@ -143,6 +180,18 @@ const SqliteStore       = require('better-sqlite3-session-store')(session);
 // while an admin is viewing a read-only snapshot — otherwise their session could not be saved.
 const { liveDb: sessionDb } = require('./utils/db');
 
+// A missing SESSION_SECRET used to silently fall back to a hardcoded string
+// ('fallback-dev-secret') baked into the source. In production that would let anyone who
+// has read the (public) source code forge a valid session cookie signature. Fail loudly
+// instead — this should never happen since .env.example documents the variable, but a
+// misconfigured deploy should refuse to start rather than run insecurely.
+if (!process.env.SESSION_SECRET) {
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error('SESSION_SECRET is not set. Refusing to start in production without it — set it in Railway variables.');
+  }
+  log.warn('⚠️  SESSION_SECRET is not set — using an insecure development-only fallback. Set it in .env before deploying.');
+}
+
 app.use(session({
   store: new SqliteStore({
     client: sessionDb,
@@ -151,12 +200,13 @@ app.use(session({
       intervalMs: 15 * 60 * 1000, // prune expired rows every 15 min
     },
   }),
-  secret: process.env.SESSION_SECRET || 'fallback-dev-secret',
+  secret: process.env.SESSION_SECRET || 'dev-only-insecure-secret-do-not-use-in-production',
   resave: false,
   saveUninitialized: false,
   cookie: {
     secure:   process.env.NODE_ENV === 'production',
     httpOnly: true,
+    sameSite: 'lax', // explicit, rather than relying on each browser's own default
     maxAge:   24 * 60 * 60 * 1000,
   }
 }));
