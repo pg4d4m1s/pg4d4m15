@@ -101,6 +101,7 @@
     <div class="nav-item" id="nav-community-dash" onclick="showTab('community-dash')"><i class="fa-solid fa-chart-pie w-4"></i>Overview</div>
     <div class="nav-item" id="nav-posts-pending" onclick="showTab('posts-pending')"><i class="fa-solid fa-clock w-4"></i>Post Queue <span id="pending-badge" class="ml-auto text-xs bg-amber-500 text-white rounded-full px-1.5 py-0.5 hidden">0</span></div>
     <div class="nav-item" id="nav-posts-all" onclick="showTab('posts-all')"><i class="fa-solid fa-newspaper w-4"></i>All Posts</div>
+    <div class="nav-item" id="nav-announcements" onclick="showTab('announcements')"><i class="fa-solid fa-bullhorn w-4"></i>Announcements</div>
     <div class="nav-item" id="nav-research" onclick="showTab('research'); loadResearchTab();"><i class="fa-solid fa-flask w-4"></i>Research</div>
 
     <div class="nav-section mt-2">System</div>
@@ -871,6 +872,25 @@
     </div>
   </div>
 
+  <!-- ═══ ANNOUNCEMENTS — notices shown on the login page ═══ -->
+  <div id="tab-announcements" class="tab-content">
+    <div class="flex items-start justify-between mb-6 flex-wrap gap-3">
+      <div class="min-w-0">
+        <h1 class="font-display font-bold text-2xl text-slate-900 dark:text-slate-100">Announcements</h1>
+        <p class="text-sm text-slate-400 mt-0.5">Notices shown on the login page. Starting a new semester posts an “applications open” notice automatically.</p>
+      </div>
+      <div class="flex gap-2 flex-wrap w-full sm:w-auto">
+        <button onclick="openAnnouncementModal(null, true)" class="flex-1 sm:flex-none inline-flex items-center justify-center gap-2 min-h-[44px] px-4 rounded-xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 text-sm font-semibold hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors">
+          <i class="fa-solid fa-wand-magic-sparkles"></i>Applications-open notice
+        </button>
+        <button onclick="openAnnouncementModal()" class="flex-1 sm:flex-none inline-flex items-center justify-center gap-2 min-h-[44px] px-4 rounded-xl bg-brand-600 hover:bg-brand-700 text-white text-sm font-semibold transition-colors">
+          <i class="fa-solid fa-plus"></i>New Announcement
+        </button>
+      </div>
+    </div>
+    <div id="announcements-list" class="space-y-3"></div>
+  </div>
+
   <!-- ═══ AI MODERATION LOG ═══ -->
   <!-- ═══ RESEARCH — Student Residents Questionnaire ═══ -->
   <div id="tab-research" class="tab-content">
@@ -1472,7 +1492,7 @@
 
 <!-- ═══ SEMESTER ROLLOVER CONFIRM MODAL ═══ -->
 <div id="rollover-modal" class="hidden fixed inset-0 z-[250] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
-  <div class="bg-white dark:bg-slate-900 rounded-2xl shadow-2xl w-full max-w-md p-6">
+  <div class="bg-white dark:bg-slate-900 rounded-2xl shadow-2xl w-full max-w-md max-h-[90dvh] overflow-y-auto p-6">
     <div class="flex items-center gap-3 mb-4">
       <div class="w-10 h-10 rounded-xl bg-amber-100 dark:bg-amber-950/40 flex items-center justify-center flex-shrink-0">
         <i class="fa-solid fa-rotate text-amber-600 dark:text-amber-400 text-lg"></i>
@@ -1508,6 +1528,14 @@
       </div>
     </div>
 
+    <label class="flex items-start gap-3 mb-5 min-h-[44px] cursor-pointer">
+      <input type="checkbox" id="rollover-post-announcement" checked class="mt-0.5 w-5 h-5 flex-shrink-0 accent-amber-500"/>
+      <span class="text-sm text-slate-700 dark:text-slate-300">
+        <strong>Post an “applications open” notice on the login page</strong><br>
+        <span class="text-xs text-slate-400">Tells returning residents their old account was archived and that they should create a new one (they can reuse their email). You can edit or hide it later in Community → Announcements.</span>
+      </span>
+    </label>
+
     <div class="bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-800/40 rounded-xl p-3 mb-5">
       <p class="text-xs text-red-700 dark:text-red-400 font-semibold"><i class="fa-solid fa-triangle-exclamation mr-1"></i>All current residents will be archived. A full DB snapshot is saved automatically to Archive DB — no manual backup needed.</p>
     </div>
@@ -1525,6 +1553,79 @@
   </div>
 </div>
 
+
+<!-- ANNOUNCEMENT EDITOR MODAL -->
+<div id="announcement-modal" class="hidden fixed inset-0 z-[160] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm" onclick="if(event.target===this)closeAnnouncementModal()" role="dialog" aria-modal="true" aria-labelledby="ann-modal-title">
+  <div class="bg-white dark:bg-slate-900 rounded-2xl shadow-2xl w-full max-w-lg max-h-[90dvh] overflow-y-auto">
+    <div class="flex items-center justify-between px-5 py-3 border-b border-slate-100 dark:border-slate-800 sticky top-0 bg-white dark:bg-slate-900 z-10">
+      <h2 id="ann-modal-title" class="font-display font-bold text-lg text-slate-800 dark:text-slate-100">New Announcement</h2>
+      <button onclick="closeAnnouncementModal()" class="w-11 h-11 -mr-2 rounded-full flex items-center justify-center text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors" aria-label="Close"><i class="fa-solid fa-xmark"></i></button>
+    </div>
+
+    <div class="p-5 space-y-4">
+      <button type="button" onclick="applyAnnouncementTemplate()" class="w-full inline-flex items-center justify-center gap-2 min-h-[44px] px-3 rounded-xl border border-dashed border-brand-400 text-brand-600 dark:text-brand-400 text-sm font-semibold hover:bg-brand-50 dark:hover:bg-slate-800 transition-colors">
+        <i class="fa-solid fa-wand-magic-sparkles"></i>Fill with “applications open” wording
+      </button>
+
+      <div>
+        <div class="flex items-baseline justify-between mb-1">
+          <label for="ann-title" class="text-xs font-semibold text-slate-500 uppercase tracking-wider">Title</label>
+          <span id="ann-title-count" class="text-xs text-slate-400 tabular-nums">0/120</span>
+        </div>
+        <input id="ann-title" type="text" maxlength="120" oninput="annUpdateCounts()" placeholder="e.g. 2nd Semester 2026 — Applications Now Open"
+          class="w-full text-base sm:text-sm bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl px-3 py-2.5 outline-none focus:border-brand-500 text-slate-800 dark:text-slate-100"/>
+      </div>
+
+      <div>
+        <div class="flex items-baseline justify-between mb-1">
+          <label for="ann-body" class="text-xs font-semibold text-slate-500 uppercase tracking-wider">Message</label>
+          <span id="ann-body-count" class="text-xs text-slate-400 tabular-nums">0/1000</span>
+        </div>
+        <textarea id="ann-body" rows="6" maxlength="1000" oninput="annUpdateCounts()" placeholder="What do visitors need to know? Plain text — line breaks are kept."
+          class="w-full text-base sm:text-sm bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl px-3 py-2.5 outline-none focus:border-brand-500 text-slate-800 dark:text-slate-100 resize-y"></textarea>
+      </div>
+
+      <div>
+        <label for="ann-type" class="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">Style</label>
+        <select id="ann-type" class="w-full text-base sm:text-sm bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl px-3 py-2.5 outline-none focus:border-brand-500 text-slate-800 dark:text-slate-100">
+          <option value="info">Notice (blue)</option>
+          <option value="success">Good news (green)</option>
+          <option value="warning">Important (amber)</option>
+          <option value="urgent">Urgent (red)</option>
+        </select>
+      </div>
+
+      <label class="flex items-start gap-3 min-h-[44px] cursor-pointer">
+        <input id="ann-cta" type="checkbox" class="mt-0.5 w-5 h-5 flex-shrink-0 accent-brand-600"/>
+        <span class="text-sm text-slate-700 dark:text-slate-300"><strong>Show a “Create Account” button</strong><br><span class="text-xs text-slate-400">Takes visitors straight to the sign-up form.</span></span>
+      </label>
+
+      <div>
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div>
+            <label for="ann-from" class="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">Show from <span class="normal-case font-normal text-slate-400">(optional)</span></label>
+            <input id="ann-from" type="date" class="w-full text-base sm:text-sm bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl px-3 py-2.5 outline-none focus:border-brand-500 text-slate-800 dark:text-slate-100"/>
+          </div>
+          <div>
+            <label for="ann-until" class="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">Show until <span class="normal-case font-normal text-slate-400">(optional)</span></label>
+            <input id="ann-until" type="date" class="w-full text-base sm:text-sm bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl px-3 py-2.5 outline-none focus:border-brand-500 text-slate-800 dark:text-slate-100"/>
+          </div>
+        </div>
+        <p class="text-xs text-slate-400 mt-1.5">Leave empty to show right away and keep it up until you hide it. Dates use Philippine time and include the last day.</p>
+      </div>
+
+      <label class="flex items-start gap-3 min-h-[44px] cursor-pointer">
+        <input id="ann-active" type="checkbox" checked class="mt-0.5 w-5 h-5 flex-shrink-0 accent-brand-600"/>
+        <span class="text-sm text-slate-700 dark:text-slate-300"><strong>Visible on the login page</strong><br><span class="text-xs text-slate-400">Untick to save it as a hidden draft.</span></span>
+      </label>
+    </div>
+
+    <div class="flex gap-3 px-5 py-4 border-t border-slate-100 dark:border-slate-800 sticky bottom-0 bg-white dark:bg-slate-900">
+      <button onclick="closeAnnouncementModal()" class="flex-1 min-h-[44px] rounded-xl bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 text-sm font-semibold hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors">Cancel</button>
+      <button id="ann-save-btn" onclick="saveAnnouncement()" class="flex-1 min-h-[44px] rounded-xl bg-brand-600 hover:bg-brand-700 text-white text-sm font-semibold transition-colors inline-flex items-center justify-center gap-2">Save</button>
+    </div>
+  </div>
+</div>
 
 <!-- CONFIRM MODAL -->
 <div id="confirm-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm">
@@ -1780,6 +1881,7 @@
     else if(tab==='utility'){ initUtilityMonth(); loadUtility(); loadUtilityChart(); }
     else if(tab==='backup'){ /* static page, no load needed */ }
     else if(tab==='db-archives')loadDbArchives();
+    else if(tab==='announcements')loadAnnouncements();
   }
 
   // ── Mobile sidebar ────────────────────────────────
@@ -4114,7 +4216,10 @@
       const r = await fetch('/api/admin/semester/rollover', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ newSemester, schoolYear, slipValidTo }),
+        body: JSON.stringify({
+          newSemester, schoolYear, slipValidTo,
+          postAnnouncement: document.getElementById('rollover-post-announcement')?.checked !== false,
+        }),
       });
       const d = await r.json();
       if (d.error) { toast(d.error, 'error'); return; }
@@ -4130,6 +4235,8 @@
 
       toast(`✅ New semester started: ${newSemester} SY${schoolYear}. ${d.archived} residents archived.`);
       if (d.dbBackupWarning) toast(d.dbBackupWarning, 'error');
+      if (d.announcement) toast('📢 Login-page announcement posted — edit it in Community → Announcements.', 'info');
+      if (d.announcementWarning) toast(d.announcementWarning, 'error');
       if (d.skipped > 0) {
         const names = (d.skippedDetails || []).map(x => '@' + x.username).join(', ');
         toast(`⚠ ${d.skipped} resident(s) could not be archived and were left untouched: ${names}. See server log "[rollover] SKIPPED" for the reason.`, 'error');
@@ -4140,6 +4247,196 @@
     } finally {
       if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-rotate mr-2"></i>Archive &amp; Start New Semester'; }
     }
+  }
+
+  // ══════════════════════════════════════════════════════════════
+  // ANNOUNCEMENTS — notices shown on the login page
+  // API: /api/admin/announcements (routes/announcements.js)
+  // Visitor side: public/js/login-announcements.js
+  // ══════════════════════════════════════════════════════════════
+  let _annList = [];
+  let _annEditingId = null;
+
+  const ANN_TYPE_LABEL = { info: 'Notice', success: 'Good news', warning: 'Important', urgent: 'Urgent' };
+  const ANN_STATUS = {
+    live:      { label: 'Live on login page', icon: 'fa-circle-check',  cls: 'badge-approved' },
+    scheduled: { label: 'Scheduled',          icon: 'fa-clock',         cls: 'badge-pending' },
+    expired:   { label: 'Expired',            icon: 'fa-hourglass-end', cls: 'bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300' },
+    hidden:    { label: 'Hidden',             icon: 'fa-eye-slash',     cls: 'bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300' },
+  };
+
+  async function annRequest(url, opts) {
+    const r = await fetch(url, opts);
+    let d = {};
+    try { d = await r.json(); } catch (_) { /* non-JSON error page */ }
+    if (!r.ok) throw new Error(d.error || `Request failed (${r.status})`);
+    return d;
+  }
+  function annJson(method, payload) {
+    return { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) };
+  }
+  // 'YYYY-MM-DD' (a plain calendar date) → "Nov 5, 2026"
+  function annDay(s) {
+    if (!s) return '';
+    const d = new Date(s + 'T00:00:00Z');
+    return isNaN(d) ? s : d.toLocaleDateString('en-PH', { timeZone: 'UTC', month: 'short', day: 'numeric', year: 'numeric' });
+  }
+  function annStamp(iso) {
+    const d = new Date(iso);
+    return isNaN(d) ? '' : d.toLocaleString('en-PH', { timeZone: PH_TZ, month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' });
+  }
+
+  async function loadAnnouncements() {
+    const list = document.getElementById('announcements-list');
+    if (!list) return;
+    setLoading(list);
+    try {
+      const d = await annRequest('/api/admin/announcements');
+      _annList = d.announcements || [];
+      renderAnnouncements();
+    } catch (e) {
+      console.error('loadAnnouncements:', e);
+      list.innerHTML = `<div class="bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-800/40 rounded-2xl p-4 text-sm text-red-700 dark:text-red-400 flex flex-wrap items-center gap-3">
+        <span class="min-w-0 break-words">Could not load announcements: ${escHtml(e.message)}</span>
+        <button onclick="loadAnnouncements()" class="min-h-[44px] px-4 rounded-xl bg-red-500 hover:bg-red-600 text-white font-semibold">Retry</button></div>`;
+    }
+  }
+
+  function renderAnnouncements() {
+    const list = document.getElementById('announcements-list');
+    if (!list) return;
+    if (!_annList.length) {
+      list.innerHTML = `<div class="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-2xl p-8 text-center">
+        <div class="w-12 h-12 rounded-full bg-brand-50 dark:bg-slate-800 flex items-center justify-center mx-auto mb-3"><i class="fa-solid fa-bullhorn text-brand-500"></i></div>
+        <p class="font-semibold text-slate-700 dark:text-slate-200">No announcements yet</p>
+        <p class="text-sm text-slate-400 mt-1">Create one, or start a new semester and an “applications open” notice is posted for you.</p></div>`;
+      return;
+    }
+    list.innerHTML = _annList.map(a => {
+      const st = ANN_STATUS[a.status] || ANN_STATUS.hidden;
+      const id = escHtml(a.id);
+      const source = a.source === 'semester_rollover'
+        ? `<span class="badge badge-verified"><i class="fa-solid fa-wand-magic-sparkles mr-1"></i>Auto${a.semesterTag ? ' · ' + escHtml(a.semesterTag) : ''}</span>`
+        : `<span class="badge bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300">Manual</span>`;
+      const window_ = (a.showFrom || a.showUntil)
+        ? `Shows ${a.showFrom ? 'from ' + annDay(a.showFrom) : 'immediately'}${a.showUntil ? ' until ' + annDay(a.showUntil) : ''}`
+        : 'Shows until hidden';
+      const btn = 'inline-flex items-center justify-center gap-2 min-h-[44px] sm:min-h-[36px] px-4 rounded-xl text-sm font-semibold border transition-colors';
+      return `<div class="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-2xl p-4 sm:p-5">
+        <div class="flex flex-wrap items-center gap-2 mb-2">
+          <span class="badge ${st.cls}"><i class="fa-solid ${st.icon} mr-1"></i>${st.label}</span>
+          ${source}
+          <span class="badge bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300">${escHtml(ANN_TYPE_LABEL[a.type] || a.type)}</span>
+          ${a.ctaSignup ? '<span class="badge bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300"><i class="fa-solid fa-user-plus mr-1"></i>Create Account button</span>' : ''}
+        </div>
+        <h3 class="font-display font-bold text-slate-900 dark:text-slate-100 break-words">${escHtml(a.title)}</h3>
+        ${a.body ? `<p class="text-sm text-slate-500 dark:text-slate-400 mt-1 whitespace-pre-line break-words line-clamp-3">${escHtml(a.body)}</p>` : ''}
+        <p class="text-xs text-slate-400 mt-2">${window_} · Posted ${escHtml(annStamp(a.createdAt))}</p>
+        <div class="flex flex-wrap gap-2 mt-3">
+          <button onclick="openAnnouncementModal('${id}')" class="${btn} border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800"><i class="fa-solid fa-pen"></i>Edit</button>
+          <button onclick="toggleAnnouncement('${id}', ${a.isActive ? 'false' : 'true'})" class="${btn} border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800"><i class="fa-solid ${a.isActive ? 'fa-eye-slash' : 'fa-eye'}"></i>${a.isActive ? 'Hide' : 'Show'}</button>
+          <button onclick="deleteAnnouncement('${id}')" class="${btn} border-red-200 dark:border-red-900 text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/30"><i class="fa-solid fa-trash"></i>Delete</button>
+        </div>
+      </div>`;
+    }).join('');
+  }
+
+  // ── Editor modal ──────────────────────────────────
+  function annUpdateCounts() {
+    document.getElementById('ann-title-count').textContent = `${document.getElementById('ann-title').value.length}/120`;
+    document.getElementById('ann-body-count').textContent  = `${document.getElementById('ann-body').value.length}/1000`;
+  }
+  function annFillForm(a) {
+    document.getElementById('ann-title').value  = a.title || '';
+    document.getElementById('ann-body').value   = a.body || '';
+    document.getElementById('ann-type').value   = a.type || 'info';
+    document.getElementById('ann-cta').checked  = !!a.ctaSignup;
+    document.getElementById('ann-active').checked = a.isActive !== false;
+    document.getElementById('ann-from').value   = a.showFrom || '';
+    document.getElementById('ann-until').value  = a.showUntil || '';
+    annUpdateCounts();
+  }
+  async function openAnnouncementModal(id = null, useTemplate = false) {
+    const existing = id ? _annList.find(x => x.id === id) : null;
+    if (id && !existing) { toast('Announcement not found — the list was refreshed.', 'error'); loadAnnouncements(); return; }
+    _annEditingId = id;
+    annFillForm(existing || { type: 'info', isActive: true });
+    document.getElementById('ann-modal-title').textContent = existing ? 'Edit Announcement' : 'New Announcement';
+    document.getElementById('ann-save-btn').innerHTML = existing ? 'Save changes' : 'Post announcement';
+    document.getElementById('announcement-modal').classList.remove('hidden');
+    document.body.style.overflow = 'hidden';
+    if (!existing && useTemplate) await applyAnnouncementTemplate();
+    else document.getElementById('ann-title').focus();
+  }
+  function closeAnnouncementModal() {
+    document.getElementById('announcement-modal').classList.add('hidden');
+    document.body.style.overflow = '';
+    _annEditingId = null;
+  }
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape' && !document.getElementById('announcement-modal')?.classList.contains('hidden')) closeAnnouncementModal();
+  });
+
+  // Wording comes from the server (same text the automatic post uses), built from the
+  // semester settings on the Residents tab.
+  async function applyAnnouncementTemplate() {
+    try {
+      const d = await annRequest('/api/admin/announcements/template');
+      annFillForm(d.template);
+      toast('Filled in for the current semester — check the wording, then save.', 'info');
+    } catch (e) {
+      toast('Could not load the template: ' + e.message, 'error');
+    }
+  }
+
+  async function saveAnnouncement() {
+    const payload = {
+      title:     document.getElementById('ann-title').value.trim(),
+      body:      document.getElementById('ann-body').value.trim(),
+      type:      document.getElementById('ann-type').value,
+      ctaSignup: document.getElementById('ann-cta').checked,
+      isActive:  document.getElementById('ann-active').checked,
+      showFrom:  document.getElementById('ann-from').value || null,
+      showUntil: document.getElementById('ann-until').value || null,
+    };
+    if (!payload.title) { toast('Please enter a title.', 'error'); document.getElementById('ann-title').focus(); return; }
+
+    const editing = _annEditingId;
+    const btn = document.getElementById('ann-save-btn');
+    const label = btn.innerHTML;
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fa-solid fa-spinner animate-spin"></i>Saving…';
+    try {
+      await annRequest(editing ? `/api/admin/announcements/${encodeURIComponent(editing)}` : '/api/admin/announcements',
+        annJson(editing ? 'PUT' : 'POST', payload));
+      closeAnnouncementModal();
+      toast(!payload.isActive ? 'Saved as hidden — not shown on the login page.'
+        : editing ? 'Announcement updated.' : 'Announcement posted to the login page.');
+      await loadAnnouncements();
+    } catch (e) {
+      toast(e.message, 'error');
+    } finally {
+      btn.disabled = false;
+      btn.innerHTML = label;
+    }
+  }
+
+  async function toggleAnnouncement(id, isActive) {
+    try {
+      await annRequest(`/api/admin/announcements/${encodeURIComponent(id)}/active`, annJson('PATCH', { isActive }));
+      toast(isActive ? 'Announcement is visible again.' : 'Announcement hidden from the login page.');
+      await loadAnnouncements();
+    } catch (e) { toast(e.message, 'error'); }
+  }
+
+  function deleteAnnouncement(id) {
+    showConfirm('Delete announcement?', 'It will be removed from the login page immediately. This cannot be undone.', async () => {
+      try {
+        await annRequest(`/api/admin/announcements/${encodeURIComponent(id)}`, { method: 'DELETE' });
+        toast('Announcement deleted.');
+        await loadAnnouncements();
+      } catch (e) { toast(e.message, 'error'); }
+    });
   }
 
   // ── BACKUP & RESTORE ─────────────────────────────────

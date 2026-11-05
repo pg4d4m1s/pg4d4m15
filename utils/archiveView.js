@@ -22,6 +22,7 @@
  * Always live (never switched, never blocked by view mode)
  *   /api/admin/db-archives/*      the Active / Inactive controls themselves
  *   /api/admin/backup/*           a backup must be of the live data, never a snapshot
+ *   /api/admin/announcements/*    login-page notices describe the live site, not a snapshot
  *   /api/admin/research/manager/* the admin's own survey answers (tied to their
  *                                 live account, not to the dormitory's archived data)
  *   /api/admin/research/survey-switch  the global survey on/off flag (app_settings of the
@@ -45,6 +46,9 @@ const ALWAYS_LIVE = [
   /^\/backup(\/|$)/,
   /^\/research\/manager(\/|$)/,
   /^\/research\/survey-switch(\/|$)/,
+  // Login-page announcements describe the LIVE site, so editing them must never hit (or be
+  // blocked by) an archived snapshot — older snapshots may not even have the table.
+  /^\/announcements(\/|$)/,
 ];
 
 // GET routes that look harmless but WRITE (admission-slip assigns an admission number).

@@ -122,6 +122,9 @@
         <h1 class="text-2xl font-extrabold text-slate-800 dark:text-white mb-1">Welcome back 👋</h1>
         <p class="text-slate-400 text-sm mb-6">Sign in to your PGA-DAMIS account.</p>
 
+        <!-- Announcements from the admin (Community → Announcements). Filled by /js/login-announcements.js; stays hidden when there are none. -->
+        <div id="login-announcements" class="hidden mb-6" role="region" aria-label="Announcements"></div>
+
         <button onclick="handleGoogleAuth('login')"
           class="w-full flex items-center justify-center gap-3 border border-slate-200 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700 rounded-xl py-3 text-sm font-semibold text-slate-600 hover:bg-slate-50 hover:border-slate-300 mb-5 transition-all">
           <svg width="18" height="18" viewBox="0 0 48 48"><path fill="#4285F4" d="M44.5 20H24v8.5h11.7C34.2 33.6 29.7 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3 0 5.7 1.1 7.8 2.9l6-6C34.5 6.5 29.6 4.5 24 4.5 12.7 4.5 3.5 13.7 3.5 25S12.7 45.5 24 45.5c10.7 0 20-7.7 20-20.5 0-1.3-.1-2.7-.5-5z"/><path fill="#34A853" d="M6.3 14.7l7 5.1C15 16 19.2 13 24 13c3 0 5.7 1.1 7.8 2.9l6-6C34.5 6.5 29.6 4.5 24 4.5c-7.7 0-14.3 4.4-17.7 10.2z"/><path fill="#FBBC05" d="M24 45.5c5.6 0 10.4-1.9 14.2-5.1l-6.6-5.4C29.8 36.8 27 37.5 24 37.5c-5.7 0-10.5-3.8-12.2-9l-6.9 5.3C8.2 41.2 15.5 45.5 24 45.5z"/><path fill="#EA4335" d="M44.5 20H24v8.5h11.7c-.8 2.3-2.2 4.2-4.1 5.6l6.6 5.4c3.9-3.6 6.3-8.9 6.3-15 0-1.3-.1-2.7-.5-5z"/></svg>
@@ -1194,6 +1197,7 @@
 <script src="/js/psgc-data.js"></script>
 <script src="/js/reg-resilience.js"></script>
 <script src="/js/auth.js"></script>
+<script src="/js/login-announcements.js"></script>
 <script>
   function toggleDark() {
     const isDark = document.documentElement.classList.toggle('dark');

@@ -33,6 +33,7 @@ const {
   createDbArchive, getDbArchives, getDbArchiveById, deleteDbArchiveById,
 } = require('../utils/db');
 const { sendAccountApprovedEmail, sendAccountRejectedEmail } = require('../utils/emailService');
+const { createSemesterAnnouncement } = require('../utils/announcements');
 const { getViewingArchive, getArchiveHandle, closeArchiveHandle } = require('../utils/archiveView');
 const { multerUpload, toCloudinary, resizeImage, hasCloudinary } = require('../middleware/upload');
 
@@ -1786,11 +1787,13 @@ router.put('/api/admin/semester', requireAdmin, (req, res) => {
  * semester_tag, resets admission counter, and updates semester settings.
  * The snapshot happens first so it captures the closing semester's full
  * state (residents + rooms + billing) before any rows are touched.
- * Body: { newSemester, schoolYear, slipValidTo }
+ * Then posts the "applications open" notice on the login page (unless the admin
+ * unticked it) — see utils/announcements.js.
+ * Body: { newSemester, schoolYear, slipValidTo, postAnnouncement (default true) }
  */
 router.post('/api/admin/semester/rollover', requireAdmin, async (req, res) => {
   try {
-    const { newSemester, schoolYear, slipValidTo } = req.body;
+    const { newSemester, schoolYear, slipValidTo, postAnnouncement } = req.body;
     if (!newSemester || !schoolYear) return res.status(400).json({ error: 'newSemester and schoolYear are required.' });
 
     // Snapshot BEFORE rollover mutates anything, so the archive reflects the
@@ -1826,7 +1829,23 @@ router.post('/api/admin/semester/rollover', requireAdmin, async (req, res) => {
     if (result.skipped) {
       log.error(`⚠ Rollover left ${result.skipped} resident(s) in place: ${result.skippedDetails.map(d => `@${d.username} (${d.reason})`).join('; ')}`);
     }
-    res.json({ success: true, ...result, newSemester, schoolYear, dbBackupWarning });
+    // Login-page notice. Non-fatal on purpose: the rollover has already happened and
+    // cannot be undone, so a failure here is reported, never thrown.
+    let announcement = null, announcementWarning = null;
+    if (postAnnouncement !== false) {
+      try {
+        announcement = createSemesterAnnouncement({
+          semester: newSemester, schoolYear, adminId: req.user.id,
+        });
+        logAdminAction(req.user.id, 'announcement_created', 'announcement', announcement.id,
+          `Auto: ${announcement.title}`);
+      } catch (annErr) {
+        announcementWarning = `The semester started, but the login-page announcement could not be posted: ${annErr.message}. Add it manually in Community → Announcements.`;
+        log.error(`⚠ Semester rollover: auto-announcement failed — ${annErr.message}`);
+      }
+    }
+
+    res.json({ success: true, ...result, newSemester, schoolYear, dbBackupWarning, announcement, announcementWarning });
   } catch (err) { send500(res, err); }
 });
 
@@ -2301,4 +2320,5 @@ router.post('/api/admin/backup/restore',
 
 module.exports = router;
 module.exports.callAI = callAI;
+module.exports.requireAdmin = requireAdmin; // reused by routes/announcements.js
 module.exports.notifyPostModeration = notifyPostModeration;

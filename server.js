@@ -41,6 +41,7 @@ const messagesRoutes     = require('./routes/messages');
 const adminRoutes        = require('./routes/admin');
 const aiRoutes           = require('./routes/ai');
 const researchRoutes     = require('./routes/research');
+const announcementRoutes = require('./routes/announcements');
 
 const app        = express();
 const httpServer = http.createServer(app);
@@ -469,6 +470,7 @@ app.use('/', messagesRoutes);
 app.use('/', adminRoutes);
 app.use('/', aiRoutes);
 app.use('/', researchRoutes);
+app.use('/', announcementRoutes);
 
 // ── Socket.io ─────────────────────────────────────────
 const onlineUsers = new Map(); // userId → socketId
