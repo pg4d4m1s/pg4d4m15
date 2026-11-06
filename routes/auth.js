@@ -12,6 +12,8 @@ const bcrypt   = require('bcryptjs');
 const router   = express.Router();
 const log      = require('../utils/logger');
 const geminiPool = require('../utils/geminiPool');
+const supportKb  = require('../utils/supportKnowledge');
+const rateLimit  = require('express-rate-limit');
 
 const { generateOTP, sendOTPEmail, sendWelcomeEmail, sendPasswordResetEmail, sendAccountPendingEmail, sendAccountApprovedEmail, sendAccountRejectedEmail, sendContactEmail } = require('../utils/emailService');
 const { rejectDisposableEmail } = require('../utils/disposableEmailCheck');
@@ -613,200 +615,231 @@ router.post('/api/auth/contact-admin', async (req, res) => {
   }
 });
 
-// ── AI support chat usage tracker (in-memory, resets daily) ─────────
-// Dynamic daily limit based on pool size (each key = 20 RPD)
-// Recalculated each time so it updates when keys are added
-function getAiDailyLimit() {
-  return Math.max(20, geminiPool.getStatus().keyCount * geminiPool.getStatus().rpdLimit);
-}
-const AI_DAILY_LIMIT = 20; // kept for in-memory counter cap (single key baseline)
-let aiUsage = { count: 0, date: new Date().toDateString() };
+// ── AI support chat — public (no login) ─────────────────────────────
+// How a message is answered (cheapest first):
+//   1. A tapped chip (`faq` id)              → instant FAQ answer, no AI.
+//   2. A strong keyword match in the FAQ     → instant FAQ answer, no AI.
+//   3. Everything else                       → Gemini pool (auto-rotates keys) → DeepSeek fallback.
+//   4. AI unavailable / out of quota         → best FAQ guess, else a "contact the admin" reply.
+// The FAQ + contacts live in utils/supportKnowledge.js — edit answers THERE, not here.
+const SUPPORT_MSG_MAX      = 500;           // server-side cap (the widget limits to 300)
+const SUPPORT_HISTORY_TURNS = 6;
+const SUPPORT_AI_PER_IP     = 8;            // AI calls allowed per IP …
+const SUPPORT_AI_WINDOW_MS  = 10 * 60 * 1000; // … per 10 minutes (FAQ answers are unlimited)
+const SUPPORT_AI_TIMEOUT_MS = 20000;
 
-function getAiUsage() {
-  const today = new Date().toDateString();
-  if (aiUsage.date !== today) { aiUsage = { count: 0, date: today }; } // reset at midnight
-  return aiUsage;
+// Per-minute cap on the whole endpoint (FAQ + AI). The AI budget below is stricter.
+const supportChatLimiter = rateLimit({
+  windowMs: 60 * 1000, max: 20,
+  standardHeaders: true, legacyHeaders: false,
+  handler: (req, res) => {
+    log.warn(`🛑 RATE LIMITED [support-chat] ip=${req.ip}`);
+    res.status(429).json({
+      reply: '⏳ You are sending messages too quickly. Please wait a few seconds and try again.',
+      source: 'system', retryAfter: 15,
+    });
+  },
+});
+
+// In-memory per-IP budget for AI calls. Protects the shared Gemini quota (≈800/day across all
+// keys) from one visitor draining it. Resets on restart, which is fine for an abuse guard.
+const _supportAiHits = new Map();
+function supportAiBudgetOk(ip) {
+  const now = Date.now();
+  const hits = (_supportAiHits.get(ip) || []).filter(t => now - t < SUPPORT_AI_WINDOW_MS);
+  if (hits.length >= SUPPORT_AI_PER_IP) { _supportAiHits.set(ip, hits); return false; }
+  hits.push(now);
+  _supportAiHits.set(ip, hits);
+  if (_supportAiHits.size > 5000) {            // keep the map from growing forever
+    for (const [k, v] of _supportAiHits) if (!v.some(t => now - t < SUPPORT_AI_WINDOW_MS)) _supportAiHits.delete(k);
+  }
+  return true;
 }
 
-// GET /api/auth/support-status — returns current daily AI usage (public, no auth needed)
+function supportAiAvailable() {
+  const ps = geminiPool.getStatus();
+  return (ps.configured && ps.availableKeys > 0) || !!process.env.GITHUB_TOKEN;
+}
+
+/** Merge consecutive same-role turns (Gemini/DeepSeek expect alternating roles). */
+function supportNormalizeHistory(history, message) {
+  const turns = (Array.isArray(history) ? history : [])
+    .filter(m => m && typeof m.content === 'string' && m.content.trim())
+    .slice(-SUPPORT_HISTORY_TURNS)
+    .map(m => ({ role: m.role === 'assistant' ? 'assistant' : 'user', content: m.content.trim().slice(0, 600) }));
+  turns.push({ role: 'user', content: message.slice(0, 500) });
+  const out = [];
+  for (const t of turns) {
+    const last = out[out.length - 1];
+    if (last && last.role === t.role) last.content += '\n' + t.content;
+    else out.push({ ...t });
+  }
+  while (out.length && out[0].role !== 'user') out.shift(); // must start with the user
+  return out;
+}
+
+/**
+ * Ask the AI. Returns { reply } | { retryAfter } | { unavailable: true }.
+ * Order: Gemini pool (rotating on daily-quota 429) → DeepSeek-V3 via GitHub Models.
+ */
+async function askSupportAi(systemPrompt, messages) {
+  let retryAfter = 0;
+
+  // 1) Gemini
+  let key = geminiPool.getKey();
+  while (key) {
+    let resp;
+    try {
+      resp = await fetch(geminiPool.buildUrl(key), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
+        signal: AbortSignal.timeout(SUPPORT_AI_TIMEOUT_MS),
+        body: JSON.stringify({
+          system_instruction: { parts: [{ text: systemPrompt }] },
+          contents: messages.map(m => ({ role: m.role === 'assistant' ? 'model' : 'user', parts: [{ text: m.content }] })),
+          generationConfig: { maxOutputTokens: 500, temperature: 0.3 },
+        }),
+      });
+    } catch (e) {
+      log.aiError(`Support chat Gemini …${key.slice(-6)} network/timeout: ${e.message}`);
+      break; // try DeepSeek
+    }
+
+    if (resp.ok) {
+      geminiPool.trackRequest(key);
+      const data = await resp.json().catch(() => ({}));
+      const text = (data.candidates?.[0]?.content?.parts || []).map(p => p.text || '').join('').trim();
+      if (text) return { reply: text, provider: 'gemini' };
+      log.aiError(`Support chat Gemini …${key.slice(-6)} returned an empty reply (finishReason=${data.candidates?.[0]?.finishReason || '?'})`);
+      break;
+    }
+
+    const errBody = await resp.text().catch(() => '(no body)');
+    log.aiError(`Support chat Gemini …${key.slice(-6)} — HTTP ${resp.status}\n${errBody.slice(0, 300)}`);
+    if (resp.status === 429) {
+      if (geminiPool.markExhausted(key, errBody)) {           // daily quota → next key
+        const next = geminiPool.getKey();
+        if (next) { log.info(`Support chat rotating Gemini key …${key.slice(-6)} → …${next.slice(-6)}`); key = next; continue; }
+        log.warn('Support chat: all Gemini keys exhausted → DeepSeek fallback');
+      } else {                                                 // per-minute limit
+        retryAfter = parseInt(resp.headers.get('Retry-After') || '30', 10) || 30;
+      }
+    }
+    break; // any other error → DeepSeek
+  }
+
+  // 2) DeepSeek-V3 via GitHub Models
+  const gh = (process.env.GITHUB_TOKEN || '').trim();
+  if (gh) {
+    try {
+      const r = await fetch('https://models.github.ai/inference/chat/completions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${gh}` },
+        signal: AbortSignal.timeout(SUPPORT_AI_TIMEOUT_MS),
+        body: JSON.stringify({
+          model: 'deepseek/DeepSeek-V3-0324', max_tokens: 500, temperature: 0.3,
+          messages: [{ role: 'system', content: systemPrompt }, ...messages],
+        }),
+      });
+      if (r.ok) {
+        const d = await r.json().catch(() => ({}));
+        const text = d.choices?.[0]?.message?.content?.trim();
+        if (text) return { reply: text, provider: 'deepseek' };
+      } else {
+        log.aiError(`Support chat DeepSeek/GitHub — HTTP ${r.status}\n${(await r.text().catch(() => '')).slice(0, 300)}`);
+      }
+    } catch (e) {
+      log.aiError(`Support chat DeepSeek network/timeout: ${e.message}`);
+    }
+  }
+
+  return retryAfter ? { retryAfter } : { unavailable: true };
+}
+
+// GET /api/auth/support-status — public. Lets the widget show contacts + chips and the AI state.
 router.get('/api/auth/support-status', (req, res) => {
   const ps = geminiPool.getStatus();
-  const totalLimit = ps.keyCount * ps.rpdLimit;
-  const totalUsed  = ps.keys ? ps.keys.reduce((a,k)=>a+k.rpdUsed, 0) : getAiUsage().count;
+  const limit = ps.keyCount * ps.rpdLimit;
+  const used  = (ps.keys || []).reduce((a, k) => a + k.rpdUsed, 0);
   res.json({
-    used:    totalUsed,
-    limit:   totalLimit || AI_DAILY_LIMIT,
-    remaining: Math.max(0, (totalLimit || AI_DAILY_LIMIT) - totalUsed),
-    keys:    ps.keyCount,
-    availableKeys: ps.availableKeys,
+    aiAvailable: supportAiAvailable(),
+    used, limit, remaining: Math.max(0, limit - used),
+    keys: ps.keyCount, availableKeys: ps.availableKeys,
+    contacts: supportKb.getContacts(),
+    chips: supportKb.getChips(),
   });
 });
 
-router.post('/api/auth/support-chat', async (req, res) => {
+// POST /api/auth/support-chat  { message, history?, faq? }
+router.post('/api/auth/support-chat', supportChatLimiter, async (req, res) => {
   try {
-    const { message, history = [] } = req.body;
-    if (!message?.trim()) return res.status(400).json({ error: 'Message is required.' });
-    if (message.trim().length > 1000) return res.status(400).json({ error: 'Message too long.' });
+    const faqId   = typeof req.body?.faq === 'string' ? req.body.faq : '';
+    const message = String(req.body?.message || '').trim();
+    const history = req.body?.history;
 
-    const hasGithub     = !!process.env.GITHUB_TOKEN;
-    const hasGemini     = geminiPool.getStatus().configured;
-
-    if (!hasGemini && !hasGithub) {
-      return res.json({
-        reply: "I'm PGA-DAMIS Support. Our AI assistant isn't configured yet. " +
-               "Please email us at **" + (process.env.ADMIN_EMAIL || process.env.EMAIL_USER || 'support@pgadamis.local') + "** and we'll get back to you shortly.",
-        escalate: true,
-      });
+    // 1) Chip tap → exact FAQ entry, never AI.
+    if (faqId) {
+      const entry = supportKb.getEntry(faqId);
+      if (entry) { log.ai(`Support chat [chip:${entry.id}]`); return res.json(supportKb.toPayload(entry)); }
     }
 
-    // ── Check daily quota via pool (covers all keys) ────────────────
-    if (hasGemini) {
-      const poolStatus = geminiPool.getStatus();
-      if (poolStatus.availableKeys === 0 && poolStatus.keyCount > 0) {
-        const secsUntilReset = poolStatus.secsUntilReset;
-        const h = Math.floor(secsUntilReset / 3600);
-        const m = Math.floor((secsUntilReset % 3600) / 60);
-        const resetStr = h > 0 ? `${h}h ${m}m` : `${m} min`;
-        const totalLimit = poolStatus.keyCount * poolStatus.rpdLimit;
-        log.aiError(`Support chat: all ${poolStatus.keyCount} Gemini key(s) exhausted. Resets in ${resetStr}.`);
-        return res.json({
-          reply: `⚠️ The AI support chat has reached its **daily limit (${totalLimit} messages across ${poolStatus.keyCount} key${poolStatus.keyCount>1?'s':''})**. It resets in **${resetStr}**. For urgent help, email **${process.env.ADMIN_EMAIL || process.env.EMAIL_USER || 'support@pgadamis.local'}**.`,
-          escalate: true,
-          dailyLimitReached: true,
-          used: totalLimit,
-          limit: totalLimit,
-          resetsInSecs: secsUntilReset,
-        });
+    if (!message) return res.status(400).json({ error: 'Message is required.' });
+    if (message.length > SUPPORT_MSG_MAX) return res.status(400).json({ error: 'Message too long.' });
+
+    // 2) Strong keyword match → instant FAQ answer. After the first turn, demand a stronger match
+    //    so follow-ups like "and if I already did that?" go to the AI with context.
+    const m = supportKb.matchFaq(message);
+    const turns = Array.isArray(history) ? history.length : 0;
+    if (m.entry && !m.ambiguous && m.score >= (turns ? 5 : 3)) {
+      log.ai(`Support chat [faq:${m.entry.id} score=${m.score}] "${message.slice(0, 60)}"`);
+      return res.json(supportKb.toPayload(m.entry));
+    }
+
+    // 3) AI path (guarded by an availability check and a per-IP budget).
+    const noAiPayload = () => {
+      // 4) Fallback — a weak FAQ guess beats nothing; otherwise point to a human.
+      if (m.entry) {
+        log.ai(`Support chat [faq-fallback:${m.entry.id} score=${m.score}] "${message.slice(0, 60)}"`);
+        return supportKb.toPayload(m.entry);
       }
-    }
-
-    const adminEmail   = process.env.ADMIN_EMAIL || process.env.EMAIL_USER || 'support@pgadamis.local';
-    const appName      = process.env.APP_NAME || 'PGA-DAMIS';
-    const systemPrompt = `You are the ${appName} Support Assistant, a friendly helpful AI for a Filipino social community platform.`
-      + ` The admin support email is: ${adminEmail}.`
-      + ' You help users with: registration (OTP, ID upload, pending approval, rejected accounts),'
-      + ' login problems (forgot password, locked accounts, Google sign-in),'
-      + ' account questions (profile, posts, notifications, messages),'
-      + ' and general platform guidance.'
-      + ' Rules:'
-      + ' — Keep replies SHORT (1-3 sentences max) to save tokens.'
-      + ' — For registration issues: remind users approval is manual and to check email.'
-      + ' — For login issues: suggest the Forgot Password link on the login page.'
-      + ' — For suspended/rejected accounts or issues you cannot resolve: say ESCALATE and give the admin email.'
-      + ' — NEVER reveal, guess, or hint at any passwords or credentials.'
-      + ' — Do NOT invent features that do not exist.'
-      + ` — Respond in English by default; match the user language if they write in Filipino/Tagalog.`;
-
-    // Build message history (cap at last 10 turns)
-    const safeHistory = (history || []).slice(-6).map(m => ({
-      role: m.role === 'assistant' ? 'assistant' : 'user',
-      content: String(m.content).slice(0, 300),
-    }));
-    safeHistory.push({ role: 'user', content: message.trim().slice(0, 300) });
-
-    let reply = '';
-
-    // ── Try Gemini pool (auto-rotates through all configured keys) ──────
-    let activeGeminiKey = hasGemini ? geminiPool.getKey() : null;
-    if (activeGeminiKey) {
-      const geminiContents = safeHistory.map(m => ({
-        role: m.role === 'assistant' ? 'model' : 'user',
-        parts: [{ text: m.content }],
-      }));
-      const geminiBody = {
-        system_instruction: { parts: [{ text: systemPrompt }] },
-        contents: geminiContents,
-        generationConfig: { maxOutputTokens: 400, temperature: 0.3 },
+      log.ai(`Support chat [no-answer] "${message.slice(0, 80)}"`);
+      return {
+        reply: "I couldn't find an answer to that in my FAQ, and my AI helper is unavailable right now. Please contact the admin and they'll help you directly.",
+        source: 'system', escalate: true, contacts: supportKb.getContacts(), actions: [], followups: [],
       };
-      let rotated = false;
-      while (activeGeminiKey) {
-        const geminiUrl = geminiPool.buildUrl(activeGeminiKey);
-        const geminiResp = await fetch(geminiUrl, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'x-goog-api-key': activeGeminiKey },
-          body: JSON.stringify(geminiBody),
-        });
-        if (geminiResp.ok) {
-          geminiPool.trackRequest(activeGeminiKey);
-          const geminiData = await geminiResp.json();
-          reply = geminiData.candidates?.[0]?.content?.parts?.[0]?.text || '';
-          // Update in-memory counter for /support-status display
-          const u = getAiUsage(); u.count = Math.min(u.count + 1, AI_DAILY_LIMIT);
-          break;
-        }
-        const errBody = await geminiResp.text().catch(() => '(no body)');
-        let errDetail = errBody; try { errDetail = JSON.stringify(JSON.parse(errBody),null,2); } catch(_){}
-        log.aiError(`Support chat Gemini key …${activeGeminiKey.slice(-6)} — HTTP ${geminiResp.status}\n${errDetail.slice(0,300)}`);
-        if (geminiResp.status === 429) {
-          const isRPD = geminiPool.markExhausted(activeGeminiKey, errBody);
-          if (isRPD) {
-            const nextKey = geminiPool.getKey();
-            if (nextKey) {
-              log.info(`Support chat rotating to key …${nextKey.slice(-6)}`);
-              activeGeminiKey = nextKey;
-              rotated = true;
-              continue;
-            }
-            // All keys exhausted — return daily limit message
-            const ps = geminiPool.getStatus();
-            const secsUntilReset = ps.secsUntilReset;
-            const h = Math.floor(secsUntilReset/3600), m = Math.floor((secsUntilReset%3600)/60);
-            const resetStr = h>0?`${h}h ${m}m`:`${m} min`;
-            const totalLimit = ps.keyCount * ps.rpdLimit;
-            getAiUsage().count = AI_DAILY_LIMIT;
-            return res.json({
-              reply: `⚠️ The AI support chat has reached its **daily limit (${totalLimit} messages across ${ps.keyCount} key${ps.keyCount>1?'s':''})**. It resets in **${resetStr}**. For urgent help, email **${process.env.ADMIN_EMAIL || process.env.EMAIL_USER || 'support@pgadamis.local'}**.`,
-              escalate: true, dailyLimitReached: true,
-              used: totalLimit, limit: totalLimit, resetsInSecs: secsUntilReset,
-            });
-          } else {
-            const retryAfter = parseInt(geminiResp.headers.get('Retry-After')||'30',10)||30;
-            const timeStr = retryAfter<90?`${retryAfter} seconds`:`${Math.ceil(retryAfter/60)} min`;
-            return res.json({ reply:`⏳ Too many requests. Please wait **${timeStr}** before sending again.`, escalate:false, retryAfter });
-          }
-        }
-        throw new Error(`Gemini API error: ${geminiResp.status}`);
-      }
-    } else {
-      // ── Fall back to DeepSeek-V3 via GitHub Models ──────────────────────
-      const githubToken = process.env.GITHUB_TOKEN;
-      if (!githubToken) throw new Error('No fallback AI configured. Add GITHUB_TOKEN to .env');
-      log.info('Gemini unavailable — using DeepSeek-V3 (GitHub Models) for support chat.');
-      const dsMessages = [{ role: 'system', content: systemPrompt }, ...safeHistory];
-      const response = await fetch('https://models.github.ai/inference/chat/completions', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${githubToken.trim()}` },
-        body: JSON.stringify({
-          model: 'deepseek/DeepSeek-V3-0324',
-          max_tokens: 400,
-          temperature: 0.3,
-          messages: dsMessages,
-        }),
+    };
+
+    if (!supportAiAvailable() || !supportAiBudgetOk(req.ip)) return res.json({ ...noAiPayload(), aiAvailable: supportAiAvailable() });
+
+    log.ai(`Support chat [ai] unmatched → "${message.slice(0, 80)}"`); // review these to grow the FAQ
+    const ai = await askSupportAi(
+      supportKb.buildSystemPrompt(process.env.APP_NAME || 'PGA-DAMIS'),
+      supportNormalizeHistory(history, message)
+    );
+
+    if (ai.retryAfter) {
+      return res.json({
+        reply: `⏳ Too many requests right now. Please wait **${ai.retryAfter < 90 ? ai.retryAfter + ' seconds' : Math.ceil(ai.retryAfter / 60) + ' min'}** and try again.`,
+        source: 'system', retryAfter: ai.retryAfter,
       });
-      if (!response.ok) {
-        const errBody = await response.text().catch(() => '(no body)');
-        let errDetail = errBody;
-        try { errDetail = JSON.stringify(JSON.parse(errBody), null, 2); } catch (_) {}
-        log.aiError(`Support chat DeepSeek/GitHub — HTTP ${response.status}\n${errDetail.slice(0, 400)}`);
-        throw new Error(`DeepSeek API error: ${response.status}`);
-      }
-      const data = await response.json();
-      reply = data.choices?.[0]?.message?.content || '';
     }
+    if (ai.unavailable) return res.json({ ...noAiPayload(), aiAvailable: false });
 
-    if (!reply) reply = 'Sorry, I could not process that. Please try again.';
-    const escalate = reply.toUpperCase().includes('ESCALATE') || reply.toLowerCase().includes('email our admin');
-
-    const ps2 = geminiPool.getStatus();
-    const totalLimit2 = ps2.keyCount * ps2.rpdLimit || AI_DAILY_LIMIT;
-    const totalUsed2  = ps2.keys ? ps2.keys.reduce((a,k)=>a+k.rpdUsed, 0) : getAiUsage().count;
-    log.ai(`Support chat [${totalUsed2}/${totalLimit2}] — ${message.trim().slice(0, 50)} → ${reply.slice(0, 50)}`);
-    return res.json({ reply, escalate, used: totalUsed2, limit: totalLimit2 });
-  } catch (err) {
-    log.aiError(`Support chat exception: ${err.message}`);
+    // The model ends with [[ESCALATE]] when a human is needed — strip it so users never see it.
+    const flagged = /\[\[\s*ESCALATE\s*\]\]/i.test(ai.reply) || /\bESCALATE\b/.test(ai.reply);
+    const reply = ai.reply.replace(/\[\[\s*ESCALATE\s*\]\]/gi, '').replace(/\bESCALATE\b/g, '').trim().slice(0, 1500)
+                  || 'Sorry, I could not process that. Please try again.';
+    log.ai(`Support chat [${ai.provider}] → ${reply.slice(0, 60).replace(/\n/g, ' ')}${flagged ? ' (escalate)' : ''}`);
     return res.json({
-      reply: "I'm having trouble right now. Please email us at **" + (process.env.ADMIN_EMAIL || process.env.EMAIL_USER || 'support@pgadamis.local') + "** and we'll help you shortly.",
-      escalate: true,
+      reply, source: 'ai', escalate: flagged, aiAvailable: true,
+      contacts: flagged ? supportKb.getContacts() : undefined,
+      actions: [], followups: [],
+    });
+  } catch (err) {
+    log.aiError(`Support chat exception: ${err.stack || err.message}`);
+    return res.json({
+      reply: "I'm having trouble right now. Please contact the admin and they'll help you shortly.",
+      source: 'system', escalate: true, contacts: supportKb.getContacts(), actions: [], followups: [],
     });
   }
 });

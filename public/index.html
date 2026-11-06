@@ -2,12 +2,13 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8"/>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover"/>
   <title>PGA-DAMIS — Dormitory Application</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&display=swap" rel="stylesheet"/>
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css"/>
   <link rel="stylesheet" href="/css/auth.css"/>
+  <link rel="stylesheet" href="/css/support.css"/>
   <script>
     // Apply dark mode immediately to avoid flash
     if (localStorage.theme === 'dark' || (!('theme' in localStorage) && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
@@ -101,11 +102,12 @@
       </div>
     </div>
     <p class="relative z-10 text-white/35 text-xs">© 2026 PGA-DAMIS · Provincial Government of Aurora</p>
-    <a href="mailto:support@pgadamis.gov.ph" id="support-link"
-       class="relative z-10 mt-3 flex items-center gap-2 text-white/50 hover:text-white/80 text-xs transition-colors cursor-pointer"
-       onclick="event.preventDefault();showSupportInfo()">
-      <i class="fa-solid fa-headset"></i> Need help? Contact Support
-    </a>
+    <!-- Real button (was a faded 50%-white text link). Desktop only: this panel is hidden on phones,
+         where the inline button in the login form + the floating launcher (support-chat.js) take over. -->
+    <button type="button" id="support-link" onclick="showSupportInfo()" aria-haspopup="dialog"
+       class="sc-inline-help sc-inline-help--on-brand relative z-10 mt-4 self-start">
+      <i class="fa-solid fa-headset" aria-hidden="true"></i> Need help? Contact Support
+    </button>
   </div>
 
   <!-- RIGHT FORM PANEL -->
@@ -151,6 +153,12 @@
 
         <button id="btn-login" onclick="handleLogin()" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3.5 rounded-xl text-sm shadow-lg shadow-blue-200 transition-all">Sign In</button>
         <p class="text-center text-sm text-slate-400 mt-5">Don't have an account? <button onclick="showTab('signup')" class="text-blue-600 font-semibold hover:underline">Create one free</button></p>
+        <div class="mt-4">
+          <button type="button" onclick="showSupportInfo()" aria-haspopup="dialog"
+            class="sc-inline-help sc-inline-help--on-form">
+            <i class="fa-solid fa-headset" aria-hidden="true"></i> Need help? Chat with support
+          </button>
+        </div>
       </div>
 
       <!-- ═══ SIGN UP ═══ -->
@@ -1197,6 +1205,7 @@
 <script src="/js/psgc-data.js"></script>
 <script src="/js/reg-resilience.js"></script>
 <script src="/js/auth.js"></script>
+<script src="/js/support-chat.js"></script>
 <script src="/js/login-announcements.js"></script>
 <script>
   function toggleDark() {
