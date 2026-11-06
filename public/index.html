@@ -398,6 +398,9 @@
                   class="form-input w-full px-3 py-2.5 rounded-xl border border-slate-200 dark:border-slate-600 bg-slate-50 dark:bg-slate-800 text-sm text-slate-600 appearance-none pr-8 disabled:opacity-50 transition-colors">
                   <option value="">&#8212; Select Barangay &#8212;</option></select>
                   <i class="fa-solid fa-chevron-down absolute right-3 top-1/2 -translate-y-1/2 text-slate-300 text-xs pointer-events-none"></i></div>
+                <input id="perm-purok" type="text" maxlength="60" autocomplete="off" autocapitalize="words" aria-label="Purok, Sitio or Street"
+                oninput="buildAddrString('perm')" placeholder="Purok / Sitio / Street (e.g. Purok 3)"
+                class="form-input w-full px-3 py-2.5 rounded-xl border border-slate-200 dark:border-slate-600 bg-slate-50 dark:bg-slate-800 text-sm text-slate-700 dark:text-slate-100 placeholder:text-slate-300 dark:placeholder:text-slate-500 transition-colors"/>
                 <input id="perm-addr-hidden" type="hidden" value=""/>
               </div>
             </div>
@@ -428,6 +431,9 @@
                   class="form-input w-full px-3 py-2.5 rounded-xl border border-slate-200 dark:border-slate-600 bg-slate-50 dark:bg-slate-800 text-sm text-slate-600 appearance-none pr-8 disabled:opacity-50 transition-colors">
                   <option value="">&#8212; Select Barangay &#8212;</option></select>
                   <i class="fa-solid fa-chevron-down absolute right-3 top-1/2 -translate-y-1/2 text-slate-300 text-xs pointer-events-none"></i></div>
+                <input id="pres-purok" type="text" maxlength="60" autocomplete="off" autocapitalize="words" aria-label="Purok, Sitio or Street"
+                oninput="buildAddrString('pres')" placeholder="Purok / Sitio / Street (e.g. Purok 3)"
+                class="form-input w-full px-3 py-2.5 rounded-xl border border-slate-200 dark:border-slate-600 bg-slate-50 dark:bg-slate-800 text-sm text-slate-700 dark:text-slate-100 placeholder:text-slate-300 dark:placeholder:text-slate-500 transition-colors"/>
                 <input id="pres-addr-hidden" type="hidden" value=""/>
               </div>
             </div>
@@ -660,6 +666,9 @@
                     class="form-input w-full px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 text-sm text-slate-600 appearance-none pr-8 disabled:opacity-50 transition-colors">
                     <option value="">&#8212; Barangay &#8212;</option></select>
                     <i class="fa-solid fa-chevron-down absolute right-3 top-1/2 -translate-y-1/2 text-slate-300 text-xs pointer-events-none"></i></div>
+                  <input id="father-purok" type="text" maxlength="60" autocomplete="off" autocapitalize="words" aria-label="Purok, Sitio or Street"
+                  oninput="buildAddrString('father')" placeholder="Purok / Sitio / Street (e.g. Purok 3)"
+                  class="form-input w-full px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 text-sm text-slate-700 dark:text-slate-100 placeholder:text-slate-300 dark:placeholder:text-slate-500 transition-colors"/>
                   <input id="father-addr-hidden" type="hidden" value=""/>
                 </div>
               </div>
@@ -743,6 +752,9 @@
                     class="form-input w-full px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 text-sm text-slate-600 appearance-none pr-8 disabled:opacity-50 transition-colors">
                     <option value="">&#8212; Barangay &#8212;</option></select>
                     <i class="fa-solid fa-chevron-down absolute right-3 top-1/2 -translate-y-1/2 text-slate-300 text-xs pointer-events-none"></i></div>
+                  <input id="mother-purok" type="text" maxlength="60" autocomplete="off" autocapitalize="words" aria-label="Purok, Sitio or Street"
+                  oninput="buildAddrString('mother')" placeholder="Purok / Sitio / Street (e.g. Purok 3)"
+                  class="form-input w-full px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 text-sm text-slate-700 dark:text-slate-100 placeholder:text-slate-300 dark:placeholder:text-slate-500 transition-colors"/>
                   <input id="mother-addr-hidden" type="hidden" value=""/>
                 </div>
               </div>
@@ -824,6 +836,9 @@
                     class="form-input w-full px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 text-sm text-slate-600 appearance-none pr-8 disabled:opacity-50 transition-colors">
                     <option value="">&#8212; Barangay &#8212;</option></select>
                     <i class="fa-solid fa-chevron-down absolute right-3 top-1/2 -translate-y-1/2 text-slate-300 text-xs pointer-events-none"></i></div>
+                  <input id="guardian-purok" type="text" maxlength="60" autocomplete="off" autocapitalize="words" aria-label="Purok, Sitio or Street"
+                  oninput="buildAddrString('guardian')" placeholder="Purok / Sitio / Street (e.g. Purok 3)"
+                  class="form-input w-full px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 text-sm text-slate-700 dark:text-slate-100 placeholder:text-slate-300 dark:placeholder:text-slate-500 transition-colors"/>
                   <input id="guardian-addr-hidden" type="hidden" value=""/>
                 </div>
               </div>
@@ -1725,7 +1740,7 @@ function toggleParentDeceased(prefix) {
     fields.classList.add('hidden');
     // Clear values so a previously-filled phone/employer/address never
     // gets silently submitted alongside a "deceased" flag.
-    ['-phone', '-employer', '-addr-hidden', '-region', '-province', '-city', '-brgy'].forEach(suffix => {
+    ['-phone', '-employer', '-addr-hidden', '-region', '-province', '-city', '-brgy', '-purok'].forEach(suffix => {
       const el = document.getElementById(prefix + suffix);
       if (el) el.tagName === 'SELECT' ? (el.selectedIndex = 0) : (el.value = '');
     });
@@ -1747,7 +1762,7 @@ function updateGuardianSectionVisibility() {
     // Clear guardian fields when the section is hidden so stale data from a
     // toggled-back-and-forth checkbox never gets submitted.
     ['guardian-fname','guardian-mname','guardian-lname','guardian-relationship',
-     'guardian-phone','guardian-employer','guardian-addr-hidden'].forEach(id => {
+     'guardian-phone','guardian-employer','guardian-addr-hidden','guardian-purok'].forEach(id => {
       const el = document.getElementById(id); if (el) el.value = '';
     });
     document.getElementById('guardian-suffix') && (document.getElementById('guardian-suffix').selectedIndex = 0);

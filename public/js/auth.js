@@ -591,6 +591,7 @@ async function validateStep(step) {
     if (!$('perm-region') || !$('perm-region').value) { showStepError(3, 'Please select your Permanent Address Region.'); return false; }
     if (!$('perm-city') || !$('perm-city').value)     { showStepError(3, 'Please select your Permanent Address City/Municipality.'); return false; }
     if (!$('perm-brgy') || !$('perm-brgy').value)     { showStepError(3, 'Please select your Permanent Address Barangay.'); return false; }
+    if (PUROK_REQUIRED && !addrCleanPurok(($('perm-purok') || {}).value)) { showStepError(3, 'Please enter your Permanent Address Purok / Sitio.'); $('perm-purok') && $('perm-purok').focus(); return false; }
     buildAddrString('perm');
 
     // Present Address (required unless same-as-permanent checked)
@@ -598,6 +599,7 @@ async function validateStep(step) {
       if (!$('pres-region') || !$('pres-region').value) { showStepError(3, 'Please select your Present Address Region.'); return false; }
       if (!$('pres-city') || !$('pres-city').value)     { showStepError(3, 'Please select your Present Address City/Municipality.'); return false; }
       if (!$('pres-brgy') || !$('pres-brgy').value)     { showStepError(3, 'Please select your Present Address Barangay.'); return false; }
+      if (PUROK_REQUIRED && !addrCleanPurok(($('pres-purok') || {}).value)) { showStepError(3, 'Please enter your Present Address Purok / Sitio.'); $('pres-purok') && $('pres-purok').focus(); return false; }
       buildAddrString('pres');
     } else {
       // Copy permanent to present
@@ -1192,21 +1194,35 @@ var _addrInflight = {};
 var PSGC_BASE = 'https://psgc.gitlab.io/api/';
 var PSGC_LS = 'damis_psgc_v1:';
 
-// PSGC data is static, so it is cached in localStorage (instant + works on a flaky network after the first load).
-// Network calls get a 12 s timeout and 3 attempts. A FAILED fetch returns [] with .__failed = true so callers
-// can tell "service unreachable" apart from "this region genuinely has no provinces".
+// Purok / Sitio / Street — free-text line shown under the Barangay dropdown of every address block.
+// Set PUROK_REQUIRED = true to force applicants to fill it in for their Permanent and Present address.
+var PUROK_REQUIRED = false;
+var ADDR_PUROK_MAX = 60;
+
+// Address lookup order (see psgc-data.js):
+//   1. Bundled Region III / Aurora data  — instant, no network (PSGC_PREFER_BUNDLED)
+//   2. localStorage copy of an earlier live response
+//   3. Live PSGC API  — 12 s timeout x 3 attempts (2 x 6 s when a bundled fallback exists)
+//   4. Bundled data as a last resort if the live call failed
+// A FAILED fetch returns [] with .__failed = true so callers can tell "service unreachable" apart from
+// "this region genuinely has no provinces". Only non-Aurora addresses can still fail now.
 async function psgcFetchAddr(endpoint) {
   if (_addrCache[endpoint]) return _addrCache[endpoint];
   if (_addrInflight[endpoint]) return _addrInflight[endpoint];
   _addrInflight[endpoint] = (async function () {
+    var bundled = (typeof psgcBundled === 'function') ? psgcBundled(endpoint) : null;
+    if (bundled && bundled.preferred) { _addrCache[endpoint] = bundled.list; return bundled.list; }
+
     try {
       var raw = localStorage.getItem(PSGC_LS + endpoint);
       if (raw) { var cached = JSON.parse(raw); if (Array.isArray(cached) && cached.length) { _addrCache[endpoint] = cached; return cached; } }
     } catch (_) {}
+
     var lastErr = null;
-    for (var attempt = 1; attempt <= 3; attempt++) {
+    var attempts = bundled ? 2 : 3, timeoutMs = bundled ? 6000 : 12000;
+    for (var attempt = 1; attempt <= attempts; attempt++) {
       var ctrl = ('AbortController' in window) ? new AbortController() : null;
-      var timer = ctrl ? setTimeout(function(){ ctrl.abort(); }, 12000) : null;
+      var timer = ctrl ? setTimeout(function(){ ctrl.abort(); }, timeoutMs) : null;
       try {
         var r = await fetch(PSGC_BASE + endpoint + '.json', ctrl ? { signal: ctrl.signal } : undefined);
         if (!r.ok) throw new Error('HTTP ' + r.status);
@@ -1217,18 +1233,43 @@ async function psgcFetchAddr(endpoint) {
         return list;
       } catch (e) {
         lastErr = e;
-        console.warn('[PSGC] ' + endpoint + ' attempt ' + attempt + '/3 failed:', e && e.message);
-        if (attempt < 3) await new Promise(function(res){ setTimeout(res, 800 * attempt); });
+        console.warn('[PSGC] ' + endpoint + ' attempt ' + attempt + '/' + attempts + ' failed:', e && e.message);
+        if (attempt < attempts) await new Promise(function(res){ setTimeout(res, 800 * attempt); });
       } finally { if (timer) clearTimeout(timer); }
     }
-    RegResilience.report('address_load_failed', { kind: 'psgc', phase: endpoint.slice(0, 28), message: String(lastErr && lastErr.message || lastErr) });
+
+    var errMsg = String(lastErr && lastErr.message || lastErr);
+    if (bundled) {
+      console.warn('[PSGC] live API unreachable — using bundled data for ' + endpoint);
+      if (window.RegResilience) RegResilience.report('address_fallback_used', { kind: 'psgc', phase: endpoint.slice(0, 28), message: errMsg });
+      _addrCache[endpoint] = bundled.list;   // memory only — never written to the localStorage "live" cache
+      return bundled.list;
+    }
+    if (window.RegResilience) RegResilience.report('address_load_failed', { kind: 'psgc', phase: endpoint.slice(0, 28), message: errMsg });
     var failed = []; failed.__failed = true; return failed;
   })();
   try { return await _addrInflight[endpoint]; } finally { delete _addrInflight[endpoint]; }
 }
 
+// Purok / Sitio text → safe single address segment.
+// The stored address is "[Purok - ]Barangay, City/Municipality, Province, Region, Philippines" and several
+// server/admin parsers split it on commas by position, so the purok must never contain a comma and must stay
+// INSIDE the first (barangay) segment. Markup characters are dropped as defence in depth (output is escaped too).
+function addrCleanPurok(v) {
+  var s = String(v == null ? '' : v)
+    .replace(/[\u0000-\u001f\u007f-\u009f]+/g, ' ')
+    .replace(/[<>]/g, '')
+    .replace(/[,;]+/g, ' / ')
+    .replace(/(?:\s*\/\s*){2,}/g, ' / ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/^\/\s*|\s*\/$/g, '')
+    .trim();
+  return s.slice(0, ADDR_PUROK_MAX).trim();
+}
+
 function addrLoadFailed(what) {
-  showToast("Couldn't load the list of " + what + ". Check your signal, then select the previous field again.", 'error');
+  showToast("Couldn't load the list of " + what + ". Check your signal and select the previous field again. Living in Aurora? Choose Region III (Central Luzon) \u2192 Aurora.", 'error');
 }
 
 function resetAddrSelect(id, placeholder) {
@@ -1263,7 +1304,8 @@ async function loadAddrCascade(prefix, next) {
     resetAddrSelect(prefix + '-brgy',     '— Select Barangay —');
     if (!regionEl || !regionEl.value) return;
     var regionCode = regionEl.value;
-    if (regionCode === '1300000000') {
+    var regionCode9 = (typeof psgcNorm9 === 'function') ? psgcNorm9(regionCode) : regionCode;
+    if (regionCode9 === '130000000' || regionCode === '1300000000') {   // NCR — no provinces
       if (provinceEl) { provinceEl.innerHTML = '<option value="__ncr__">N/A — NCR</option>'; }
       var cities = await psgcFetchAddr('regions/' + regionCode + '/cities-municipalities');
     if (cities.__failed) return addrLoadFailed('cities');
@@ -1311,10 +1353,26 @@ function buildAddrString(prefix) {
   if (city) parts.push(city);
   if (prov && !prov.startsWith('N/A')) parts.push(prov);
   if (reg) parts.push(reg);
+  // Purok / Sitio joins the FIRST segment with " - " (never its own comma part) so positional parsers
+  // (public coarse location, admin slip, DiCaDi check) keep reading city/province from the same places.
+  var purok = addrCleanPurok(($(prefix + '-purok') || {}).value);
+  if (purok && parts.length) parts[0] = purok + ' - ' + parts[0];
   parts.push('Philippines');
   var str = parts.join(', ');
   var hidden = $(prefix + '-addr-hidden');
   if (hidden) hidden.value = str;
+  if (prefix === 'perm') syncSameAsPermanentCopies();
+}
+
+// "Same as Permanent" copies the permanent string when ticked. If the applicant then edits the permanent
+// address (e.g. types the purok last), refresh every block that is still ticked so nothing goes out stale.
+function syncSameAsPermanentCopies() {
+  var permVal = ($('perm-addr-hidden') || {}).value || '';
+  [['same-as-permanent', 'pres'], ['father-same-as-perm', 'father'], ['mother-same-as-perm', 'mother'], ['guardian-same-as-perm', 'guardian']]
+    .forEach(function (pair) {
+      var chk = $(pair[0]), h = $(pair[1] + '-addr-hidden');
+      if (chk && chk.checked && h) h.value = permVal;
+    });
 }
 
 function toggleSameAsPresent() {

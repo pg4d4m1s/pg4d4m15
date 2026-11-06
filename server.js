@@ -87,7 +87,11 @@ app.use(helmet({
       // is a connect-src request, not a script-src one — harmless without this (it only
       // breaks DevTools' "show formatted/original source" view), but it printed CSP
       // violation spam in the console on every page load, so it's allowed cleanly.
-      connectSrc:  ["'self'", 'https://res.cloudinary.com', 'https://cdn.jsdelivr.net', 'https://cdnjs.cloudflare.com', 'wss:', 'ws:'],
+      // psgc.gitlab.io = the PSGC address API the registration form calls with fetch() (Region → Province →
+      // City/Municipality → Barangay). It MUST be listed here: without it the browser blocks every address
+      // request ("Refused to connect … violates Content Security Policy" → fetch() fails with "Failed to fetch")
+      // and applicants cannot get past Step 3. Aurora addresses also have a bundled fallback (public/js/psgc-data.js).
+      connectSrc:  ["'self'", 'https://res.cloudinary.com', 'https://cdn.jsdelivr.net', 'https://cdnjs.cloudflare.com', 'https://psgc.gitlab.io', 'wss:', 'ws:'],
       // The registration form lets an applicant preview a document (ID, certificate)
       // they just selected, BEFORE it's uploaded anywhere, by wrapping it in a
       // `blob:` URL (URL.createObjectURL) and putting that in an <iframe> so they can
