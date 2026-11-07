@@ -907,6 +907,11 @@
               <div class="absolute bottom-3 left-3 right-3 text-center pointer-events-none">
                 <span id="selfie-instruction" class="hidden inline-block max-w-full bg-white/95 text-slate-800 text-sm font-bold px-4 py-2 rounded-xl shadow"></span>
               </div>
+              <!-- 3-2-1 countdown shown right before the photo is taken -->
+              <div id="selfie-countdown" class="hidden absolute inset-0 items-center justify-center pointer-events-none" aria-hidden="true">
+                <span id="selfie-countdown-num" class="text-white font-extrabold select-none" style="font-size:7rem;line-height:1;text-shadow:0 4px 24px rgba(0,0,0,.65);"></span>
+              </div>
+              <div id="selfie-flash" class="absolute inset-0 bg-white pointer-events-none" style="opacity:0;transition:opacity .35s ease-out;"></div>
               <div id="selfie-loading" class="absolute inset-0 bg-slate-900/85 flex flex-col items-center justify-center gap-3 text-white text-sm font-semibold px-6 text-center">
                 <span class="spinner"></span><span id="selfie-loading-txt">Loading face scanner&hellip;</span>
               </div>

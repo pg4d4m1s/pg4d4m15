@@ -111,6 +111,49 @@ async function resolveArchiveFile(rec) {
   return cached;
 }
 
+/** Temp copy used when an old snapshot predates a column the current queries select. */
+function compatCopyPath(archiveId) {
+  return path.join(os.tmpdir(), 'damis-archive-view', `${String(archiveId).replace(/[^a-zA-Z0-9_-]/g, '')}.compat.db`);
+}
+
+/**
+ * Snapshots are frozen copies of the DB from when they were taken, so snapshots older than a schema change lack the
+ * new column — and the live code's SELECTs (e.g. ivr.cert_grades_url) would fail with "no such column" while an admin
+ * views them. The snapshot itself must stay untouched (read-only), so when a column is missing we add it to a
+ * throw-away COPY in the temp folder and open that instead. Best-effort: on any problem the original is used.
+ */
+const COMPAT_COLUMNS = [
+  { table: 'id_verification_requests', column: 'cert_grades_url', ddl: "TEXT DEFAULT ''" },
+  { table: 'rejected_registrations',   column: 'cert_grades_url', ddl: "TEXT DEFAULT ''" },
+  { table: 'deleted_users',            column: 'cert_grades_url', ddl: "TEXT DEFAULT ''" },
+];
+function ensureCompatible(file, archiveId) {
+  try {
+    const probe = new Database(file, { readonly: true, fileMustExist: true });
+    let missing = [];
+    try {
+      for (const c of COMPAT_COLUMNS) {
+        const cols = probe.prepare(`PRAGMA table_info(${c.table})`).all();
+        if (cols.length && !cols.some((x) => x.name === c.column)) missing.push(c);
+      }
+    } finally { probe.close(); }
+    if (!missing.length) return file;
+
+    const copy = compatCopyPath(archiveId);
+    fs.mkdirSync(path.dirname(copy), { recursive: true });
+    fs.copyFileSync(file, copy);
+    removeSidecars(copy);
+    const rw = new Database(copy);
+    try { for (const c of missing) rw.exec(`ALTER TABLE ${c.table} ADD COLUMN ${c.column} ${c.ddl}`); }
+    finally { rw.close(); }
+    log.info(`[archive-view] snapshot predates ${missing.map((m) => `${m.table}.${m.column}`).join(', ')} — viewing a compatible temp copy (original untouched)`);
+    return copy;
+  } catch (e) {
+    log.warn(`[archive-view] compatibility copy failed (${e.message}) — opening the original snapshot as-is`);
+    return file;
+  }
+}
+
 /** Open a snapshot strictly read-only and sanity-check it. Caller must close() on failure. */
 function openReadonly(file) {
   const handle = new Database(file, { readonly: true, fileMustExist: true });
@@ -132,7 +175,7 @@ async function getArchiveHandle(rec) {
 
   if (opening.has(rec.id)) return opening.get(rec.id);
   const p = (async () => {
-    const file   = await resolveArchiveFile(rec);
+    const file   = ensureCompatible(await resolveArchiveFile(rec), rec.id);
     const handle = openReadonly(file);
     openHandles.set(rec.id, { handle, file, lastUsed: Date.now() });
     log.info(`[archive-view] opened snapshot "${rec.label}" read-only`);
@@ -150,6 +193,9 @@ function closeArchiveHandle(id, { dropCache = false } = {}) {
     openHandles.delete(id);
     removeSidecars(entry.file);
   }
+  const compat = compatCopyPath(id);          // throw-away compatibility copy (see ensureCompatible)
+  fs.unlink(compat, () => {});
+  removeSidecars(compat);
   if (dropCache) {
     const cached = archiveCachePath(id);
     fs.unlink(cached, () => {});

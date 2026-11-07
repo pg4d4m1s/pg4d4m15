@@ -3101,6 +3101,25 @@ function setScanLoading(on, text) {
   if (t && text) t.textContent = text;
 }
 
+// Big 3-2-1 number over the camera. n = 3|2|1 shows it; null hides it.
+var _cdShown = null;
+function setCountdown(n) {
+  var box = $('selfie-countdown'), num = $('selfie-countdown-num');
+  if (!box || !num) return;
+  if (n === null) { box.classList.add('hidden'); box.classList.remove('flex'); _cdShown = null; return; }
+  if (_cdShown === n) return;                       // only restart the pop animation when the digit changes
+  _cdShown = n;
+  num.textContent = String(n);
+  box.classList.remove('hidden'); box.classList.add('flex');
+  try { num.animate([{ transform: 'scale(1.5)', opacity: 0.2 }, { transform: 'scale(1)', opacity: 1 }], { duration: 350, easing: 'ease-out' }); } catch (e) { /* no Web Animations API */ }
+  try { if (navigator.vibrate) navigator.vibrate(15); } catch (e) { /* not supported (iOS) */ }
+}
+function flashCamera() {
+  var f = $('selfie-flash'); if (!f) return;
+  f.style.transition = 'none'; f.style.opacity = '0.9';
+  requestAnimationFrame(function () { requestAnimationFrame(function () { f.style.transition = 'opacity .35s ease-out'; f.style.opacity = '0'; }); });
+}
+
 function setScanDots(n) {
   document.querySelectorAll('#selfie-steps .selfie-dot').forEach(function (d, i) {
     d.classList.toggle('bg-green-500', i < n);
@@ -3150,6 +3169,7 @@ async function doModeSelfie() {
   setScanLoading(true, 'Opening camera\u2026');
   var oval = $('selfie-oval'); if (oval) oval.style.borderColor = 'rgba(255,255,255,0.6)';
   var instr = $('selfie-instruction'); if (instr) instr.classList.add('hidden');
+  setCountdown(null);
 
   try {
     _selfieStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 960 } }, audio: false });
@@ -3200,6 +3220,7 @@ function scanFailed(err) {
 
 function stopSelfieCamera() {
   if (_scan) { _scan.cancelled = true; _scan = null; }
+  setCountdown(null);
   if (_selfieStream) {
     _selfieStream.getTracks().forEach(function (t) { t.stop(); });
     _selfieStream = null;
@@ -3283,7 +3304,8 @@ function resetScan(s, msg) {
   s.resets++;
   console.log('[Selfie] scan restarted (' + s.resets + '): ' + msg);
   if (s.resets >= 5) { scanFailed(new Error('SCAN_GAVE_UP')); return; }
-  s.stage = 'align'; s.good = 0; s.idx = 0; s.chHold = 0; s.lostSince = 0; s.lastCx = null;
+  s.stage = 'align'; s.good = 0; s.idx = 0; s.chHold = 0; s.lostSince = 0; s.lastCx = null; s.cdStart = 0; s.cdBad = 0;
+  setCountdown(null);
   newScanChallenges(s);
   setScanDots(0);
   s.flash = msg; s.flashUntil = Date.now() + 2500;
@@ -3296,6 +3318,7 @@ function paintScan(s, a, state, instruction) {
   var statusText;
   if (Date.now() < s.flashUntil) statusText = s.flash;
   else if (s.stage === 'challenge' && a.state !== 'none' && a.state !== 'multi') statusText = 'Action ' + (s.idx + 1) + ' of ' + s.challenges.length;
+  else if (s.cdStart) statusText = 'Get ready \u2014 don\u2019t move!';
   else if (s.stage === 'final' && a.state === 'ok') statusText = 'Almost done';
   else statusText = a.msg || '';
   if (st && st.textContent !== statusText) st.textContent = statusText;
@@ -3369,14 +3392,36 @@ async function handleScanFrame(s, video, res, opts) {
     return;
   }
 
-  // final: look straight and hold still, then capture
+  // final: look straight and hold still → on-screen 3-2-1 countdown → capture
   var steady = frontal;
   var cx = a.box.x + a.box.width / 2;
-  if (steady && s.lastCx !== null && Math.abs(cx - s.lastCx) > a.vis.w * 0.04) steady = false;
+  if (steady && s.lastCx !== null && Math.abs(cx - s.lastCx) > a.vis.w * 0.05) steady = false;
   s.lastCx = cx;
+
+  if (s.cdStart) {                                        // countdown running
+    s.cdBad = steady ? 0 : s.cdBad + 1;
+    if (s.cdBad >= 3) {                                   // moved / turned away for ~0.4 s → cancel, start over
+      s.cdStart = 0; s.cdBad = 0; s.good = 0; setCountdown(null);
+      s.flash = 'Hold still \u2014 let\u2019s try the countdown again'; s.flashUntil = now + 2000;
+      paintScan(s, a, 'adjust', 'Look straight \u2014 hold still\u2026');
+      return;
+    }
+    var elapsed = now - s.cdStart;
+    var left = 3 - Math.floor(elapsed / 1000);
+    if (left >= 1) {
+      setCountdown(left);
+      paintScan(s, a, 'ok', 'Look straight \u2014 photo in ' + left + '\u2026');
+      return;
+    }
+    setCountdown(null);                                   // 0 → take the photo now
+    s.cdStart = 0;
+    await finishSelfieScan(s, video, opts);
+    return;
+  }
+
   s.good = steady ? s.good + 1 : 0;
   paintScan(s, a, steady ? 'ok' : 'adjust', 'Look straight \u2014 hold still\u2026');
-  if (s.good >= 4) await finishSelfieScan(s, video, opts);
+  if (s.good >= 4) { s.cdStart = now; s.cdBad = 0; setCountdown(3); paintScan(s, a, 'ok', 'Look straight \u2014 photo in 3\u2026'); }
 }
 
 // Grab the verified frame, re-check the still itself, then hand it to the crop viewfinder.
@@ -3398,6 +3443,7 @@ async function finishSelfieScan(s, video, opts) {
   if (!ok) { resetScan(s, 'That shot didn\u2019t pass \u2014 let\u2019s try again'); return; }
   if (s.cancelled) return;
 
+  flashCamera();                                           // visual "click" so the applicant knows the photo was taken
   var dataUrl = canvas.toDataURL('image/jpeg', 0.9);
   capturedPhotoData = dataUrl;
   avatarFileRef = null;
@@ -3414,6 +3460,7 @@ async function finishSelfieScan(s, video, opts) {
   setSelfieVerified(true);
   setScanDots(4);
   s.done = true;
+  await new Promise(function (r) { setTimeout(r, 350); });   // let the flash be seen before the camera closes
   stopSelfieCamera();
   setStep4Mode('captured');
   previewAvatarViewfinder({ target: { result: dataUrl, files: fakeFile ? [fakeFile] : [] } }, true);
