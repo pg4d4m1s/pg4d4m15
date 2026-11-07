@@ -24,3 +24,10 @@ Thumbs.db
 .vscode/
 .idea/
 *.swp
+
+# local DB backups
+*.db
+*.db-wal
+*.db-shm
+*.tar.gz
+damis_restore*/
