@@ -1,0 +1,45 @@
+2026-10-10 | Add dormitory manager ISO 25010 questionnaire, respondent profile, and richer research exports
+2026-10-09 | feat: room preference + roommate note at registration; research non-respondents list and comment authors
+2026-10-08 | Add Gmail API (HTTPS) driver to email waterfall as SendGrid fallback
+2026-10-07 | fix: resident delete FK failure (room_history), limit profile location to city/province for non-owners, fix duplicate auto-mod switch IDs
+2026-10-06 | Registration resilience: upload progress/timeouts, draft resume without new OTP, specific errors, root-cause logging
+2026-10-05 | feat(email): support up to 5 SendGrid accounts as ordered fallbacks
+2026-09-22 | fix(resident-survey): raise questionnaire modal above mobile bottom nav
+2026-09-22 | polish: spell out Likert scale labels, fix AI toolbar cutoff on mobile
+2026-09-22 | research: consolidate to one system-wide questionnaire delivered via feed card
+2026-09-22 | fix(dorm): dorm_billing.user_comment migration ran before its table existed
+2026-09-21 | fix(dorm): make /me/dormitory observable and fault-tolerant; mobile polish
+2026-09-21 | feat(research): Student Residents Questionnaire + admin Research tab
+2026-09-13 | Fix manual course/year-level/specialization entry: replace fragile dropdown-value flag with independent checkboxes, remove autocomplete suggestions
+2026-09-12 | Add manual entry+suggestions for course fields, manual school toggle, deceased parent flags, and guardian info section
+2026-09-10 | Add confirm dialog for room removal; add Incident Reports card to dashboard
+2026-09-09 | Add room delete confirm, room history tracking, fix maintenance widget, add Incident Reports system
+2026-08-06 | follow up archive db fix
+2026-08-06 | Add Archive DB tab: auto-save full .db snapshot on every semester rollover
+2026-08-02 | fix: move idx_users_status index creation after account_status migration
+2026-06-08 | fix: remove orphaned duplicate post-review-modal inner HTML
+2026-06-08 | fix: rollover 36-vs-35 column mismatch + allow admin to restore backup
+2026-06-08 | feat: admission slips, semester rollover, deleted archive tab, backup/restore UI
+2026-06-01 | fix: allow cross-origin CDN resources blocked by Helmet v7 default CORP header
+2026-06-01 | fix(security+reliability): ISO 25010 audit — S1 S2 S3 R1 R2 M2 M3
+2026-06-01 | fix: replace MemoryStore with SQLite session store
+2026-06-01 | refactor: remove Brevo and Resend email drivers
+2026-06-01 | fix: add better-sqlite3-session-store to package-lock.json
+2026-06-01 | fix: SQLite session store + suppress SMTP verify in production
+2026-06-01 | fix: resident management always defaults to Residents tab on load
+2026-05-31 | feat: admin UI improvements + testing bypasses
+2026-05-30 | Implement major system update
+2026-05-12 | fix: secure requireAdmin (bypass only in dev); optional admin last name + name sync on startup
+2026-05-12 | fix: regenerate package-lock.json (resend 4.0→4.8, npm ci was failing on Railway)
+2026-05-12 | chore: rebrand ConnectHub → PGA-DAMIS; fix email waterfall docs
+2026-05-12 | Integrate SendGrid email service
+2026-05-12 | fix: repair email waterfall — SendGrid dispatch & FROM_EMAIL
+2026-05-12 | fix: switch to Mailjet — no IP restrictions, works on Railway
+2026-05-12 | fix: add Brevo as primary email driver (no domain required)
+2026-05-12 | chore: update package-lock.json for resend dependency
+2026-05-12 | fix: replace SMTP/Ethereal with Resend + console dev driver
+2026-05-11 | fix: use DATA_DIR env var for persistent DB path
+2026-05-11 | fix: trust proxy for Railway HTTPS session cookies
+2026-05-11 | fix: use Dockerfile with Node 20 and python3
+2026-05-11 | fix: add python for better-sqlite3 native build
+2026-05-11 | initial deploy

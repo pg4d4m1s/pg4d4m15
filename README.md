@@ -253,7 +253,7 @@ DAMIS/
 | **2 — Email OTP** | 6-digit OTP sent to email; verified before proceeding |
 | **3 — Application** | Personal info: name, date of birth, sex (Male/Female), civil status, permanent + present address |
 | **4 — Profile** | School info (name, course, year level), family info (father/mother), monthly income bracket |
-| **5 — Documents** | Upload School ID (front), Certificate of Residency, Certificate of Low Income, Certificate of Enrollment; selfie for face verification |
+| **5 — Documents** | Upload School ID or Government ID (front), Certificate of Residency, Certificate of Low Income, Certificate of Registration/Enrollment, Report Card / Certificate of Grades; live selfie with face verification |
 
 After submission the account sits in `pending` status. The student cannot log in until an admin approves the application.
 

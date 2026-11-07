@@ -511,6 +511,10 @@ migrate(`ALTER TABLE users ADD COLUMN guardian_info      TEXT DEFAULT ''`);
 migrate(`ALTER TABLE id_verification_requests ADD COLUMN cert_residency_url   TEXT DEFAULT ''`);
 migrate(`ALTER TABLE id_verification_requests ADD COLUMN cert_low_income_url  TEXT DEFAULT ''`);
 migrate(`ALTER TABLE id_verification_requests ADD COLUMN cert_enrollment_url  TEXT DEFAULT ''`);
+// ── Report Card / Certificate of Grades (last semester) — added after the first 4 documents ──
+migrate(`ALTER TABLE id_verification_requests ADD COLUMN cert_grades_url      TEXT DEFAULT ''`);
+migrate(`ALTER TABLE rejected_registrations   ADD COLUMN cert_grades_url      TEXT DEFAULT ''`);
+migrate(`ALTER TABLE deleted_users            ADD COLUMN cert_grades_url      TEXT DEFAULT ''`);
 migrate(`CREATE TABLE IF NOT EXISTS message_reactions (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, message_id TEXT NOT NULL, emoji TEXT NOT NULL DEFAULT 'like', created_at TEXT DEFAULT (datetime('now')), UNIQUE(user_id, message_id))`);
 
 // ── Reputation votes (one vote per voter per target, can be +1 or -1) ──
@@ -1127,10 +1131,10 @@ function archiveRejectedRegistration({ user, idDocs, reason, rejectedBy }) {
        school_name, school_address, year_level, course, specialization,
        father_info, mother_info, guardian_info, monthly_income,
        id_front_url, id_back_url, selfie_url, id_type,
-       cert_residency_url, cert_low_income_url, cert_enrollment_url,
+       cert_residency_url, cert_low_income_url, cert_enrollment_url, cert_grades_url,
        rejection_reason, rejected_by, original_created_at, password_hash,
        avatar_face_x, avatar_face_y, google_id)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
   `).run(
     id, user.id, user.firstName, user.middleName||'', user.lastName, user.suffix||'',
     user.username, user.email, user.phone||'', user.birthday||'', user.sex||'',
@@ -1141,7 +1145,7 @@ function archiveRejectedRegistration({ user, idDocs, reason, rejectedBy }) {
     user.fatherInfo||'', user.motherInfo||'', user.guardianInfo||'', user.monthlyIncome||'',
     // ── Documents ──
     idDocs?.id_front_url||'', idDocs?.id_back_url||'', idDocs?.selfie_url||'', idDocs?.id_type||'',
-    idDocs?.cert_residency_url||'', idDocs?.cert_low_income_url||'', idDocs?.cert_enrollment_url||'',
+    idDocs?.cert_residency_url||'', idDocs?.cert_low_income_url||'', idDocs?.cert_enrollment_url||'', idDocs?.cert_grades_url||'',
     reason||'', rejectedBy, user.createdAt||'',
     user.password||null,
     user.avatarFaceX ?? 50, user.avatarFaceY ?? 50,
@@ -1169,7 +1173,7 @@ function getFullUserProfile(userId) {
     SELECT u.*,
       ivr.id as verif_id, ivr.id_front_url, ivr.id_back_url, ivr.selfie_url, ivr.id_type,
       ivr.status as verif_status, ivr.created_at as verif_submitted_at,
-      ivr.cert_residency_url, ivr.cert_low_income_url, ivr.cert_enrollment_url
+      ivr.cert_residency_url, ivr.cert_low_income_url, ivr.cert_enrollment_url, ivr.cert_grades_url
     FROM users u
     LEFT JOIN id_verification_requests ivr ON ivr.user_id = u.id
       AND ivr.id = (SELECT id FROM id_verification_requests WHERE user_id = u.id ORDER BY created_at DESC LIMIT 1)
@@ -1188,6 +1192,7 @@ function getFullUserProfile(userId) {
     certResidencyUrl:  row.cert_residency_url   || '',
     certLowIncomeUrl:  row.cert_low_income_url  || '',
     certEnrollmentUrl: row.cert_enrollment_url  || '',
+    certGradesUrl:     row.cert_grades_url      || '',
   };
 }
 
@@ -1565,14 +1570,14 @@ function markPostAiReviewed(postId) {
 // ID VERIFICATION REQUESTS
 // ══════════════════════════════════════════════════════
 
-function submitIdVerification({ userId, idFrontUrl, idBackUrl = '', selfieUrl = '', idType = 'school_id', certResidencyUrl = '', certLowIncomeUrl = '', certEnrollmentUrl = '' }) {
+function submitIdVerification({ userId, idFrontUrl, idBackUrl = '', selfieUrl = '', idType = 'school_id', certResidencyUrl = '', certLowIncomeUrl = '', certEnrollmentUrl = '', certGradesUrl = '' }) {
   // Cancel any previous pending request from this user
   db.prepare(`DELETE FROM id_verification_requests WHERE user_id = ? AND status = 'pending'`).run(userId);
   const id = genId();
   db.prepare(`
-    INSERT INTO id_verification_requests (id, user_id, id_front_url, id_back_url, selfie_url, id_type, cert_residency_url, cert_low_income_url, cert_enrollment_url)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(id, userId, idFrontUrl, idBackUrl, selfieUrl, idType, certResidencyUrl, certLowIncomeUrl, certEnrollmentUrl);
+    INSERT INTO id_verification_requests (id, user_id, id_front_url, id_back_url, selfie_url, id_type, cert_residency_url, cert_low_income_url, cert_enrollment_url, cert_grades_url)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(id, userId, idFrontUrl, idBackUrl, selfieUrl, idType, certResidencyUrl, certLowIncomeUrl, certEnrollmentUrl, certGradesUrl);
   return id;
 }
 
@@ -1651,7 +1656,7 @@ function getPendingAccounts() {
            u.avatar_face_x, u.avatar_face_y,
            u.room_preference, u.roommate_note,
            ivr.id as verif_id, ivr.id_front_url, ivr.id_back_url, ivr.selfie_url, ivr.id_type,
-           ivr.cert_residency_url, ivr.cert_low_income_url, ivr.cert_enrollment_url
+           ivr.cert_residency_url, ivr.cert_low_income_url, ivr.cert_enrollment_url, ivr.cert_grades_url
     FROM users u
     LEFT JOIN id_verification_requests ivr ON ivr.user_id = u.id
       AND ivr.id = (SELECT id FROM id_verification_requests WHERE user_id = u.id ORDER BY created_at DESC LIMIT 1)
@@ -2351,7 +2356,7 @@ function semesterRollover(newSemester, schoolYear, newSlipValidTo, adminId) {
   const semesterTag = `${newSemester} ${schoolYear}`;
   const residents = db.prepare(
     `SELECT u.*, ivr.id_front_url, ivr.id_back_url, ivr.selfie_url,
-      ivr.cert_residency_url, ivr.cert_low_income_url, ivr.cert_enrollment_url
+      ivr.cert_residency_url, ivr.cert_low_income_url, ivr.cert_enrollment_url, ivr.cert_grades_url
      FROM users u
      LEFT JOIN id_verification_requests ivr ON ivr.user_id = u.id
        AND ivr.id = (SELECT id FROM id_verification_requests WHERE user_id = u.id ORDER BY created_at DESC LIMIT 1)
@@ -2368,10 +2373,10 @@ function semesterRollover(newSemester, schoolYear, newSlipValidTo, adminId) {
        present_address, permanent_address, school_name, course, year_level, school_address,
        father_info, mother_info, guardian_info, monthly_income,
        id_front_url, id_back_url, selfie_url,
-       cert_residency_url, cert_low_income_url, cert_enrollment_url,
+       cert_residency_url, cert_low_income_url, cert_enrollment_url, cert_grades_url,
        original_created_at, deleted_by, semester_tag,
        password_hash, google_id, specialization, avatar_face_x, avatar_face_y)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
   `);
 
   // Nested call inside the outer transaction below → better-sqlite3 turns it into a savepoint.
@@ -2386,7 +2391,7 @@ function semesterRollover(newSemester, schoolYear, newSlipValidTo, adminId) {
       u.school_name || '', u.course || '', u.year_level || '', u.school_address || '',
       u.father_info || '', u.mother_info || '', u.guardian_info || '', u.monthly_income || '',
       u.id_front_url || '', u.id_back_url || '', u.selfie_url || '',
-      u.cert_residency_url || '', u.cert_low_income_url || '', u.cert_enrollment_url || '',
+      u.cert_residency_url || '', u.cert_low_income_url || '', u.cert_enrollment_url || '', u.cert_grades_url || '',
       u.created_at || '', adminId, semesterTag,
       u.password || null, u.google_id || null, u.specialization || '',
       u.avatar_face_x ?? 50, u.avatar_face_y ?? 50

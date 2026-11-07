@@ -36,13 +36,14 @@ const log = require('../utils/logger');
 const MAX_FILE_MB = 15;
 
 const FIELD_LABELS = {
-  id_front:        'School ID',
+  id_front:        'School ID / Government ID',
   id_back:         'ID (back)',
   selfie:          'selfie photo',
   avatar:          'profile photo',
   cert_residency:  'Certificate of Residency',
   cert_low_income: 'Certificate of Low Income',
-  cert_enrollment: 'Certificate of Enrollment',
+  cert_enrollment: 'Certificate of Registration/Enrollment',
+  cert_grades:     'Report Card / Certificate of Grades',
 };
 const fieldLabel = (f) => FIELD_LABELS[f] || null;
 
@@ -197,7 +198,7 @@ function describeUploadError(err, req) {
       body: withRef({
         error: `${label ? `Your ${label}` : 'A file'} is not an accepted type` +
                `${err.mimetype ? ` (${err.mimetype})` : ''}. ` +
-               (['id_front', 'cert_residency', 'cert_low_income', 'cert_enrollment'].includes(field)
+               (['id_front', 'cert_residency', 'cert_low_income', 'cert_enrollment', 'cert_grades'].includes(field)
                  ? 'Please upload a JPG, PNG, WebP, PDF or DOCX file.'
                  : 'Please upload a JPG, PNG, GIF or WebP image.'),
         code: 'BAD_FILE_TYPE', field,

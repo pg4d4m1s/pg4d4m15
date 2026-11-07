@@ -1735,6 +1735,9 @@
       style:{background:type==='success'?'#16a34a':type==='error'?'#e5365a':type==='info'?'#1a8cff':'#8b5cf6',
              borderRadius:'12px',fontFamily:'DM Sans,sans-serif',fontSize:'14px',padding:'12px 20px'}}).showToast();
   }
+  // Friendly name for the ID the applicant uploaded in registration Step 5 (School ID or a government ID).
+  const DAMIS_ID_LABELS = { school_id:'School ID', philid:'PhilID (National ID)', drivers_license:"Driver's License", passport:'Passport', umid:'UMID', voters_id:"Voter's ID", prc_id:'PRC ID', postal_id:'Postal ID', other_gov_id:'Government ID' };
+  function damisIdLabel(t){ return DAMIS_ID_LABELS[t] || 'School ID'; }
   function escHtml(s){if(!s)return'';return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
   // escJS: escape a string for safe use inside a single-quoted JS onclick attribute
   // Handles names like O'Connor that break onclick="fn('O'Connor')"
@@ -2941,7 +2944,7 @@
     const selfieUrl = escHtml(a.selfie_url || a.avatar || avatarUrl(a.first_name, a.last_name));
     const avFb      = escHtml(avatarUrl(a.first_name, a.last_name));
     const hasAllDocs = !!(a.id_front_url && a.cert_residency_url && a.cert_low_income_url && a.cert_enrollment_url);
-    const hasAnyDoc  = !!(a.id_front_url || a.cert_residency_url || a.cert_low_income_url || a.cert_enrollment_url);
+    const hasAnyDoc  = !!(a.id_front_url || a.cert_residency_url || a.cert_low_income_url || a.cert_enrollment_url || a.cert_grades_url);
 
     const authIcon = a.auth_provider === 'google'
       ? '<span class="inline-flex items-center gap-1.5 text-sm font-semibold text-white/60 bg-white/10 px-3 py-1.5 rounded-full"><i class="fa-brands fa-google text-red-400 mr-1"></i>Google Sign-in</span>'
@@ -3210,11 +3213,12 @@
         <!-- DOCUMENT REQUIREMENTS -->
         <div>
           ${sec('fa-file-lines', 'Document Requirements')}
-          <div class="grid grid-cols-4 gap-3">
-            ${docRow('fa-id-card',            'text-blue-500',   'School ID',                 a.id_front_url)}
+          <div class="grid grid-cols-2 sm:grid-cols-3 gap-3">
+            ${docRow('fa-id-card',            'text-blue-500',   damisIdLabel(a.id_type),     a.id_front_url)}
             ${docRow('fa-house',              'text-green-500',  'Certificate of Residency',   a.cert_residency_url)}
             ${docRow('fa-hand-holding-heart', 'text-amber-500',  'Certificate of Low Income',  a.cert_low_income_url)}
-            ${docRow('fa-graduation-cap',     'text-indigo-500', 'Certificate of Enrollment',  a.cert_enrollment_url)}
+            ${docRow('fa-graduation-cap',     'text-indigo-500', 'Certificate of Registration/Enrollment',  a.cert_enrollment_url)}
+            ${docRow('fa-clipboard-list',     'text-rose-500',   'Report Card / Certificate of Grades',  a.cert_grades_url)}
           </div>
           ${!hasAnyDoc ? `
           <div class="mt-4 flex items-start gap-3 p-4 bg-amber-50 dark:bg-amber-950/20 border-2 border-amber-200 dark:border-amber-800 rounded-2xl">
@@ -4930,7 +4934,7 @@
     const selfieUrl = escHtml(a.selfie_url || a.avatar || avatarUrl(a.first_name, a.last_name));
     const avFb      = escHtml(avatarUrl(a.first_name, a.last_name));
     const hasAllDocs = !!(a.id_front_url && a.cert_residency_url && a.cert_low_income_url && a.cert_enrollment_url);
-    const hasAnyDoc  = !!(a.id_front_url || a.cert_residency_url || a.cert_low_income_url || a.cert_enrollment_url);
+    const hasAnyDoc  = !!(a.id_front_url || a.cert_residency_url || a.cert_low_income_url || a.cert_enrollment_url || a.cert_grades_url);
 
     const authIcon = a.auth_provider === 'google'
       ? '<span class="inline-flex items-center gap-1.5 text-sm font-semibold text-white/60 bg-white/10 px-3 py-1.5 rounded-full"><i class="fa-brands fa-google text-red-400 mr-1"></i>Google Sign-in</span>'
@@ -5158,11 +5162,12 @@
         <!-- DOCUMENT REQUIREMENTS -->
         <div>
           ${sec('fa-file-lines', 'Document Requirements')}
-          <div class="grid grid-cols-4 gap-3">
-            ${docRow('fa-id-card',            'text-blue-500',   'School ID',                  a.id_front_url)}
+          <div class="grid grid-cols-2 sm:grid-cols-3 gap-3">
+            ${docRow('fa-id-card',            'text-blue-500',   damisIdLabel(a.id_type),      a.id_front_url)}
             ${docRow('fa-house',              'text-green-500',  'Certificate of Residency',    a.cert_residency_url)}
             ${docRow('fa-hand-holding-heart', 'text-amber-500',  'Certificate of Low Income',   a.cert_low_income_url)}
-            ${docRow('fa-graduation-cap',     'text-indigo-500', 'Certificate of Enrollment',   a.cert_enrollment_url)}
+            ${docRow('fa-graduation-cap',     'text-indigo-500', 'Certificate of Registration/Enrollment',   a.cert_enrollment_url)}
+            ${docRow('fa-clipboard-list',     'text-rose-500',   'Report Card / Certificate of Grades',   a.cert_grades_url)}
           </div>
         </div>
 
@@ -5366,7 +5371,7 @@
           :'')
       : '';
 
-    var hasAnyDoc = !!(u.idFrontUrl||u.certResidencyUrl||u.certLowIncomeUrl||u.certEnrollmentUrl);
+    var hasAnyDoc = !!(u.idFrontUrl||u.certResidencyUrl||u.certLowIncomeUrl||u.certEnrollmentUrl||u.certGradesUrl);
 
     return `
     <div class="bg-white dark:bg-slate-900 rounded-3xl border border-slate-200 dark:border-slate-700 overflow-hidden shadow">
@@ -5461,11 +5466,12 @@
             ? `<p class="text-[10px] text-slate-400 mb-3">Submitted ${reltime(u.verifSubmittedAt)}</p>`
             : ''}
           ${hasAnyDoc
-            ? `<div class="grid grid-cols-4 gap-3">
-                ${docRow('fa-id-card',            'text-blue-500',   'School ID',                  u.idFrontUrl)}
+            ? `<div class="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                ${docRow('fa-id-card',            'text-blue-500',   damisIdLabel(u.idType),       u.idFrontUrl)}
                 ${docRow('fa-house',              'text-green-500',  'Certificate of Residency',    u.certResidencyUrl)}
                 ${docRow('fa-hand-holding-heart', 'text-amber-500',  'Certificate of Low Income',   u.certLowIncomeUrl)}
-                ${docRow('fa-graduation-cap',     'text-indigo-500', 'Certificate of Enrollment',   u.certEnrollmentUrl)}
+                ${docRow('fa-graduation-cap',     'text-indigo-500', 'Certificate of Registration/Enrollment',   u.certEnrollmentUrl)}
+                ${docRow('fa-clipboard-list',     'text-rose-500',   'Report Card / Certificate of Grades',   u.certGradesUrl)}
               </div>
               ${u.idBackUrl ? `<div class="mt-3"><p class="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-2">ID Back</p><div class="grid grid-cols-4 gap-3">${docRow('fa-id-card','text-blue-400','ID Back',u.idBackUrl)}</div></div>` : ''}
               `

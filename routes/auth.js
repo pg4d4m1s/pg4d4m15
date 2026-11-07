@@ -18,6 +18,7 @@ const rateLimit  = require('express-rate-limit');
 const { generateOTP, sendOTPEmail, sendWelcomeEmail, sendPasswordResetEmail, sendAccountPendingEmail, sendAccountApprovedEmail, sendAccountRejectedEmail, sendContactEmail } = require('../utils/emailService');
 const { rejectDisposableEmail } = require('../utils/disposableEmailCheck');
 const { uploadIdDocs } = require('../middleware/upload');
+const { checkSelfie } = require('../utils/faceCheck');
 const { trackUpload, uploadSummary, clientReportHandler, clientIp } = require('../middleware/uploadDiagnostics');
 const {
   findUserByEmail, findUserById, findUserByUsername, findUserByPhone,
@@ -27,6 +28,42 @@ const {
   recordFailedLogin, checkLoginLock, clearLoginAttempts,
   getRoomAvailability, resolveRoomPreference,
 } = require('../utils/db');
+
+
+// ─── Live-selfie gate (runs BEFORE any file is sent to Cloudinary) ───────────────────────────
+// Step 4 of the wizard is now live-camera only (no gallery upload) and the browser runs a face scanner +
+// liveness challenges. The browser can be bypassed by a hand-made request, so the server (a) requires the
+// profile photo and (b) re-checks that it really shows exactly one real face (utils/faceCheck.js; fail-open
+// if the AI service is unavailable). `selfieCheck` is the browser scanner's own report — logged for
+// debugging only, never trusted.
+async function requireLiveSelfie(req, res, next) {
+  const ref = req._id;
+  const fail = (status, code, error) => {
+    log.warn(`[REG-FAIL] ${code} (HTTP ${status}) — ${error} | ref=${ref} email=${(req.session.pendingRegistration || {}).email || '—'} ip=${clientIp(req)}`);
+    return res.status(status).json({ error, code, ref, field: 'avatar' });
+  };
+  try {
+    const avatar = req.files && req.files.avatar && req.files.avatar[0];
+    if (!avatar)
+      return fail(400, 'SELFIE_REQUIRED', 'A live selfie is required. Please go back to the Profile step and take your selfie with the camera.');
+
+    let report = null;
+    try { report = JSON.parse(req.body && req.body.selfieCheck); } catch (_) { /* absent or malformed */ }
+    log.info(`[SELFIE] browser scanner report: ${report ? `status=${report.status} method=${report.method} challenges=${(report.challenges || []).join('+')}` : 'NONE (older page or bypassed client)'} ref=${ref}`);
+
+    const verdict = await checkSelfie(avatar.buffer, avatar.mimetype);
+    if (!verdict.ok) return fail(422, verdict.code, verdict.message);
+    if (verdict.skipped) log.warn(`[SELFIE-CHECK] not verified server-side for ref=${ref} — review this applicant's photo manually.`);
+    next();
+  } catch (e) {
+    // Never block a real applicant because our own check crashed.
+    log.error(`[SELFIE-CHECK] crashed (letting the request through): ${e.message} ref=${ref}`);
+    next();
+  }
+}
+
+// ID types the applicant can pick on Step 5 (anything else falls back to school_id).
+const ID_TYPES = new Set(['school_id', 'philid', 'drivers_license', 'passport', 'umid', 'voters_id', 'prc_id', 'postal_id', 'other_gov_id']);
 
 // ─── helpers ────────────────────────────────────────
 function validatePassword(p) {
@@ -195,7 +232,7 @@ function requireVerifiedRegistration(req, res, next) {
 // (uploadIdDocs = [multer.fields(...), processIdDocument] — see middleware/upload.js)
 // ════════════════════════════════════════════════════
 router.post('/api/auth/complete-registration',
-  trackUpload('complete-registration'), uploadIdDocs[0], requireVerifiedRegistration, uploadIdDocs[1],
+  trackUpload('complete-registration'), uploadIdDocs[0], requireVerifiedRegistration, requireLiveSelfie, uploadIdDocs[1],
   async (req, res) => {
   const ref = req._id;
   // One structured WARN line for the log + a specific {error, code, field, ref} for the resident.
@@ -335,20 +372,22 @@ router.post('/api/auth/complete-registration',
       cert_residency:   idUrls.cert_residency   ? `✔ ${String(idUrls.cert_residency).slice(0, 55)}…`   : '✖ missing',
       cert_low_income:  idUrls.cert_low_income  ? `✔ ${String(idUrls.cert_low_income).slice(0, 55)}…`  : '✖ missing',
       cert_enrollment:  idUrls.cert_enrollment  ? `✔ ${String(idUrls.cert_enrollment).slice(0, 55)}…`  : '✖ missing',
+      cert_grades:      idUrls.cert_grades      ? `✔ ${String(idUrls.cert_grades).slice(0, 55)}…`      : '✖ missing',
     });
-    if (idUrls.id_front || idUrls.cert_residency || idUrls.cert_low_income || idUrls.cert_enrollment || idUrls.selfie || idUrls.avatar) {
+    if (idUrls.id_front || idUrls.cert_residency || idUrls.cert_low_income || idUrls.cert_enrollment || idUrls.cert_grades || idUrls.selfie || idUrls.avatar) {
       try {
         submitIdVerification({
           userId:             newUser.id,
           idFrontUrl:         idUrls.id_front        || '',
           idBackUrl:          idUrls.id_back          || '',
           selfieUrl:          idUrls.selfie           || idUrls.avatar || '',
-          idType:             'school_id',
+          idType:             ID_TYPES.has(idType) ? idType : 'school_id',
           certResidencyUrl:   idUrls.cert_residency   || '',
           certLowIncomeUrl:   idUrls.cert_low_income  || '',
           certEnrollmentUrl:  idUrls.cert_enrollment  || '',
+          certGradesUrl:      idUrls.cert_grades      || '',
         });
-        log.upload(`Documents stored for @${newUser.username}: school_id=${!!idUrls.id_front}, residency=${!!idUrls.cert_residency}, low_income=${!!idUrls.cert_low_income}, enrollment=${!!idUrls.cert_enrollment}`);
+        log.upload(`Documents stored for @${newUser.username}: school_id=${!!idUrls.id_front}, residency=${!!idUrls.cert_residency}, low_income=${!!idUrls.cert_low_income}, enrollment=${!!idUrls.cert_enrollment}, grades=${!!idUrls.cert_grades}, idType=${ID_TYPES.has(idType) ? idType : 'school_id'}`);
       } catch (idErr) {
         log.error(`ID verification insert failed (non-fatal): ${idErr.message}`);
       }

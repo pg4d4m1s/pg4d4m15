@@ -138,16 +138,17 @@ const FAQ = [
     match: [
       [/\b(documents?|requirements?|dokumento|papers)\b/, 2],
       [/\b(what|which|ano|anong)\b.*\b(documents?|requirements?|dokumento|papers)\b/, 4],
-      [/school id|certificate|residency|low income|indigency|enrollment|\bcor\b/, 3],
+      [/school id|government id|philid|phil id|certificate|residency|low income|indigency|enrollment|registration|report card|grades|\bcor\b/, 3],
       [/\b(required|needed|kailangan)\b.*\b(upload|submit|document)/, 3],
     ],
     answer:
-      "You need to upload **4 documents**:\n" +
-      "• **School ID**\n" +
+      "You need to upload **5 documents**:\n" +
+      "• **School ID or Government ID** (PhilID, driver's license, passport, UMID, voter's ID, PRC ID, etc.)\n" +
       "• **Certificate of Residency**\n" +
       "• **Certificate of Low Income**\n" +
-      "• **Certificate of Enrollment**\n\n" +
-      "You also need a clear **face photo** (upload or live selfie).\n\n" +
+      "• **Certificate of Registration/Enrollment**\n" +
+      "• **Report Card / Certificate of Grades** from your last semester (also called Grade Slip). Incoming freshmen: your Grade 12 report card (Form 138).\n\n" +
+      "You also need a **live selfie** taken with your camera — gallery uploads are not accepted, and the app scans your face and asks for two quick actions (like turning your head) to confirm it is really you.\n\n" +
       "Accepted files: **JPG, PNG, WEBP, PDF, DOCX**, up to **10 MB each**. Make sure each document is fully in the frame, readable and not blurry — phone photos are fine.\n\n" +
       "After uploading online, you must still submit your **hard copies** as a follow-up.",
     followups: ['hard-copy', 'upload-problems', 'how-to-register'],

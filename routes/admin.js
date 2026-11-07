@@ -308,10 +308,10 @@ router.delete('/api/admin/users/:id', requireAdmin, (req, res) => {
          present_address, permanent_address, school_name, course, year_level, school_address,
          father_info, mother_info, guardian_info, monthly_income,
          id_front_url, id_back_url, selfie_url,
-         cert_residency_url, cert_low_income_url, cert_enrollment_url,
+         cert_residency_url, cert_low_income_url, cert_enrollment_url, cert_grades_url,
          original_created_at, deleted_by,
          password_hash, google_id, specialization, avatar_face_x, avatar_face_y)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     `).run(
       require('crypto').randomUUID(), targetId,
       user.first_name, user.middle_name||'', user.last_name, user.suffix||'',
@@ -322,7 +322,7 @@ router.delete('/api/admin/users/:id', requireAdmin, (req, res) => {
       user.school_name||'', user.course||'', user.year_level||'', user.school_address||'',
       user.father_info||'', user.mother_info||'', user.guardian_info||'', user.monthly_income||'',
       idDocs?.id_front_url||'', idDocs?.id_back_url||'', idDocs?.selfie_url||'',
-      idDocs?.cert_residency_url||'', idDocs?.cert_low_income_url||'', idDocs?.cert_enrollment_url||'',
+      idDocs?.cert_residency_url||'', idDocs?.cert_low_income_url||'', idDocs?.cert_enrollment_url||'', idDocs?.cert_grades_url||'',
       user.created_at||'', req.user?.id || 'system',
       user.password || null, user.google_id || null, user.specialization || '',
       user.avatar_face_x ?? 50, user.avatar_face_y ?? 50
@@ -421,6 +421,7 @@ router.post('/api/admin/users/deleted/:id/restore', requireAdmin, (req, res) => 
           certResidencyUrl: rec.cert_residency_url||'',
           certLowIncomeUrl: rec.cert_low_income_url||'',
           certEnrollmentUrl: rec.cert_enrollment_url||'',
+          certGradesUrl: rec.cert_grades_url||'',
         });
       } catch(e) { log.error(`Doc re-attach on restore failed: ${e.message}`); }
     }
@@ -882,6 +883,7 @@ router.post('/api/admin/accounts/rejected/:id/restore', requireAdmin, (req, res)
         certResidencyUrl:  rec.cert_residency_url  || '',
         certLowIncomeUrl:  rec.cert_low_income_url || '',
         certEnrollmentUrl: rec.cert_enrollment_url || '',
+        certGradesUrl:     rec.cert_grades_url     || '',
       });
     } catch (e) {
       log.error(`ID re-attach failed (non-fatal): ${e.message}`);

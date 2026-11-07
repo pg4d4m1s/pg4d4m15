@@ -708,7 +708,9 @@ async function validateStep(step) {
   if (step === 4) {
     // Profile photo only - required
     var hasPhoto = avatarFileRef || capturedPhotoData || ($('av-cropped-data') && $('av-cropped-data').value);
-    if (!hasPhoto) { showStepError(4, 'Please upload or capture a profile photo.'); return false; }
+    if (_scan) { showStepError(4, 'Finish the face scan first \u2014 follow the instructions on the camera.'); return false; }
+    if (!hasPhoto) { showStepError(4, 'Please take a live selfie with the camera to continue.'); return false; }
+    if (!selfieIsVerified()) { showStepError(4, 'Your selfie has not passed the face scan. Tap \u201cRetake Selfie\u201d and follow the on-screen steps.'); return false; }
     hideStepError(4);
     return true;
   }
@@ -1897,10 +1899,17 @@ async function loadRoomPreferences(manual) {
 // ═══════════════════════════════════════════════════
 async function completeRegistration() {
   var docs = window._damis_docs || {};
-  if (!docs['school-id'])  { showStepError(5, 'Please upload your School ID.'); return; }
+  // Safety net: a draft restored after a refresh can land on Step 5 with a photo that never passed the live scan.
+  if (!selfieIsVerified() || !(avatarFileRef || capturedPhotoData)) {
+    clearSelfiePhoto();
+    backToSelfieStep('Please take your live selfie again \u2014 it has to pass the face scan before you can submit.');
+    return;
+  }
+  if (!docs['school-id'])  { showStepError(5, 'Please upload your School ID or a valid Government ID.'); return; }
   if (!docs['residency'])  { showStepError(5, 'Please upload your Certificate of Residency.'); return; }
   if (!docs['low-income']) { showStepError(5, 'Please upload your Certificate of Low Income.'); return; }
-  if (!docs['enrollment']) { showStepError(5, 'Please upload your Certificate of Enrollment.'); return; }
+  if (!docs['enrollment']) { showStepError(5, 'Please upload your Certificate of Registration/Enrollment.'); return; }
+  if (!docs['grades'])     { showStepError(5, 'Please upload your Report Card / Certificate of Grades from last semester.'); return; }
   if (!$('chk-terms').checked) { showStepError(5, 'You must agree to the Terms & Conditions.'); return; }
 
   // NOTE: the Student Residents Questionnaire used to be required here before
@@ -1934,7 +1943,7 @@ async function completeRegistration() {
     fd.append('civilStatus',     $('reg-civil') ? $('reg-civil').value : '');
     fd.append('phone',           phoneRaw);
     fd.append('bio',             $('reg-bio') ? $('reg-bio').value.trim() : '');
-    fd.append('idType',          'school_id');
+    fd.append('idType',          ($('reg-id-type') && $('reg-id-type').value) || 'school_id');
 
     // Present / Permanent address
     var permAddr = $('perm-addr-hidden') ? $('perm-addr-hidden').value : '';
@@ -2026,11 +2035,14 @@ async function completeRegistration() {
     if (pd['residency'])  fd.append('cert_residency',  pd['residency'].blob,  pd['residency'].name);
     if (pd['low-income']) fd.append('cert_low_income', pd['low-income'].blob, pd['low-income'].name);
     if (pd['enrollment']) fd.append('cert_enrollment', pd['enrollment'].blob, pd['enrollment'].name);
+    if (pd['grades'])     fd.append('cert_grades',     pd['grades'].blob,     pd['grades'].name);
     // Crop position is saved separately (percentages), so resizing the image does not move the crop.
     if (prep.avatar) {
       fd.append('avatar', prep.avatar.blob, prep.avatar.name || 'avatar.jpg');
       fd.append('selfie', prep.avatar.blob, prep.avatar.name || 'selfie.jpg');
     }
+    // What the in-browser face scanner reported (the server only logs it — it re-checks the photo itself).
+    fd.append('selfieCheck', JSON.stringify(window._selfieReport || { status: selfieIsVerified() ? 'restored-draft' : 'none', method: 'face-api@' + FACE_API_VERSION }));
 
     // ── Face crop position (percentage of original image) ────────
     var faceX = $('avatar-face-x') ? parseFloat($('avatar-face-x').value) : 50;
@@ -2058,6 +2070,14 @@ async function completeRegistration() {
     if (!outcome.ok) {
       var fl = outcome.failure;
       var errMsg = fl.message + (fl.hint ? ' ' + fl.hint : '');
+      if (fl.goStep === 4 || /^SELFIE_/.test(fl.code || '')) {
+        // The server's own face check rejected the photo (or it was missing) — make them retake it.
+        clearSelfiePhoto();
+        btn.disabled = false;
+        btn.innerHTML = 'Submit Application <i class="fa-solid fa-paper-plane ml-1"></i>';
+        backToSelfieStep(fl.message);
+        return;
+      }
       var isUsernameTaken = fl.message.toLowerCase().includes('username') && fl.message.toLowerCase().includes('taken');
       var isPhoneTaken    = fl.message.toLowerCase().includes('phone') && fl.message.toLowerCase().includes('registered');
       if (isUsernameTaken || isPhoneTaken || fl.goStep === 3) {
@@ -3016,55 +3036,172 @@ function onCourseChange() {
 }
 
 // ═══════════════════════════════════════════════════
-// LIVE SELFIE — Step 4 camera capture
+// LIVE SELFIE — Step 4: camera-only capture + on-device face scanner
+//
+// Gallery uploads were removed on purpose (applicants were choosing photos that were not theirs). The photo can now
+// only come from the live camera, and a frame is only accepted after the scanner has seen, in order:
+//   1. exactly ONE face, well sized, centred in the oval, facing the camera, in decent light
+//   2. two RANDOM actions (turn head left / turn head right / open mouth) — a printed photo or a still image on a
+//      screen cannot do these
+//   3. the face held still, looking straight, for a few frames → that frame is the profile photo, and the captured
+//      still is itself re-checked (one face, frontal, big enough) before it is accepted.
+// Detection runs fully in the browser (face-api.js Tiny Face Detector + 68-point tiny landmarks, loaded lazily from
+// jsDelivr only when the camera opens — about 1.5 MB once, then cached). Nothing is uploaded until "Submit".
+//
+// This is a deterrent for casual misuse, not proof of identity: a determined person can still bypass any browser
+// code. The server therefore re-checks the uploaded photo too (utils/faceCheck.js) and admins still review it.
 // ═══════════════════════════════════════════════════
-var _selfieStream = null;
+var FACE_API_VERSION = '1.7.12';
+var FACE_API_SRC     = 'https://cdn.jsdelivr.net/npm/@vladmandic/face-api@' + FACE_API_VERSION + '/dist/face-api.js';
+var FACE_API_MODELS  = 'https://cdn.jsdelivr.net/npm/@vladmandic/face-api@' + FACE_API_VERSION + '/model/';
 
+var _selfieStream   = null;   // MediaStream while the camera is open
+var _scan           = null;   // the running scan session (null when the camera is closed)
+var _faceLibPromise = null;   // memoised library+model load (reset on failure so "Start" can retry)
+var _lumaCanvas     = null;   // tiny canvas reused for brightness sampling
+
+var SCAN_CHALLENGE_TEXT = {
+  left:  '\u2190 Turn your head slowly LEFT',
+  right: 'Turn your head slowly RIGHT \u2192',
+  mouth: 'Open your mouth wide'
+};
+
+function selfieIsVerified() { var el = $('selfie-verified'); return !!el && el.value === 'passed'; }
+function setSelfieVerified(on) { var el = $('selfie-verified'); if (el) el.value = on ? 'passed' : ''; }
+function _dist(p, q) { var dx = p.x - q.x, dy = p.y - q.y; return Math.sqrt(dx * dx + dy * dy); }
+
+function selfieHasPhoto() {
+  var vf = $('av-viewfinder-wrap');
+  return !!(vf && !vf.classList.contains('hidden') && (capturedPhotoData || avatarFileRef));
+}
+
+// idle = nothing taken yet · scanning = camera open · captured = verified photo is showing
 function setStep4Mode(mode) {
-  // mode: 'upload' | 'selfie'
-  var btnUpload = $('btn-mode-upload');
-  var btnSelfie = $('btn-mode-selfie');
-  var selfiePanel = $('selfie-panel');
-  var active   = 'flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs font-bold bg-blue-600 text-white shadow shadow-blue-200 transition-all';
-  var inactive = 'flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs font-bold border border-slate-200 dark:border-slate-600 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700 transition-all';
-  if (mode === 'upload') {
-    if (btnUpload)  btnUpload.className  = active;
-    if (btnSelfie)  btnSelfie.className  = inactive;
-    if (selfiePanel) selfiePanel.classList.add('hidden');
-    stopSelfieCamera();
-  } else {
-    if (btnUpload)  btnUpload.className  = inactive;
-    if (btnSelfie)  btnSelfie.className  = active;
-    if (selfiePanel) selfiePanel.classList.remove('hidden');
+  var panel = $('selfie-panel'), ph = $('av-placeholder-wrap'), vf = $('av-viewfinder-wrap');
+  var btn = $('btn-selfie-start'), txt = $('btn-selfie-start-txt'), hint = $('selfie-hint');
+  function show(el, on) { if (el) el.classList.toggle('hidden', !on); }
+  if (mode === 'scanning') {
+    show(panel, true); show(ph, false); show(btn, false); show(hint, false);
+    if (vf) { vf.classList.add('hidden'); vf.classList.remove('flex'); }
+  } else if (mode === 'captured') {
+    show(panel, false); show(ph, false); show(btn, true); show(hint, true);
+    if (txt) txt.textContent = 'Retake Selfie';
+    if (hint) { hint.textContent = '\u2713 Face verified \u2014 drag the box to adjust the crop if needed.'; hint.className = 'text-xs text-green-600 font-semibold mb-2 mt-3 text-center'; }
+  } else {   // idle
+    show(panel, false); show(ph, true); show(btn, true); show(hint, true);
+    if (vf) { vf.classList.add('hidden'); vf.classList.remove('flex'); }
+    if (txt) txt.textContent = 'Start Live Selfie';
+    if (hint) { hint.textContent = 'Live camera only \u00b7 no uploads'; hint.className = 'text-xs text-slate-400 mb-2 mt-3'; }
   }
 }
 
-async function startSelfieCamera() {
+function setScanLoading(on, text) {
+  var box = $('selfie-loading'), t = $('selfie-loading-txt');
+  if (box) box.classList.toggle('hidden', !on);
+  if (t && text) t.textContent = text;
+}
+
+function setScanDots(n) {
+  document.querySelectorAll('#selfie-steps .selfie-dot').forEach(function (d, i) {
+    d.classList.toggle('bg-green-500', i < n);
+    d.classList.toggle('bg-slate-300', i >= n);
+  });
+}
+
+// ── library + model loading (lazy, cached by the browser after the first time) ──
+function loadFaceScanner() {
+  try {
+    if (window.faceapi && faceapi.nets.tinyFaceDetector.isLoaded && faceapi.nets.faceLandmark68TinyNet.isLoaded) return Promise.resolve();
+  } catch (e) { /* fall through to a normal load */ }
+  if (_faceLibPromise) return _faceLibPromise;
+  _faceLibPromise = new Promise(function (resolve, reject) {
+    function loadModels() {
+      faceapi.nets.tinyFaceDetector.loadFromUri(FACE_API_MODELS)
+        .then(function () { return faceapi.nets.faceLandmark68TinyNet.loadFromUri(FACE_API_MODELS); })
+        .then(resolve, reject);
+    }
+    if (window.faceapi) { loadModels(); return; }
+    var sc = document.createElement('script');
+    sc.src = FACE_API_SRC; sc.async = true; sc.crossOrigin = 'anonymous';
+    sc.onload  = function () { if (window.faceapi) loadModels(); else reject(new Error('face scanner library loaded but is unusable')); };
+    sc.onerror = function () { reject(new Error('could not download the face scanner library')); };
+    document.head.appendChild(sc);
+  }).catch(function (e) { _faceLibPromise = null; throw e; });
+  return _faceLibPromise;
+}
+
+// ── open the camera and start scanning ──
+async function doModeSelfie() {
+  if (_scan) return;                                   // already running (double tap)
+  hideStepError(4);
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-    showStepError(4, 'Camera is not supported in this browser. Please upload a photo instead.');
-    setStep4Mode('upload');
+    showStepError(4, 'This browser cannot open the camera. Please use the latest Chrome, Safari or Edge on a phone or laptop that has a camera.');
     return;
   }
+  var session = {
+    cancelled: false, done: false, stage: 'align', challenges: [], idx: 0, good: 0, chHold: 0, chStart: 0,
+    resets: 0, errors: 0, tick: 0, luma: null, lostSince: 0, lastCx: null, flash: '', flashUntil: 0,
+    hadPhoto: selfieHasPhoto(), prevVerified: selfieIsVerified()
+  };
+  _scan = session;
+  setSelfieVerified(false);                            // a retake invalidates the previous pass until the new one succeeds
+  setStep4Mode('scanning');
+  setScanDots(0);
+  setScanLoading(true, 'Opening camera\u2026');
+  var oval = $('selfie-oval'); if (oval) oval.style.borderColor = 'rgba(255,255,255,0.6)';
+  var instr = $('selfie-instruction'); if (instr) instr.classList.add('hidden');
+
   try {
-    _selfieStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false });
+    _selfieStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 960 } }, audio: false });
+    if (session.cancelled) { stopSelfieCamera(); return; }
     var feed = $('selfie-feed');
-    if (feed) feed.srcObject = _selfieStream;
-    var snapBtn = $('selfie-snap-btn');
-    if (snapBtn) snapBtn.disabled = false;
-    console.log('[Selfie] Camera stream started');
-  } catch(err) {
-    var msg = (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError')
-      ? 'Camera permission denied. Allow camera access in browser settings or upload a photo instead.'
-      : 'Camera unavailable on this device. Please upload a photo instead.';
-    showStepError(4, msg);
-    setStep4Mode('upload');
-    console.warn('[Selfie] Camera error:', err.name, err.message);
+    feed.srcObject = _selfieStream;
+    try { await feed.play(); } catch (e) { /* autoplay attribute covers this */ }
+    setScanLoading(true, 'Loading face scanner\u2026 (first time only)');
+    await loadFaceScanner();
+    if (session.cancelled) return;
+  } catch (err) {
+    if (session.cancelled) return;
+    scanFailed(err);
+    return;
   }
+  setScanLoading(false);
+  console.log('[Selfie] camera + scanner ready');
+  startScanLoop(session);
+}
+
+function cancelSelfie() {
+  var s = _scan;
+  stopSelfieCamera();                                  // also cancels the session
+  hideStepError(4);
+  if (s && s.hadPhoto) { setSelfieVerified(s.prevVerified); setStep4Mode('captured'); var vf = $('av-viewfinder-wrap'); if (vf) { vf.classList.remove('hidden'); vf.classList.add('flex'); } }
+  else setStep4Mode('idle');
+}
+
+function scanFailed(err) {
+  var s = _scan;
+  console.warn('[Selfie] scanner stopped:', err && (err.name || ''), err && err.message);
+  stopSelfieCamera();
+  var name = (err && err.name) || '', msg;
+  if (name === 'NotAllowedError' || name === 'PermissionDeniedError')
+    msg = 'Camera permission was denied. Allow camera access for this site in your browser settings, then tap Start Live Selfie again.';
+  else if (name === 'NotFoundError' || name === 'DevicesNotFoundError' || name === 'OverconstrainedError')
+    msg = 'No camera was found on this device. A live selfie is required, so please use a phone or laptop with a camera.';
+  else if (name === 'NotReadableError' || name === 'TrackStartError')
+    msg = 'The camera is being used by another app. Close it and tap Start Live Selfie again.';
+  else if (err && err.message === 'SCAN_GAVE_UP')
+    msg = 'We could not complete the face scan. Move to a well-lit place, remove sunglasses/mask, hold the phone at eye level and try again \u2014 or tap \u201cNeed help?\u201d to contact support.';
+  else
+    msg = 'The face scanner could not start (' + String((err && err.message) || 'unknown error').slice(0, 80) + '). Check your internet connection and tap Start Live Selfie to try again.';
+  if (s && s.hadPhoto) { setSelfieVerified(s.prevVerified); setStep4Mode('captured'); var vf = $('av-viewfinder-wrap'); if (vf) { vf.classList.remove('hidden'); vf.classList.add('flex'); } }
+  else setStep4Mode('idle');
+  showStepError(4, msg);
 }
 
 function stopSelfieCamera() {
+  if (_scan) { _scan.cancelled = true; _scan = null; }
   if (_selfieStream) {
-    _selfieStream.getTracks().forEach(function(t){ t.stop(); });
+    _selfieStream.getTracks().forEach(function (t) { t.stop(); });
     _selfieStream = null;
     console.log('[Selfie] Camera stream stopped');
   }
@@ -3072,71 +3209,217 @@ function stopSelfieCamera() {
   if (feed) feed.srcObject = null;
 }
 
-function captureSelfie() {
-  var video  = $('selfie-feed');
+// Throw away a rejected / unusable selfie so the applicant has to take a new one.
+function clearSelfiePhoto() {
+  capturedPhotoData = null; avatarFileRef = null;
+  window._selfieReport = null;
+  setSelfieVerified(false);
+  var cd = $('av-cropped-data'); if (cd) cd.value = '';
+  setStep4Mode('idle');
+}
+
+// Send the applicant back to Step 4 (used when Step 5 is reached/submitted without a verified selfie).
+function backToSelfieStep(message) {
+  var from = $('step-' + currentStep); if (from) from.classList.add('hidden');
+  currentStep = 4;
+  $('step-4').classList.remove('hidden');
+  updateProgress(4);
+  var sc = document.querySelector('.overflow-y-auto'); if (sc) sc.scrollTop = 0;
+  RegResilience.onStepChange(4);
+  if (message) showStepError(4, message);
+}
+
+// ── geometry helpers ──
+// The <video> uses object-fit:cover, so only part of the camera frame is visible. All "is the face in the oval /
+// big enough" checks, and the captured photo, use that visible part so what the applicant sees is what is judged.
+function selfieVisibleRect(video) {
+  var vw = video.videoWidth, vh = video.videoHeight;
+  var cw = video.clientWidth || vw, ch = video.clientHeight || vh;
+  var scale = Math.max(cw / vw, ch / vh);
+  var w = cw / scale, h = ch / scale;
+  return { x: (vw - w) / 2, y: (vh - h) / 2, w: w, h: h };
+}
+
+function frameBrightness(video, vis) {
+  if (!_lumaCanvas) _lumaCanvas = document.createElement('canvas');
+  _lumaCanvas.width = 32; _lumaCanvas.height = 24;
+  var ctx = _lumaCanvas.getContext('2d', { willReadFrequently: true });
+  ctx.drawImage(video, vis.x, vis.y, vis.w, vis.h, 0, 0, 32, 24);
+  var d = ctx.getImageData(0, 0, 32, 24).data, sum = 0;
+  for (var i = 0; i < d.length; i += 4) sum += 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+  return sum / (d.length / 4);
+}
+
+// Turns raw detections into { state: none|multi|adjust|ok, msg, yaw, mar, score, box, vis }.
+//   yaw ≈ 0.5 facing the camera; > 0.66 head turned to the viewer's LEFT; < 0.34 turned RIGHT
+//   mar = mouth-open ratio (≈ 0 closed, ≥ 0.35 clearly open)
+function analyseFace(video, res) {
+  if (!res || !res.length) return { state: 'none', msg: 'No face found \u2014 look at the camera' };
+  if (res.length > 1)      return { state: 'multi', msg: 'Only one person in the frame, please' };
+  var r = res[0], box = r.detection.box, vis = selfieVisibleRect(video), p = r.landmarks.positions;
+  var out = {
+    state: 'adjust', box: box, vis: vis, score: r.detection.score,
+    yaw: (p[30].x - p[0].x) / ((p[16].x - p[0].x) || 1),
+    mar: _dist(p[62], p[66]) / (_dist(p[60], p[64]) || 1)
+  };
+  var hRatio = box.height / vis.h;
+  var cx = (box.x + box.width / 2 - vis.x) / vis.w, cy = (box.y + box.height / 2 - vis.y) / vis.h;
+  if (out.score < 0.6)                                            { out.msg = 'Hold still \u2014 we can\u2019t see your face clearly'; return out; }
+  if (hRatio < 0.30)                                              { out.msg = 'Move a little closer'; return out; }
+  if (hRatio > 0.72)                                              { out.msg = 'Move back a little'; return out; }
+  if (Math.abs(cx - 0.5) > 0.16 || Math.abs(cy - 0.5) > 0.18)     { out.msg = 'Center your face in the oval'; return out; }
+  out.state = 'ok'; out.msg = 'Face detected';
+  return out;
+}
+
+function newScanChallenges(s) {
+  // After two failed rounds fall back to the two head turns only — they are the most reliable to detect.
+  var pool = s.resets >= 2 ? ['left', 'right'] : ['left', 'right', 'mouth'];
+  for (var i = pool.length - 1; i > 0; i--) { var j = Math.floor(Math.random() * (i + 1)); var t = pool[i]; pool[i] = pool[j]; pool[j] = t; }
+  s.challenges = pool.slice(0, 2);
+}
+
+function resetScan(s, msg) {
+  s.resets++;
+  console.log('[Selfie] scan restarted (' + s.resets + '): ' + msg);
+  if (s.resets >= 5) { scanFailed(new Error('SCAN_GAVE_UP')); return; }
+  s.stage = 'align'; s.good = 0; s.idx = 0; s.chHold = 0; s.lostSince = 0; s.lastCx = null;
+  newScanChallenges(s);
+  setScanDots(0);
+  s.flash = msg; s.flashUntil = Date.now() + 2500;
+}
+
+function paintScan(s, a, state, instruction) {
+  var oval = $('selfie-oval'), st = $('selfie-status'), ins = $('selfie-instruction');
+  var st2 = state || a.state;
+  if (oval) oval.style.borderColor = st2 === 'ok' ? '#22c55e' : st2 === 'adjust' ? '#f59e0b' : st2 === 'multi' ? '#ef4444' : 'rgba(255,255,255,0.6)';
+  var statusText;
+  if (Date.now() < s.flashUntil) statusText = s.flash;
+  else if (s.stage === 'challenge' && a.state !== 'none' && a.state !== 'multi') statusText = 'Action ' + (s.idx + 1) + ' of ' + s.challenges.length;
+  else if (s.stage === 'final' && a.state === 'ok') statusText = 'Almost done';
+  else statusText = a.msg || '';
+  if (st && st.textContent !== statusText) st.textContent = statusText;
+  var insText = instruction || (s.stage === 'align' && a.state !== 'none' && a.state !== 'multi' ? 'Look straight at the camera' : '');
+  if (ins) { ins.textContent = insText; ins.classList.toggle('hidden', !insText); }
+}
+
+function startScanLoop(session) {
+  var video = $('selfie-feed');
+  var opts  = new faceapi.TinyFaceDetectorOptions({ inputSize: 224, scoreThreshold: 0.5 });
+  newScanChallenges(session);
+  (async function tick() {
+    if (session.cancelled || _scan !== session) return;
+    var t0 = Date.now();
+    try {
+      var track = _selfieStream && _selfieStream.getVideoTracks()[0];
+      if (!track || track.readyState === 'ended') { scanFailed(new Error('the camera stopped')); return; }
+      if (video.readyState >= 2 && video.videoWidth) {
+        var res = await faceapi.detectAllFaces(video, opts).withFaceLandmarks(true);
+        if (session.cancelled || _scan !== session) return;
+        await handleScanFrame(session, video, res, opts);
+        if (session.cancelled || session.done || _scan !== session) return;
+      }
+    } catch (e) {
+      session.errors++;
+      console.warn('[Selfie] frame error:', e.message);
+      if (session.errors >= 8) { scanFailed(new Error('the scanner crashed: ' + e.message)); return; }
+    }
+    setTimeout(tick, Math.max(30, 140 - (Date.now() - t0)));   // ~7 fps max; slower phones just run slower
+  })();
+}
+
+async function handleScanFrame(s, video, res, opts) {
+  var now = Date.now(), a = analyseFace(video, res);
+
+  if (a.state === 'ok') {                               // lighting only matters once the face is otherwise well placed
+    if ((s.tick++ % 4) === 0) s.luma = frameBrightness(video, a.vis);
+    if (s.luma !== null && s.luma < 50)       { a.state = 'adjust'; a.msg = 'Too dark \u2014 turn toward a light'; }
+    else if (s.luma !== null && s.luma > 230) { a.state = 'adjust'; a.msg = 'Too bright \u2014 reduce the glare'; }
+  }
+
+  if (a.state === 'none' || a.state === 'multi') {
+    s.good = 0; s.chHold = 0;
+    if (!s.lostSince) s.lostSince = now;
+    if (s.stage !== 'align' && now - s.lostSince > 3000) { resetScan(s, 'Face lost \u2014 let\u2019s start again'); if (s.cancelled) return; }
+    paintScan(s, a);
+    return;
+  }
+  s.lostSince = 0;
+
+  var frontal = a.state === 'ok' && a.yaw >= 0.40 && a.yaw <= 0.60 && a.mar < 0.30;
+
+  if (s.stage === 'align') {
+    s.good = frontal ? s.good + 1 : 0;
+    paintScan(s, a, frontal ? 'ok' : 'adjust');
+    if (s.good >= 3) { s.stage = 'challenge'; s.idx = 0; s.good = 0; s.chHold = 0; s.chStart = now; setScanDots(1); }
+    return;
+  }
+
+  if (s.stage === 'challenge') {
+    var ch  = s.challenges[s.idx];
+    var met = a.score >= 0.5 && ((ch === 'left' && a.yaw >= 0.66) || (ch === 'right' && a.yaw <= 0.34) || (ch === 'mouth' && a.mar >= 0.35));
+    s.chHold = met ? s.chHold + 1 : 0;
+    paintScan(s, a, met ? 'ok' : 'adjust', SCAN_CHALLENGE_TEXT[ch]);
+    if (s.chHold >= 2) {
+      s.idx++; s.chHold = 0; s.chStart = now; setScanDots(1 + s.idx);
+      if (s.idx >= s.challenges.length) { s.stage = 'final'; s.good = 0; s.lastCx = null; }
+    } else if (now - s.chStart > 15000) {
+      resetScan(s, 'That took too long \u2014 let\u2019s try again');
+    }
+    return;
+  }
+
+  // final: look straight and hold still, then capture
+  var steady = frontal;
+  var cx = a.box.x + a.box.width / 2;
+  if (steady && s.lastCx !== null && Math.abs(cx - s.lastCx) > a.vis.w * 0.04) steady = false;
+  s.lastCx = cx;
+  s.good = steady ? s.good + 1 : 0;
+  paintScan(s, a, steady ? 'ok' : 'adjust', 'Look straight \u2014 hold still\u2026');
+  if (s.good >= 4) await finishSelfieScan(s, video, opts);
+}
+
+// Grab the verified frame, re-check the still itself, then hand it to the crop viewfinder.
+async function finishSelfieScan(s, video, opts) {
   var canvas = $('selfie-canvas');
-  if (!video || !canvas) { console.error('[Selfie] Missing feed or canvas'); return; }
-  if (!video.videoWidth)  { showStepError(4, 'Camera is not ready yet. Please wait a moment.'); return; }
+  var vis = selfieVisibleRect(video);
+  var k = Math.min(1, 1280 / Math.max(vis.w, vis.h));    // keep phone photos small
+  canvas.width = Math.round(vis.w * k); canvas.height = Math.round(vis.h * k);
+  canvas.getContext('2d').drawImage(video, vis.x, vis.y, vis.w, vis.h, 0, 0, canvas.width, canvas.height);
 
-  canvas.width  = video.videoWidth;
-  canvas.height = video.videoHeight;
-  canvas.getContext('2d').drawImage(video, 0, 0);
-  var dataUrl = canvas.toDataURL('image/jpeg', 0.92);
+  var check = await faceapi.detectAllFaces(canvas, opts).withFaceLandmarks(true);
+  var ok = false, yaw = null;
+  if (check.length === 1) {
+    var d = check[0], p = d.landmarks.positions;
+    yaw = (p[30].x - p[0].x) / ((p[16].x - p[0].x) || 1);
+    var h = d.detection.box.height / canvas.height;
+    ok = d.detection.score >= 0.6 && h >= 0.26 && h <= 0.8 && yaw >= 0.36 && yaw <= 0.64;
+  }
+  if (!ok) { resetScan(s, 'That shot didn\u2019t pass \u2014 let\u2019s try again'); return; }
+  if (s.cancelled) return;
 
+  var dataUrl = canvas.toDataURL('image/jpeg', 0.9);
   capturedPhotoData = dataUrl;
   avatarFileRef = null;
 
-  // Show selfie preview
-  var selfiePreview = $('selfie-preview');
-  var selfiePreviewImg = $('selfie-preview-img');
-  if (selfiePreview && selfiePreviewImg) {
-    selfiePreviewImg.src = dataUrl;
-    selfiePreview.classList.remove('hidden');
-  }
-
-  // Feed it into the crop viewfinder system
-  var fakeEvent = { target: { files: [] } };
-  var bytes = Math.round((dataUrl.length * 3) / 4);
   var fakeFile = null;
   try {
-    var parts   = dataUrl.split(',');
-    var mime    = (parts[0].match(/:(.*?);/) || [])[1] || 'image/jpeg';
-    var bStr    = atob(parts[1]);
-    var ab      = new Uint8Array(bStr.length);
+    var parts = dataUrl.split(','), mime = (parts[0].match(/:(.*?);/) || [])[1] || 'image/jpeg';
+    var bStr = atob(parts[1]), ab = new Uint8Array(bStr.length);
     for (var i = 0; i < bStr.length; i++) ab[i] = bStr.charCodeAt(i);
     fakeFile = new File([new Blob([ab], { type: mime })], 'selfie.jpg', { type: mime });
-  } catch(e) { /* old browser fallback — no File object, use raw dataUrl */ }
+  } catch (e) { /* old browser — the raw data URL is used instead */ }
 
-  // Initialize viewfinder with the selfie
-  var img = new Image();
-  img.onload = function() {
-    var avFile = $('av-file');
-    if (avFile) {
-      try { var dt = new DataTransfer(); if(fakeFile){ dt.items.add(fakeFile); avFile.files = dt.files; } } catch(e) {}
-    }
-    previewAvatarViewfinder({ target: { result: dataUrl, files: fakeFile ? [fakeFile] : [] } }, true);
-  };
-  img.src = dataUrl;
-
+  window._selfieReport = { status: 'passed', method: 'face-api@' + FACE_API_VERSION, challenges: s.challenges.slice(), resets: s.resets, yaw: yaw === null ? null : Math.round(yaw * 100) / 100, ts: Date.now() };
+  setSelfieVerified(true);
+  setScanDots(4);
+  s.done = true;
   stopSelfieCamera();
-  setStep4Mode('upload'); // switch to upload mode to show the viewfinder
-
-  var bytes2 = Math.round((dataUrl.length * 3) / 4);
-  console.log('[Selfie] Captured — ' + formatBytes(bytes2));
+  setStep4Mode('captured');
+  previewAvatarViewfinder({ target: { result: dataUrl, files: fakeFile ? [fakeFile] : [] } }, true);
   hideStepError(4);
-  showToast('Selfie captured! Adjust the crop frame if needed.', 'success');
-}
-
-function doModeUpload() {
-  stopSelfieCamera();
-  setStep4Mode('upload');
-  var inp = $('av-file');
-  if (inp) inp.click();
-}
-
-function doModeSelfie() {
-  setStep4Mode('selfie');
-  startSelfieCamera();
+  console.log('[Selfie] verified + captured (' + formatBytes(Math.round(dataUrl.length * 3 / 4)) + ', challenges: ' + s.challenges.join('+') + ', restarts: ' + s.resets + ')');
+  showToast('Face verified! Adjust the crop frame if needed.', 'success');
 }
 
 document.addEventListener('DOMContentLoaded', async function(){

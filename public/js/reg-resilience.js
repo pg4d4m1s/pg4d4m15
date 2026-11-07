@@ -43,11 +43,12 @@
   var IMG = { EDGE_DOC: 1600, EDGE_AVATAR: 1280, QUALITY: 0.82, SKIP_BELOW: 200 * 1024 };
 
   var DOC_LABELS = {
-    'school-id': 'School ID', 'residency': 'Certificate of Residency',
-    'low-income': 'Certificate of Low Income', 'enrollment': 'Certificate of Enrollment',
-    'avatar': 'profile photo',
+    'school-id': 'School ID or Government ID', 'residency': 'Certificate of Residency',
+    'low-income': 'Certificate of Low Income', 'enrollment': 'Certificate of Registration/Enrollment',
+    'grades': 'Report Card / Certificate of Grades',
+    'avatar': 'live selfie',
   };
-  var DOC_KEYS = ['school-id', 'residency', 'low-income', 'enrollment'];
+  var DOC_KEYS = ['school-id', 'residency', 'low-income', 'enrollment', 'grades'];
 
   var state = {
     uploading: false, backgrounded: false, restoring: false, submitted: false,
@@ -346,6 +347,8 @@
       return { message: withRef(d.error, d), hint: 'Reload this page and verify your email again — your answers will be restored automatically.', code: code };
     if (code === 'VALIDATION')
       return { message: withRef(d.error, d), hint: 'We took you back to fix it.', code: code, field: d.field, goStep: 3 };
+    if (/^SELFIE_/.test(code || ''))   // server-side face check rejected / missed the live selfie → back to Step 4
+      return { message: withRef(d.error, d), hint: 'Please retake your live selfie.', code: code, field: d.field, goStep: 4 };
     if (code === 'FILE_TOO_LARGE' || code === 'BAD_FILE_TYPE' || code === 'IMAGE_UNREADABLE')
       return { message: withRef(d.error, d), hint: 'Remove that file and choose another.', code: code, field: d.field };
     if (code === 'STORAGE_FAILED' || code === 'SERVER_ERROR' || code === 'UPLOAD_INCOMPLETE')
@@ -500,6 +503,7 @@
     // so the two optional Step 5 inputs are saved explicitly. Restore is generic by element id.
     var roomPref = $('reg-room-pref');       if (roomPref && roomPref.value) fields['reg-room-pref'] = roomPref.value;
     var roomNote = $('reg-roommate-note');   if (roomNote && roomNote.value) fields['reg-roommate-note'] = roomNote.value;
+    var idTypeSel = $('reg-id-type');        if (idTypeSel && idTypeSel.value) fields['reg-id-type'] = idTypeSel.value;   // which ID the applicant is uploading
     return { v: 1, email: verifiedEmail(), step: curStep(), fields: fields, addr: addr };
   }
 
@@ -561,8 +565,12 @@
 
   async function restoreAvatar(f) {
     var rec = await FileStore.get('avatar'); if (!rec || !rec.blob) return false;
+    // Gallery uploads no longer exist. A saved photo is only trusted if the draft says it passed the live face scan
+    // (the hidden #selfie-verified flag is restored with the other fields before this runs). Older drafts → retake.
+    if (!call('selfieIsVerified')) { call('clearSelfiePhoto'); return false; }
     var file = new File([rec.blob], rec.name || 'avatar.jpg', { type: rec.type || 'image/jpeg' });
     call('previewAvatarViewfinder', { target: { files: [file] } });
+    call('setStep4Mode', 'captured');
     var ok = await waitFor(function () { var fr = $('av-vf-frame'); return typeof _vfNatImg !== 'undefined' && _vfNatImg && fr && !fr.classList.contains('hidden'); }, 6000);
     if (!ok) return true;   // file is restored even if the crop box could not be re-applied
     try {
