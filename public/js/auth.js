@@ -664,7 +664,8 @@ async function validateStep(step) {
       if (fPhone[0] !== '9') { showStepError(3, "Father's contact number must start with 9."); $('father-phone')?.focus(); return false; }
       if (!fEmployer) { showStepError(3, "Father's employer / company is required."); $('father-employer')?.focus(); return false; }
       // Address required unless "Same as Permanent" is checked (which populates the hidden field)
-      if (!fAddr) { showStepError(3, "Father's address is required. Select from the dropdowns or check \"Same as Permanent\"."); $('father-region')?.focus(); return false; }
+      var fatherErr = familyAddrError('father', "Father");
+      if (fatherErr) { showStepError(3, fatherErr.msg); $(fatherErr.focusId)?.focus(); return false; }
     }
 
     var mDeceased = !!($('mother-deceased') && $('mother-deceased').checked);
@@ -680,7 +681,8 @@ async function validateStep(step) {
       if (!mPhone || mPhone.length < 10) { showStepError(3, "Mother's contact number must be 10 digits."); $('mother-phone')?.focus(); return false; }
       if (mPhone[0] !== '9') { showStepError(3, "Mother's contact number must start with 9."); $('mother-phone')?.focus(); return false; }
       if (!mEmployer) { showStepError(3, "Mother's employer / company is required."); $('mother-employer')?.focus(); return false; }
-      if (!mAddr) { showStepError(3, "Mother's address is required. Select from the dropdowns or check \"Same as Permanent\"."); $('mother-region')?.focus(); return false; }
+      var motherErr = familyAddrError('mother', "Mother");
+      if (motherErr) { showStepError(3, motherErr.msg); $(motherErr.focusId)?.focus(); return false; }
     }
 
     // ── Guardian Information (required only when BOTH parents are deceased) ──
@@ -695,7 +697,8 @@ async function validateStep(step) {
       if (!gRel)   { showStepError(3, "Guardian's relationship to the resident is required."); $('guardian-relationship')?.focus(); return false; }
       if (!gPhone || gPhone.length < 10) { showStepError(3, "Guardian's contact number must be 10 digits."); $('guardian-phone')?.focus(); return false; }
       if (gPhone[0] !== '9') { showStepError(3, "Guardian's contact number must start with 9."); $('guardian-phone')?.focus(); return false; }
-      if (!gAddr)  { showStepError(3, "Guardian's address is required. Select from the dropdowns or check \"Same as Permanent\"."); $('guardian-region')?.focus(); return false; }
+      var guardianErr = familyAddrError('guardian', "Guardian");
+      if (guardianErr) { showStepError(3, guardianErr.msg); $(guardianErr.focusId)?.focus(); return false; }
     }
 
     hideStepError(3);
@@ -1195,8 +1198,9 @@ var PSGC_BASE = 'https://psgc.gitlab.io/api/';
 var PSGC_LS = 'damis_psgc_v1:';
 
 // Purok / Sitio / Street — free-text line shown under the Barangay dropdown of every address block.
-// Set PUROK_REQUIRED = true to force applicants to fill it in for their Permanent and Present address.
-var PUROK_REQUIRED = false;
+// Required (red *) for the Permanent and Present address and for every parent/guardian address that is
+// not a "Same as Permanent" copy. Set to false to make it optional again (also remove the * in index.html).
+var PUROK_REQUIRED = true;
 var ADDR_PUROK_MAX = 60;
 
 // Address lookup order (see psgc-data.js):
@@ -1390,6 +1394,41 @@ function toggleSameAsPresent() {
   }
 }
 
+// ── Default address: Region III (Central Luzon) → Aurora ─────────────────────
+// Nearly all applicants live in Aurora, so every address block starts there (faster application).
+// City/Municipality and Barangay are still chosen by the applicant, and Region/Province can be changed freely.
+function addrSelectByCode(sel, code9) {
+  if (!sel || typeof psgcNorm9 !== 'function') return false;
+  for (var i = 0; i < sel.options.length; i++) {
+    if (psgcNorm9(sel.options[i].value) === code9) { sel.selectedIndex = i; return true; }
+  }
+  return false;
+}
+async function applyDefaultAddress(prefix) {
+  if (typeof PSGC_REGION_III === 'undefined' || typeof PSGC_AURORA === 'undefined') return;
+  var r = $(prefix + '-region');
+  if (!r || r.value) return;                       // never override something already chosen
+  if (!addrSelectByCode(r, PSGC_REGION_III)) return;
+  await loadAddrCascade(prefix, 'province');
+  if (!addrSelectByCode($(prefix + '-province'), PSGC_AURORA)) return;
+  await loadAddrCascade(prefix, 'city');
+}
+
+// Parent / guardian address check. The hidden address string is never empty once the defaults are applied,
+// so check the dropdowns + purok directly. Skipped when "Same as Permanent" is ticked (copy of an address
+// that was already validated). Returns null when fine, else { msg, focusId }.
+function familyAddrError(prefix, who) {
+  var same = $(prefix + '-same-as-perm');
+  if (same && same.checked) return null;
+  var checks = [['region', 'region'], ['province', 'province'], ['city', 'city / municipality'], ['brgy', 'barangay']];
+  for (var i = 0; i < checks.length; i++) {
+    var el = $(prefix + '-' + checks[i][0]);
+    if (!el || !el.value) return { msg: who + "'s address: please select the " + checks[i][1] + ' (or check "Same as Permanent").', focusId: prefix + '-' + checks[i][0] };
+  }
+  if (PUROK_REQUIRED && !addrCleanPurok(($(prefix + '-purok') || {}).value)) return { msg: who + "'s address: Purok / Sitio / Street is required.", focusId: prefix + '-purok' };
+  return null;
+}
+
 // Initialize address dropdowns on page load
 async function initAddrDropdowns() {
   var prefixes = ['pres', 'perm', 'father', 'mother', 'guardian'];
@@ -1415,6 +1454,8 @@ async function initAddrDropdowns() {
       var o = document.createElement('option'); o.value = item.code; o.textContent = item.name; el.appendChild(o);
     });
   });
+  // Default every block to Region III → Aurora (instant: the data is bundled in psgc-data.js)
+  await Promise.all(prefixes.map(function(prefix) { return applyDefaultAddress(prefix); }));
 }
 
 // ═══════════════════════════════════════════════════
@@ -2706,127 +2747,9 @@ document.addEventListener('keydown', function(e){
 // (showSupportInfo() is still available globally). FAQ + contacts: utils/supportKnowledge.js.
 
 // ═══════════════════════════════════════════════════
-// ASCOT COURSE CATALOG — Year-Level Cascade
-// ─────────────────────────────────────────────────
-// Each entry describes ONE enrollable program track.
-//
-// Fields:
-//   value      — unique submission code (sent to the backend)
-//   family     — groups programs sharing the same base title (for dedup in dropdown)
-//   familyLabel— label shown in the course <select> (shared by all siblings)
-//   type       — 'bachelor' | 'diploma' | 'associate' | 'certificate' | 'postgrad'
-//   school     — <optgroup> label
-//   minYear    — first year a student can be in this program (always 1)
-//   maxYear    — last year a student can be in this program (program duration)
-//   major      — optional: the Major / Specialization label for this track
-//
-// Year-level filtering rules
-// ─────────────────────────
-//   General  : show courses where  minYear ≤ selectedYear ≤ maxYear
-//   1st-year : per school, if ANY non-degree programs (diploma/associate/certificate)
-//              exist in that school → suppress ALL bachelor/postgrad entries for
-//              that school (non-degree programs are the entry-level track).
-//              Schools with ONLY bachelor programs show their bachelor entries normally.
-//
-// Deduplication
-// ─────────────
-//   The dropdown shows ONE option per `family`.
-//   If members of a family have `major` fields, the Specialization dropdown appears
-//   after the user picks that family.
+// ASCOT COURSE CATALOG — now lives in js/course-catalog.js (loaded before this file).
+// ASCOT_COURSES, ascotByValue() and ascotFamily() are globals defined there.
 // ═══════════════════════════════════════════════════
-var ASCOT_COURSES = [
-
-  // ── School of Forestry and Environmental Sciences ──────────────────────────
-  // Non-degree (2 yr) → shown for yr 1-2; bachelor (4 yr) → shown for yr 1-4
-  // 1st-year rule: DFT exists → suppress BSF/BSES for yr 1
-  { value: 'BSF',  family: 'BSF',  familyLabel: 'Bachelor of Science in Forestry (BSF)',               type: 'bachelor', minYear: 1, maxYear: 4, school: 'School of Forestry and Environmental Sciences' },
-  { value: 'BSES', family: 'BSES', familyLabel: 'Bachelor of Science in Environmental Science (BSES)', type: 'bachelor', minYear: 1, maxYear: 4, school: 'School of Forestry and Environmental Sciences' },
-  { value: 'DFT',  family: 'DFT',  familyLabel: 'Diploma in Forest Technology (2 Years)',              type: 'diploma',  minYear: 1, maxYear: 2, school: 'School of Forestry and Environmental Sciences' },
-
-  // ── School of Education ─────────────────────────────────────────────────────
-  // No non-degree programs → bachelor's shown for all year levels (including 1st)
-  { value: 'BEEd',      family: 'BEEd', familyLabel: 'Bachelor of Elementary Education (BEEd)',               type: 'bachelor', minYear: 1, maxYear: 4, school: 'School of Education' },
-  { value: 'BPEd',      family: 'BPEd', familyLabel: 'Bachelor of Physical Education (BPEd)',                 type: 'bachelor', minYear: 1, maxYear: 4, school: 'School of Education' },
-  // BSEd family — 5 majors share one dropdown entry
-  { value: 'BSEd-EN',   family: 'BSEd', familyLabel: 'Bachelor of Secondary Education (BSEd)',                type: 'bachelor', minYear: 1, maxYear: 4, school: 'School of Education', major: 'Major in English' },
-  { value: 'BSEd-FIL',  family: 'BSEd', familyLabel: 'Bachelor of Secondary Education (BSEd)',                type: 'bachelor', minYear: 1, maxYear: 4, school: 'School of Education', major: 'Major in Filipino' },
-  { value: 'BSEd-MATH', family: 'BSEd', familyLabel: 'Bachelor of Secondary Education (BSEd)',                type: 'bachelor', minYear: 1, maxYear: 4, school: 'School of Education', major: 'Major in Mathematics' },
-  { value: 'BSEd-SCI',  family: 'BSEd', familyLabel: 'Bachelor of Secondary Education (BSEd)',                type: 'bachelor', minYear: 1, maxYear: 4, school: 'School of Education', major: 'Major in Science' },
-  { value: 'BSEd-SS',   family: 'BSEd', familyLabel: 'Bachelor of Secondary Education (BSEd)',                type: 'bachelor', minYear: 1, maxYear: 4, school: 'School of Education', major: 'Major in Social Studies' },
-  // BTLE family — 2 majors
-  { value: 'BTLE-HE',  family: 'BTLE', familyLabel: 'Bachelor of Technology and Livelihood Education (BTLE)', type: 'bachelor', minYear: 1, maxYear: 4, school: 'School of Education', major: 'Major in Home Economics' },
-  { value: 'BTLE-ICT', family: 'BTLE', familyLabel: 'Bachelor of Technology and Livelihood Education (BTLE)', type: 'bachelor', minYear: 1, maxYear: 4, school: 'School of Education', major: 'Major in Information and Communication Technology' },
-
-  // ── School of Agricultural Sciences ─────────────────────────────────────────
-  // 1st-year rule: CAS (associate 2yr) exists → suppress BSA bachelor for yr 1
-  { value: 'BSA-AS', family: 'BSA', familyLabel: 'Bachelor of Science in Agriculture (BSA)',                  type: 'bachelor', minYear: 1, maxYear: 4, school: 'School of Agricultural Sciences', major: 'Major in Animal Science' },
-  { value: 'BSA-CS', family: 'BSA', familyLabel: 'Bachelor of Science in Agriculture (BSA)',                  type: 'bachelor', minYear: 1, maxYear: 4, school: 'School of Agricultural Sciences', major: 'Major in Crop Science (Agronomy/Horticulture)' },
-  { value: 'CAS',    family: 'CAS', familyLabel: 'Certificate in Agricultural Science (2 Years)',             type: 'associate',minYear: 1, maxYear: 2, school: 'School of Agricultural Sciences' },
-
-  // ── School of Arts and Sciences ──────────────────────────────────────────────
-  // No non-degree programs → bachelor shown for all year levels
-  { value: 'ABPolSci', family: 'ABPolSci', familyLabel: 'Bachelor of Arts in Political Science',              type: 'bachelor', minYear: 1, maxYear: 4, school: 'School of Arts and Sciences' },
-
-  // ── School of Engineering ─────────────────────────────────────────────────────
-  // No non-degree programs → bachelor shown for all year levels (5-year programs)
-  { value: 'BSCE', family: 'BSCE', familyLabel: 'Bachelor of Science in Civil Engineering (BSCE)',            type: 'bachelor', minYear: 1, maxYear: 5, school: 'School of Engineering' },
-  { value: 'BSEE', family: 'BSEE', familyLabel: 'Bachelor of Science in Electrical Engineering (BSEE)',      type: 'bachelor', minYear: 1, maxYear: 5, school: 'School of Engineering' },
-  { value: 'BSME', family: 'BSME', familyLabel: 'Bachelor of Science in Mechanical Engineering (BSME)',      type: 'bachelor', minYear: 1, maxYear: 5, school: 'School of Engineering' },
-
-  // ── School of Fisheries and Ocean Sciences ────────────────────────────────────
-  // No non-degree programs → bachelor shown for all year levels
-  { value: 'BSFish', family: 'BSFish', familyLabel: 'Bachelor of Science in Fisheries',                      type: 'bachelor', minYear: 1, maxYear: 4, school: 'School of Fisheries and Ocean Sciences' },
-
-  // ── School of Industrial Technology ──────────────────────────────────────────
-  // 1st-year rule: certificates/associates/diplomas exist → suppress BIT bachelor for yr 1
-  // BIT family — 4 majors share one dropdown entry
-  { value: 'BIT-AET', family: 'BIT', familyLabel: 'Bachelor in Industrial Technology (BIT)',                  type: 'bachelor', minYear: 1, maxYear: 4, school: 'School of Industrial Technology', major: 'Major in Automotive Engineering Technology' },
-  { value: 'BIT-CET', family: 'BIT', familyLabel: 'Bachelor in Industrial Technology (BIT)',                  type: 'bachelor', minYear: 1, maxYear: 4, school: 'School of Industrial Technology', major: 'Major in Civil Engineering Technology' },
-  { value: 'BIT-EET', family: 'BIT', familyLabel: 'Bachelor in Industrial Technology (BIT)',                  type: 'bachelor', minYear: 1, maxYear: 4, school: 'School of Industrial Technology', major: 'Major in Electrical Engineering Technology' },
-  { value: 'BIT-FT',  family: 'BIT', familyLabel: 'Bachelor in Industrial Technology (BIT)',                  type: 'bachelor', minYear: 1, maxYear: 4, school: 'School of Industrial Technology', major: 'Major in Food Technology' },
-  // 3-year diploma programs
-  { value: 'DipAET', family: 'DipAET', familyLabel: 'Diploma in Automotive Engineering Technician (3 years)', type: 'diploma',     minYear: 1, maxYear: 3, school: 'School of Industrial Technology' },
-  { value: 'DipCET', family: 'DipCET', familyLabel: 'Diploma in Civil Engineering Technician (3 years)',      type: 'diploma',     minYear: 1, maxYear: 3, school: 'School of Industrial Technology' },
-  { value: 'DipEET', family: 'DipEET', familyLabel: 'Diploma in Electrical Engineering Technician (3 years)', type: 'diploma',     minYear: 1, maxYear: 3, school: 'School of Industrial Technology' },
-  { value: 'DipFT',  family: 'DipFT',  familyLabel: 'Diploma in Food Technology (3 years)',                   type: 'diploma',     minYear: 1, maxYear: 3, school: 'School of Industrial Technology' },
-  // 2-year associate programs
-  { value: 'AssocAET', family: 'AssocAET', familyLabel: 'Associate in Automotive Engineering Technician (2 years)', type: 'associate', minYear: 1, maxYear: 2, school: 'School of Industrial Technology' },
-  { value: 'AssocCET', family: 'AssocCET', familyLabel: 'Associate in Civil Engineering Technician (2 years)',       type: 'associate', minYear: 1, maxYear: 2, school: 'School of Industrial Technology' },
-  { value: 'AssocEET', family: 'AssocEET', familyLabel: 'Associate in Electrical Engineering Technician (2 years)',  type: 'associate', minYear: 1, maxYear: 2, school: 'School of Industrial Technology' },
-  { value: 'AssocFT',  family: 'AssocFT',  familyLabel: 'Associate in Food Technology (2 years)',                    type: 'associate', minYear: 1, maxYear: 2, school: 'School of Industrial Technology' },
-  // 1-year certificate programs
-  { value: 'CertAET', family: 'CertAET', familyLabel: 'Certificate in Automotive Engineering Technician (1 year)',  type: 'certificate', minYear: 1, maxYear: 1, school: 'School of Industrial Technology' },
-  { value: 'CertCET', family: 'CertCET', familyLabel: 'Certificate in Civil Engineering Technician (1 year)',        type: 'certificate', minYear: 1, maxYear: 1, school: 'School of Industrial Technology' },
-  { value: 'CertEET', family: 'CertEET', familyLabel: 'Certificate in Electrical Engineering Technician (1 year)',   type: 'certificate', minYear: 1, maxYear: 1, school: 'School of Industrial Technology' },
-  { value: 'CertFT',  family: 'CertFT',  familyLabel: 'Certificate in Food Technology (1 year)',                     type: 'certificate', minYear: 1, maxYear: 1, school: 'School of Industrial Technology' },
-
-  // ── School of Information Technology ─────────────────────────────────────────
-  // 1st-year rule: ACT (associate, 2yr) exists → suppress BSIT bachelor for yr 1
-  // BSIT family — 2 specializations share one dropdown entry
-  { value: 'BSIT-AP', family: 'BSIT', familyLabel: 'Bachelor of Science in Information Technology (BSIT)',    type: 'bachelor', minYear: 1, maxYear: 4, school: 'School of Information Technology', major: 'Specialization in Application Programming' },
-  { value: 'BSIT-DD', family: 'BSIT', familyLabel: 'Bachelor of Science in Information Technology (BSIT)',    type: 'bachelor', minYear: 1, maxYear: 4, school: 'School of Information Technology', major: 'Specialization in Digital Design' },
-  { value: 'ACT',     family: 'ACT',  familyLabel: 'Associate in Computer Technology (2 Years)',               type: 'associate',minYear: 1, maxYear: 2, school: 'School of Information Technology' },
-
-  // ── School of Accountancy and Business Management ─────────────────────────────
-  // No non-degree programs → all shown for yr 1+
-  { value: 'BSAcc', family: 'BSAcc', familyLabel: 'Bachelor of Science in Accountancy',                        type: 'bachelor', minYear: 1, maxYear: 5, school: 'School of Accountancy and Business Management' },
-  { value: 'BSHM',  family: 'BSHM',  familyLabel: 'Bachelor of Science in Hospitality Management',            type: 'bachelor', minYear: 1, maxYear: 4, school: 'School of Accountancy and Business Management' },
-  { value: 'BSTM',  family: 'BSTM',  familyLabel: 'Bachelor of Science in Tourism Management',                type: 'bachelor', minYear: 1, maxYear: 4, school: 'School of Accountancy and Business Management' },
-
-  // ── College of Law ────────────────────────────────────────────────────────────
-  // Postgraduate — shown for all year levels (no non-degree to suppress it)
-  { value: 'JD', family: 'JD', familyLabel: 'Juris Doctor (Online)',                                           type: 'postgrad', minYear: 1, maxYear: 4, school: 'College of Law' },
-];
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
-/** Return the catalog entry matching a specific value code. */
-function ascotByValue(val) {
-  return ASCOT_COURSES.find(function(c) { return c.value === val; }) || null;
-}
-/** Return all catalog entries belonging to a family. */
-function ascotFamily(familyKey) {
-  return ASCOT_COURSES.filter(function(c) { return c.family === familyKey; });
-}
 
 // ── Year Level → Course cascade ───────────────────────────────────────────────
 //
