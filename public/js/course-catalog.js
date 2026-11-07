@@ -145,7 +145,7 @@ function courseFullName(code) {
   }
   return c ? c.familyLabel : null;
 }
-/** Exact major / specialization label for a stored code, e.g. 'BIT-AET' → 'Major in Automotive Engineering Technology'.
+/** Major / specialization name for a stored code, e.g. 'BIT-AET' → 'Automotive Engineering Technology' (without the "Major in" / "Specialization in" prefix).
  *  Returns null for programs without majors or for non-catalog values. */
 function courseMajorName(code) {
   var c = ascotByValue(String(code || '').trim());
@@ -153,5 +153,6 @@ function courseMajorName(code) {
     var low = String(code || '').trim().toLowerCase();
     c = low ? (ASCOT_COURSES.find(function(x) { return x.value.toLowerCase() === low; }) || null) : null;
   }
-  return (c && c.major) ? c.major : null;
+  // The dropdown labels read "Major in …" / "Specialization in …"; the admin views show only the program's own name.
+  return (c && c.major) ? c.major.replace(/^(?:Major|Specialization)\s+in\s+/i, '') : null;
 }
