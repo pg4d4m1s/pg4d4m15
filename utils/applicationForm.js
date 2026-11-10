@@ -197,7 +197,10 @@ function documentsChecklist(doc, d) {
   all.forEach(([label, ok, later], i) => {
     const x = MARGIN + (i % 2) * colW, y = y0 + Math.floor(i / 2) * rowH;
     doc.rect(x + 2, y + 2, 8, 8).lineWidth(0.8).strokeColor(C.ink).stroke();
-    if (ok) doc.font('Helvetica-Bold').fontSize(9).fillColor(C.bar).text('X', x + 3.2, y + 2, { lineBreak: false });
+    if (ok) {   // drawn as a vector tick (Helvetica/WinAnsi has no check-mark glyph)
+      doc.save().lineWidth(1.6).lineCap('round').lineJoin('round').strokeColor(C.bar)
+         .moveTo(x + 3.6, y + 6.4).lineTo(x + 5.9, y + 9).lineTo(x + 10.6, y + 1.6).stroke().restore();
+    }
     const note = (!ok && later) ? C.amber : C.ink;
     doc.font('Helvetica').fontSize(8).fillColor(note).text(label, x + 15, y + 2.5, { width: colW - 20, lineBreak: false, ellipsis: true });
   });
@@ -211,29 +214,35 @@ function declaration(doc, d) {
     'I hereby certify that the information given in this application is true and correct to the best of my knowledge. ' +
     'I understand that any false statement or misrepresentation may be a ground for the disapproval of this application ' +
     'or the termination of my dormitory privileges.', MARGIN, doc.y, { width: CONTENT_W, align: 'justify' });
-  doc.y += 20;
-  const y = doc.y, half = CONTENT_W / 2;
-  const lineAt = (x, w) => doc.moveTo(x, y + 14).lineTo(x + w, y + 14).lineWidth(0.7).strokeColor(C.ink).stroke();
+  doc.y += 24;
+  const y = doc.y, gap = 14;
+  const w1 = CONTENT_W * 0.36, w2 = CONTENT_W * 0.36, w3 = CONTENT_W - w1 - w2 - gap * 2;
+  const x1 = MARGIN, x2 = x1 + w1 + gap, x3 = x2 + w2 + gap;
+  const sigLine = (x, w) => doc.moveTo(x, y + 14).lineTo(x + w, y + 14).lineWidth(0.7).strokeColor(C.ink).stroke();
   doc.font('Helvetica-Bold').fontSize(9).fillColor(C.ink)
-     .text(clean([d.firstName, d.middleName, d.lastName, d.suffix].filter(Boolean).join(' ')).toUpperCase(), MARGIN, y, { width: half - 20, align: 'center', lineBreak: false });
-  lineAt(MARGIN, half - 20);
-  lineAt(MARGIN + half + 20, half - 20);
+     .text(clean([d.firstName, d.middleName, d.lastName, d.suffix].filter(Boolean).join(' ')).toUpperCase(), x1, y, { width: w1, align: 'center', lineBreak: false });
+  sigLine(x1, w1); sigLine(x2, w2); sigLine(x3, w3);
   doc.font('Helvetica').fontSize(7).fillColor(C.mute)
-     .text('Signature over printed name of applicant', MARGIN, y + 17, { width: half - 20, align: 'center', lineBreak: false })
-     .text('Date', MARGIN + half + 20, y + 17, { width: half - 20, align: 'center', lineBreak: false });
-  doc.y = y + 30;
+     .text('Signature over printed name of applicant', x1, y + 17, { width: w1, align: 'center', lineBreak: false })
+     .text('Signature over printed name of parent/guardian', x2, y + 17, { width: w2, align: 'center', lineBreak: false })
+     .text('Date', x3, y + 17, { width: w3, align: 'center', lineBreak: false });
+  doc.y = y + 32;
 
-  // Office use
-  const oy = doc.y + 4;
-  doc.rect(MARGIN, oy, CONTENT_W, 40).lineWidth(0.7).strokeColor(C.mute).dash(3, { space: 2 }).stroke().undash();
+  // Office use -- "Reviewed by" is the widest cell: the reviewer writes a full name and signs there
+  const oy = doc.y + 6, bh = 56;
+  doc.rect(MARGIN, oy, CONTENT_W, bh).lineWidth(0.7).strokeColor(C.mute).dash(3, { space: 2 }).stroke().undash();
   doc.font('Helvetica-Bold').fontSize(7).fillColor(C.mute).text('FOR OFFICE USE ONLY', MARGIN + 6, oy + 4, { lineBreak: false });
-  const labels = ['Admission No.:', 'Room / Bed:', 'Reviewed by:', 'Date:'], cw = CONTENT_W / 4;
-  labels.forEach((l, i) => {
-    const x = MARGIN + i * cw + 6;
-    doc.font('Helvetica').fontSize(7.5).fillColor(C.ink).text(l, x, oy + 20, { lineBreak: false });
-    doc.moveTo(x + 52, oy + 28).lineTo(x + cw - 10, oy + 28).lineWidth(0.5).strokeColor(C.ink).stroke();
+  const cells = [['Admission No.:', 0.20], ['Room / Bed:', 0.17], ['Reviewed by:', 0.43], ['Date:', 0.20]];
+  let cx = MARGIN;
+  cells.forEach(([l, frac]) => {
+    const cw = CONTENT_W * frac, lw = doc.font('Helvetica').fontSize(7.5).widthOfString(l);
+    doc.fillColor(C.ink).text(l, cx + 6, oy + 34, { lineBreak: false });
+    doc.moveTo(cx + 10 + lw, oy + 42).lineTo(cx + cw - 8, oy + 42).lineWidth(0.5).strokeColor(C.ink).stroke();
+    cx += cw;
   });
-  doc.y = oy + 40;
+  doc.font('Helvetica').fontSize(6.5).fillColor(C.mute)
+     .text('Signature over printed name of reviewer', MARGIN + CONTENT_W * 0.37, oy + 44, { width: CONTENT_W * 0.43 - 8, align: 'center', lineBreak: false });
+  doc.y = oy + bh;
 }
 
 // -- public API ----------------------------------------------------------------------------------
