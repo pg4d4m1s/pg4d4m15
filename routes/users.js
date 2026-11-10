@@ -20,7 +20,7 @@ const router  = express.Router();
 const { requireAuth } = require('../middleware/auth');
 const { uploadAvatar, uploadCover, uploadIdDocs, uploadMedicalCert, multerUpload, toCloudinary, resizeImage, hasCloudinary } = require('../middleware/upload');
 const { trackUpload } = require('../middleware/uploadDiagnostics');
-const { sendApplicationFormPdf } = require('../utils/applicationForm');
+const { sendApplicationFormPdf, withBedAssignment } = require('../utils/applicationForm');
 const {
   findUserById, findUserByUsername, updateUser, getUserPosts,
   toggleFollow, isFollowing, getFollowerCount, getFollowingCount,
@@ -386,7 +386,7 @@ router.get('/api/users/me/application-form', requireAuth, async (req, res) => {
   const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
   if (!user) return res.status(404).json({ error: 'Account not found.' });
   const docs = db.prepare('SELECT * FROM id_verification_requests WHERE user_id = ? ORDER BY created_at DESC LIMIT 1').get(req.user.id) || {};
-  await sendApplicationFormPdf(req, res, { ...docs, ...user, id: user.id }, `@${user.username} (self)`);
+  await sendApplicationFormPdf(req, res, withBedAssignment(db, user.id, { ...docs, ...user, id: user.id }), `@${user.username} (self)`);
 });
 
 // POST /api/users/:id/follow-only — follow without friending

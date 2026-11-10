@@ -101,6 +101,8 @@ function normalise(row) {
     father: parseJson(pick(r, 'father_info', 'fatherInfo')), mother: parseJson(pick(r, 'mother_info', 'motherInfo')),
     guardian: parseJson(pick(r, 'guardian_info', 'guardianInfo')),
     roommateNote: clean(pick(r, 'roommate_note', 'roommateNote')),
+    admissionNo: clean(pick(r, 'admission_no', 'admissionNo')),
+    room: r.assigned_room_number ? `Room ${clean(r.assigned_room_number)}${r.assigned_bed_number ? ' / Bed ' + clean(r.assigned_bed_number) : ''}` : '',
     submitted: pick(r, 'created_at', 'createdAt') || pick(r, 'original_created_at', 'originalCreatedAt'),
     docs: {
       id:         !!(pick(r, 'id_front_url', 'idFrontUrl')),
@@ -232,16 +234,24 @@ function declaration(doc, d) {
   const oy = doc.y + 6, bh = 56;
   doc.rect(MARGIN, oy, CONTENT_W, bh).lineWidth(0.7).strokeColor(C.mute).dash(3, { space: 2 }).stroke().undash();
   doc.font('Helvetica-Bold').fontSize(7).fillColor(C.mute).text('FOR OFFICE USE ONLY', MARGIN + 6, oy + 4, { lineBreak: false });
-  const cells = [['Admission No.:', 0.20], ['Room / Bed:', 0.17], ['Reviewed by:', 0.43], ['Date:', 0.20]];
+  // Admission No. and Room / Bed are pre-filled when the admin has already issued/assigned them.
+  const cells = [['Admission No.:', 0.20, d.admissionNo], ['Room / Bed:', 0.25, d.room], ['Reviewed by:', 0.36, ''], ['Date:', 0.19, '']];
   let cx = MARGIN;
-  cells.forEach(([l, frac]) => {
+  cells.forEach(([l, frac, val]) => {
     const cw = CONTENT_W * frac, lw = doc.font('Helvetica').fontSize(7.5).widthOfString(l);
+    const x0 = cx + 10 + lw, avail = cx + cw - 8 - x0;
     doc.fillColor(C.ink).text(l, cx + 6, oy + 34, { lineBreak: false });
-    doc.moveTo(cx + 10 + lw, oy + 42).lineTo(cx + cw - 8, oy + 42).lineWidth(0.5).strokeColor(C.ink).stroke();
+    doc.moveTo(x0, oy + 42).lineTo(x0 + avail, oy + 42).lineWidth(0.5).strokeColor(C.ink).stroke();
+    if (val) {
+      let fs = 8.5;                                   // shrink to fit on ONE line (never wrap onto the signature line)
+      doc.font('Helvetica-Bold');
+      while (fs > 5.5 && doc.fontSize(fs).widthOfString(val) > avail - 2) fs -= 0.5;
+      doc.fontSize(fs).fillColor(C.ink).text(val, x0, oy + 41 - fs - 1, { width: avail + 20, lineBreak: false });
+    }
     cx += cw;
   });
   doc.font('Helvetica').fontSize(6.5).fillColor(C.mute)
-     .text('Signature over printed name of reviewer', MARGIN + CONTENT_W * 0.37, oy + 44, { width: CONTENT_W * 0.43 - 8, align: 'center', lineBreak: false });
+     .text('Signature over printed name of reviewer', MARGIN + CONTENT_W * 0.45, oy + 44, { width: CONTENT_W * 0.36 - 8, align: 'center', lineBreak: false });
   doc.y = oy + bh;
 }
 
@@ -326,6 +336,22 @@ function applicationFormFilename(row) {
   return ['Application-Form', slug(d.lastName), slug(d.firstName)].filter(Boolean).join('_') + '.pdf';
 }
 
+/**
+ * Adds the resident's CURRENT bed assignment (room number / bed number) to a user row so the form's
+ * "Room / Bed" box is pre-filled. Best-effort: no assignment, or an old snapshot without the table, just leaves it blank.
+ */
+function withBedAssignment(db, userId, row) {
+  try {
+    const a = db.prepare(
+      'SELECT dr.room_number AS n, ba.bed_number AS b FROM bed_assignments ba JOIN dorm_rooms dr ON dr.id = ba.room_id WHERE ba.user_id = ? LIMIT 1'
+    ).get(userId);
+    return a ? { ...row, assigned_room_number: a.n, assigned_bed_number: a.b } : row;
+  } catch (e) {
+    log.warn(`[applicationForm] bed assignment lookup skipped: ${e.message}`);
+    return row;
+  }
+}
+
 /** Builds the PDF and writes it to an Express response. ?download=1 forces a download; default is inline view. */
 async function sendApplicationFormPdf(req, res, row, who = '') {
   const t0 = Date.now();
@@ -347,4 +373,4 @@ async function sendApplicationFormPdf(req, res, row, who = '') {
   }
 }
 
-module.exports = { buildApplicationFormPdf, applicationFormFilename, sendApplicationFormPdf };
+module.exports = { buildApplicationFormPdf, applicationFormFilename, sendApplicationFormPdf, withBedAssignment };
