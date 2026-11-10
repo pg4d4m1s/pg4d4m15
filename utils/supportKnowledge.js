@@ -149,6 +149,7 @@ const FAQ = [
       "• **Certificate of Registration/Enrollment**\n" +
       "• **Report Card / Certificate of Grades** from your last semester (also called Grade Slip). Incoming freshmen: your Grade 12 report card (Form 138).\n\n" +
       "You also need a **live selfie** taken with your camera — gallery uploads are not accepted, and the app scans your face and asks for two quick actions (like turning your head) to confirm it is really you.\n\n" +
+      "A **Medical Certificate** is also a dormitory requirement, but you do **not** upload it when applying. After your application is approved and you log in, open **My Dormitory** and upload it there.\n\n" +
       "Accepted files: **JPG, PNG, WEBP, PDF, DOCX**, up to **10 MB each**. Make sure each document is fully in the frame, readable and not blurry — phone photos are fine.\n\n" +
       "After uploading online, you must still submit your **hard copies** as a follow-up.",
     followups: ['hard-copy', 'upload-problems', 'how-to-register'],

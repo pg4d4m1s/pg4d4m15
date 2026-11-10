@@ -15,7 +15,7 @@ const {
   banUser, unbanUser,
   getPendingAccounts, approveAccount, rejectAccount,
   archiveRejectedRegistration, getRejectedRegistrations, deleteRejectedRegistration,
-  getFullUserProfile,
+  getFullUserProfile, setUserMedicalCertificate,
   findUserByEmail, findUserByUsername, findUserByPhone,
   createUser,
   createNotification,
@@ -33,6 +33,7 @@ const {
   createDbArchive, getDbArchives, getDbArchiveById, deleteDbArchiveById,
 } = require('../utils/db');
 const { sendAccountApprovedEmail, sendAccountRejectedEmail } = require('../utils/emailService');
+const { sendApplicationFormPdf } = require('../utils/applicationForm');
 const { createSemesterAnnouncement } = require('../utils/announcements');
 const { getViewingArchive, getArchiveHandle, closeArchiveHandle } = require('../utils/archiveView');
 const { multerUpload, toCloudinary, resizeImage, hasCloudinary } = require('../middleware/upload');
@@ -310,8 +311,8 @@ router.delete('/api/admin/users/:id', requireAdmin, (req, res) => {
          id_front_url, id_back_url, selfie_url,
          cert_residency_url, cert_low_income_url, cert_enrollment_url, cert_grades_url,
          original_created_at, deleted_by,
-         password_hash, google_id, specialization, avatar_face_x, avatar_face_y)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+         password_hash, google_id, specialization, avatar_face_x, avatar_face_y, cert_medical_url)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     `).run(
       require('crypto').randomUUID(), targetId,
       user.first_name, user.middle_name||'', user.last_name, user.suffix||'',
@@ -325,7 +326,8 @@ router.delete('/api/admin/users/:id', requireAdmin, (req, res) => {
       idDocs?.cert_residency_url||'', idDocs?.cert_low_income_url||'', idDocs?.cert_enrollment_url||'', idDocs?.cert_grades_url||'',
       user.created_at||'', req.user?.id || 'system',
       user.password || null, user.google_id || null, user.specialization || '',
-      user.avatar_face_x ?? 50, user.avatar_face_y ?? 50
+      user.avatar_face_x ?? 50, user.avatar_face_y ?? 50,
+      user.cert_medical_url || ''
     );
   } catch(archiveErr) {
     log.warn(`Archive before delete failed (non-fatal): ${archiveErr.message}`);
@@ -424,6 +426,11 @@ router.post('/api/admin/users/deleted/:id/restore', requireAdmin, (req, res) => 
           certGradesUrl: rec.cert_grades_url||'',
         });
       } catch(e) { log.error(`Doc re-attach on restore failed: ${e.message}`); }
+    }
+    // Medical Certificate lives on the user row -- carry it over even if the applicant had no ID docs.
+    if (rec.cert_medical_url) {
+      try { setUserMedicalCertificate(restored.id, rec.cert_medical_url); }
+      catch (e) { log.error(`Medical certificate re-attach on restore failed (non-fatal): ${e.message}`); }
     }
 
     db.prepare('DELETE FROM deleted_users WHERE id = ?').run(req.params.id);
@@ -889,6 +896,10 @@ router.post('/api/admin/accounts/rejected/:id/restore', requireAdmin, (req, res)
       log.error(`ID re-attach failed (non-fatal): ${e.message}`);
     }
   }
+  if (rec.cert_medical_url) {
+    try { setUserMedicalCertificate(restored.id, rec.cert_medical_url); }
+    catch (e) { log.error(`Medical certificate re-attach failed (non-fatal): ${e.message}`); }
+  }
 
   // Remove from rejected archive
   deleteRejectedRegistration(req.params.id);
@@ -909,6 +920,43 @@ router.post('/api/admin/accounts/rejected/:id/restore', requireAdmin, (req, res)
 });
 
 // ── Full user profile for admin review (User Management → Review button) ──
+// Audit trail for opening a resident's personal data as a PDF. Best-effort: while an Archive DB is being viewed the
+// handle is read-only, and a failed log line must never block the admin from seeing the form.
+function auditFormView(req, type, id) {
+  try { logAdminAction(req.user?.id, 'application_form_viewed', type, id, ''); }
+  catch (e) { log.warn(`[application-form] audit log skipped: ${e.message}`); }
+}
+
+// -- Resident's Application Form (soft copy, PDF) -----------------------------------------------------
+// Generated on demand from the stored application, so it always matches what the applicant submitted.
+// Works for pending/approved accounts, the rejected archive and the deleted archive. Reads go through `db`,
+// which archiveViewMiddleware points at the snapshot while an Archive DB is being viewed.
+router.get('/api/admin/users/:id/application-form', requireAdmin, async (req, res) => {
+  try {
+    const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.params.id);
+    if (!user) return res.status(404).json({ error: 'User not found.' });
+    const docs = db.prepare('SELECT * FROM id_verification_requests WHERE user_id = ? ORDER BY created_at DESC LIMIT 1').get(req.params.id) || {};
+    auditFormView(req, 'user', user.id);
+    await sendApplicationFormPdf(req, res, { ...docs, ...user, id: user.id }, `@${user.username} by @${req.user?.username}`);
+  } catch (e) { send500(res, e, 'application-form'); }
+});
+router.get('/api/admin/accounts/rejected/:id/application-form', requireAdmin, async (req, res) => {
+  try {
+    const rec = db.prepare('SELECT * FROM rejected_registrations WHERE id = ?').get(req.params.id);
+    if (!rec) return res.status(404).json({ error: 'Rejected record not found.' });
+    auditFormView(req, 'rejected_registration', rec.id);
+    await sendApplicationFormPdf(req, res, rec, `rejected @${rec.username} by @${req.user?.username}`);
+  } catch (e) { send500(res, e, 'application-form'); }
+});
+router.get('/api/admin/users/deleted/:id/application-form', requireAdmin, async (req, res) => {
+  try {
+    const rec = db.prepare('SELECT * FROM deleted_users WHERE id = ?').get(req.params.id);
+    if (!rec) return res.status(404).json({ error: 'Archived user not found.' });
+    auditFormView(req, 'deleted_user', rec.id);
+    await sendApplicationFormPdf(req, res, rec, `deleted @${rec.username} by @${req.user?.username}`);
+  } catch (e) { send500(res, e, 'application-form'); }
+});
+
 router.get('/api/admin/users/:id/profile', requireAdmin, (req, res) => {
   const profile = getFullUserProfile(req.params.id);
   if (!profile) return res.status(404).json({ error: 'User not found.' });

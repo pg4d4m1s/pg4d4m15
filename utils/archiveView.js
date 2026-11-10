@@ -126,6 +126,12 @@ const COMPAT_COLUMNS = [
   { table: 'id_verification_requests', column: 'cert_grades_url', ddl: "TEXT DEFAULT ''" },
   { table: 'rejected_registrations',   column: 'cert_grades_url', ddl: "TEXT DEFAULT ''" },
   { table: 'deleted_users',            column: 'cert_grades_url', ddl: "TEXT DEFAULT ''" },
+  // Medical Certificate (added later). Older snapshots have no such column, yet live admin queries select it
+  // (u.cert_medical_url, getFullUserProfile, restore-from-archive). Without these entries, viewing an old
+  // Archive DB would fail with "no such column: cert_medical_url".
+  { table: 'users',                     column: 'cert_medical_url', ddl: "TEXT DEFAULT ''" },
+  { table: 'rejected_registrations',    column: 'cert_medical_url', ddl: "TEXT DEFAULT ''" },
+  { table: 'deleted_users',             column: 'cert_medical_url', ddl: "TEXT DEFAULT ''" },
 ];
 function ensureCompatible(file, archiveId) {
   try {
@@ -277,4 +283,5 @@ module.exports = {
   archiveViewMiddleware, archiveWriteGuard,
   getViewingArchive, getArchiveHandle, closeArchiveHandle,
   resolveArchiveFile, archiveCachePath,
+  ensureCompatible,   // exported so the archive-compat behaviour can be tested
 };

@@ -312,6 +312,36 @@
         </div>
       </div>
 
+      <!-- Required documents: Medical Certificate (submitted after approval) + own Application Form -->
+      <div class="flex items-center gap-3 px-5 py-4">
+        <div class="flex-1 h-px bg-slate-100 dark:bg-slate-800"></div>
+        <span class="text-[10px] font-bold text-slate-400 uppercase tracking-widest">My Documents</span>
+        <div class="flex-1 h-px bg-slate-100 dark:bg-slate-800"></div>
+      </div>
+      <div class="px-5 pb-2">
+        <div id="med-cert-card" class="rounded-2xl border border-slate-200 dark:border-slate-700 p-4">
+          <div class="flex items-start gap-3">
+            <div class="w-10 h-10 rounded-xl bg-teal-50 dark:bg-teal-900/30 flex items-center justify-center flex-shrink-0"><i class="fa-solid fa-notes-medical text-teal-500"></i></div>
+            <div class="min-w-0 flex-1">
+              <p class="text-sm font-semibold text-slate-700 dark:text-slate-200">Medical Certificate</p>
+              <p id="med-cert-status" class="text-xs text-slate-400 mt-0.5">Checking&hellip;</p>
+            </div>
+          </div>
+          <p class="text-xs text-slate-500 dark:text-slate-400 mt-3 leading-relaxed">Required for your dormitory stay. Upload a clear photo or scan (JPG, PNG, WEBP, PDF or DOCX, up to 10 MB).</p>
+          <div id="med-cert-progress" class="hidden mt-3" aria-live="polite">
+            <div class="h-2 bg-slate-100 dark:bg-slate-800 rounded-full overflow-hidden"><div id="med-cert-bar" class="h-full bg-teal-500 transition-all" style="width:0%"></div></div>
+            <p id="med-cert-ptext" class="text-xs text-slate-500 mt-1">Uploading&hellip;</p>
+          </div>
+          <p id="med-cert-error" class="hidden text-xs font-semibold text-red-500 mt-3" role="alert"></p>
+          <div class="flex flex-wrap gap-2 mt-3">
+            <a id="med-cert-view" href="#" target="_blank" rel="noopener" class="hidden inline-flex items-center justify-center gap-1.5 min-h-[44px] px-4 rounded-xl text-sm font-semibold text-slate-600 dark:text-slate-200 border border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800"><i class="fa-solid fa-eye text-xs"></i> View</a>
+            <label id="med-cert-pick" for="med-cert-input" class="inline-flex items-center justify-center gap-1.5 min-h-[44px] px-4 rounded-xl text-sm font-bold text-white bg-teal-600 hover:bg-teal-700 cursor-pointer"><i class="fa-solid fa-cloud-arrow-up text-xs"></i> <span id="med-cert-pick-text">Upload</span></label>
+            <input id="med-cert-input" type="file" accept="image/jpeg,image/png,image/webp,application/pdf,.pdf,.docx" class="hidden" onchange="uploadMedicalCertificate(this)"/>
+          </div>
+        </div>
+        <a href="/api/users/me/application-form" target="_blank" rel="noopener" class="mt-3 flex items-center gap-2 min-h-[44px] px-4 rounded-xl text-sm font-semibold text-slate-600 dark:text-slate-200 border border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800"><i class="fa-solid fa-file-pdf text-red-500"></i> My Application Form (PDF)</a>
+      </div>
+
       <!-- Divider with label -->
       <div class="flex items-center gap-3 px-5 py-4">
         <div class="flex-1 h-px bg-slate-100 dark:bg-slate-800"></div>
@@ -1426,12 +1456,87 @@
   async function openDormPanel() {
     document.getElementById('dorm-panel').classList.remove('hidden');
     document.body.style.overflow = 'hidden';
+    loadMedicalCertificate();                        // cheap GET; always fresh when the panel opens
     if (!_dormPanelLoaded) {
       _dormPanelLoaded = true;
       console.log('[DormPanel] Opening — loading data…');
       await loadDormWidget();
       await loadMyMaintRequests();
     }
+  }
+
+  // ── Medical Certificate (required; submitted after approval) ─────────────
+  const MED_MAX_BYTES = 15 * 1024 * 1024;           // matches the server's multer limit
+  function medSetState(url) {
+    const st = document.getElementById('med-cert-status'), view = document.getElementById('med-cert-view'), txt = document.getElementById('med-cert-pick-text');
+    if (!st) return;
+    if (url) {
+      st.innerHTML = '<span class="font-semibold text-green-600"><i class="fa-solid fa-circle-check mr-1"></i>Submitted</span>';
+      if (view) { view.href = url; view.classList.remove('hidden'); }
+      if (txt) txt.textContent = 'Replace';
+    } else {
+      st.innerHTML = '<span class="font-semibold text-amber-600"><i class="fa-solid fa-clock mr-1"></i>Not yet submitted</span>';
+      if (view) view.classList.add('hidden');
+      if (txt) txt.textContent = 'Upload';
+    }
+  }
+  async function loadMedicalCertificate() {
+    try {
+      const r = await fetch('/api/users/me/medical-certificate');
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const d = await r.json();
+      medSetState(d.uploaded ? d.url : null);
+    } catch (e) {
+      console.warn('[MedCert] status failed:', e.message);
+      const st = document.getElementById('med-cert-status');
+      if (st) st.textContent = 'Could not check status. You can still upload.';
+    }
+  }
+  function uploadMedicalCertificate(input) {
+    const file = input.files && input.files[0];
+    const err = document.getElementById('med-cert-error'), prog = document.getElementById('med-cert-progress');
+    const bar = document.getElementById('med-cert-bar'), ptext = document.getElementById('med-cert-ptext'), pick = document.getElementById('med-cert-pick');
+    const fail = (m) => { if (err) { err.textContent = m; err.classList.remove('hidden'); } if (prog) prog.classList.add('hidden'); if (pick) pick.classList.remove('opacity-50', 'pointer-events-none'); input.value = ''; };
+    if (err) err.classList.add('hidden');
+    if (!file) return;
+    const name = file.name.toLowerCase();
+    const okType = /^image\/(jpeg|png|webp)$/.test(file.type) || file.type === 'application/pdf' || name.endsWith('.pdf') || name.endsWith('.docx');
+    if (!okType) return fail('Please choose a JPG, PNG, WEBP, PDF or DOCX file.');
+    if (file.size > MED_MAX_BYTES) return fail('That file is ' + (file.size / 1048576).toFixed(1) + ' MB. Maximum is 15 MB — try a smaller photo or a PDF.');
+    if (navigator.onLine === false) return fail('You appear to be offline. Check your connection and try again.');
+
+    const fd = new FormData();
+    fd.append('cert_medical', file, file.name);
+    if (pick) pick.classList.add('opacity-50', 'pointer-events-none');
+    if (prog) prog.classList.remove('hidden');
+    if (bar) bar.style.width = '0%';
+    if (ptext) ptext.textContent = 'Uploading…';
+
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', '/api/users/me/medical-certificate');
+    xhr.timeout = 3 * 60 * 1000;                      // slow mobile data: allow 3 minutes
+    xhr.upload.onprogress = (e) => {
+      if (!e.lengthComputable) return;
+      const pct = Math.round(e.loaded / e.total * 100);
+      if (bar) bar.style.width = pct + '%';
+      if (ptext) ptext.textContent = pct < 100 ? 'Uploading… ' + pct + '%' : 'Processing…';
+    };
+    xhr.onload = () => {
+      let d = {}; try { d = JSON.parse(xhr.responseText || '{}'); } catch (_) {}
+      if (xhr.status >= 200 && xhr.status < 300 && d.success) {
+        if (prog) prog.classList.add('hidden');
+        if (pick) pick.classList.remove('opacity-50', 'pointer-events-none');
+        input.value = '';
+        medSetState(d.url);
+        toast(d.replaced ? 'Medical Certificate replaced.' : 'Medical Certificate submitted.', 'success');
+      } else {
+        console.warn('[MedCert] upload failed', xhr.status, d);
+        fail(d.error || ('Upload failed (' + xhr.status + '). Please try again.'));
+      }
+    };
+    xhr.onerror   = () => fail('Network problem — the upload did not finish. Please try again.');
+    xhr.ontimeout = () => fail('The upload took too long. Check your connection and try again.');
+    xhr.send(fd);
   }
 
   function closeDormPanel() {

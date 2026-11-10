@@ -515,6 +515,13 @@ migrate(`ALTER TABLE id_verification_requests ADD COLUMN cert_enrollment_url  TE
 migrate(`ALTER TABLE id_verification_requests ADD COLUMN cert_grades_url      TEXT DEFAULT ''`);
 migrate(`ALTER TABLE rejected_registrations   ADD COLUMN cert_grades_url      TEXT DEFAULT ''`);
 migrate(`ALTER TABLE deleted_users            ADD COLUMN cert_grades_url      TEXT DEFAULT ''`);
+// -- Medical Certificate: a required document, but submitted AFTER approval from the resident's account --
+// Lives on the user row (not id_verification_requests): it is usually added after approval, and a later ID
+// re-verification creates a brand-new verification row that would otherwise hide it.
+// Old Archive DB snapshots lack this column; COMPAT_COLUMNS in utils/archiveView.js keeps them viewable.
+migrate(`ALTER TABLE users                   ADD COLUMN cert_medical_url     TEXT DEFAULT ''`);
+migrate(`ALTER TABLE rejected_registrations   ADD COLUMN cert_medical_url     TEXT DEFAULT ''`);
+migrate(`ALTER TABLE deleted_users            ADD COLUMN cert_medical_url     TEXT DEFAULT ''`);
 migrate(`CREATE TABLE IF NOT EXISTS message_reactions (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, message_id TEXT NOT NULL, emoji TEXT NOT NULL DEFAULT 'like', created_at TEXT DEFAULT (datetime('now')), UNIQUE(user_id, message_id))`);
 
 // ── Reputation votes (one vote per voter per target, can be +1 or -1) ──
@@ -1133,8 +1140,8 @@ function archiveRejectedRegistration({ user, idDocs, reason, rejectedBy }) {
        id_front_url, id_back_url, selfie_url, id_type,
        cert_residency_url, cert_low_income_url, cert_enrollment_url, cert_grades_url,
        rejection_reason, rejected_by, original_created_at, password_hash,
-       avatar_face_x, avatar_face_y, google_id)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+       avatar_face_x, avatar_face_y, google_id, cert_medical_url)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
   `).run(
     id, user.id, user.firstName, user.middleName||'', user.lastName, user.suffix||'',
     user.username, user.email, user.phone||'', user.birthday||'', user.sex||'',
@@ -1149,7 +1156,8 @@ function archiveRejectedRegistration({ user, idDocs, reason, rejectedBy }) {
     reason||'', rejectedBy, user.createdAt||'',
     user.password||null,
     user.avatarFaceX ?? 50, user.avatarFaceY ?? 50,
-    user.googleId || null
+    user.googleId || null,
+    getUserMedicalCertificate(user.id)
   );
   return id;
 }
@@ -1193,6 +1201,7 @@ function getFullUserProfile(userId) {
     certLowIncomeUrl:  row.cert_low_income_url  || '',
     certEnrollmentUrl: row.cert_enrollment_url  || '',
     certGradesUrl:     row.cert_grades_url      || '',
+    certMedicalUrl:    row.cert_medical_url     || '',   // users.cert_medical_url (comes with u.*)
   };
 }
 
@@ -1581,6 +1590,23 @@ function submitIdVerification({ userId, idFrontUrl, idBackUrl = '', selfieUrl = 
   return id;
 }
 
+// -- Medical Certificate (required document, submitted after approval) ----
+// One current file per resident, stored on the user row. Uploading again replaces it.
+function getUserMedicalCertificate(userId) {
+  if (!userId) return '';
+  try {
+    return db.prepare('SELECT cert_medical_url FROM users WHERE id = ?').get(userId)?.cert_medical_url || '';
+  } catch (e) {
+    log.warn(`[db] getUserMedicalCertificate failed -- ${e.message}`);
+    return '';
+  }
+}
+
+function setUserMedicalCertificate(userId, url) {
+  const r = db.prepare(`UPDATE users SET cert_medical_url = ?, updated_at = datetime('now') WHERE id = ?`).run(url || '', userId);
+  return r.changes === 1;
+}
+
 function getPendingVerifications({ page = 1, limit = 20 } = {}) {
   const offset = (page - 1) * limit;
   return db.prepare(`
@@ -1656,7 +1682,8 @@ function getPendingAccounts() {
            u.avatar_face_x, u.avatar_face_y,
            u.room_preference, u.roommate_note,
            ivr.id as verif_id, ivr.id_front_url, ivr.id_back_url, ivr.selfie_url, ivr.id_type,
-           ivr.cert_residency_url, ivr.cert_low_income_url, ivr.cert_enrollment_url, ivr.cert_grades_url
+           ivr.cert_residency_url, ivr.cert_low_income_url, ivr.cert_enrollment_url, ivr.cert_grades_url,
+           u.cert_medical_url
     FROM users u
     LEFT JOIN id_verification_requests ivr ON ivr.user_id = u.id
       AND ivr.id = (SELECT id FROM id_verification_requests WHERE user_id = u.id ORDER BY created_at DESC LIMIT 1)
@@ -2375,8 +2402,8 @@ function semesterRollover(newSemester, schoolYear, newSlipValidTo, adminId) {
        id_front_url, id_back_url, selfie_url,
        cert_residency_url, cert_low_income_url, cert_enrollment_url, cert_grades_url,
        original_created_at, deleted_by, semester_tag,
-       password_hash, google_id, specialization, avatar_face_x, avatar_face_y)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+       password_hash, google_id, specialization, avatar_face_x, avatar_face_y, cert_medical_url)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
   `);
 
   // Nested call inside the outer transaction below → better-sqlite3 turns it into a savepoint.
@@ -2394,7 +2421,8 @@ function semesterRollover(newSemester, schoolYear, newSlipValidTo, adminId) {
       u.cert_residency_url || '', u.cert_low_income_url || '', u.cert_enrollment_url || '', u.cert_grades_url || '',
       u.created_at || '', adminId, semesterTag,
       u.password || null, u.google_id || null, u.specialization || '',
-      u.avatar_face_x ?? 50, u.avatar_face_y ?? 50
+      u.avatar_face_x ?? 50, u.avatar_face_y ?? 50,
+      u.cert_medical_url || ''
     );
     // INSERT OR IGNORE swallows constraint errors silently — never delete a user we failed to archive.
     if (ins.changes !== 1) throw new Error('archive row was not written (INSERT OR IGNORE ignored it)');
@@ -2500,7 +2528,7 @@ module.exports = {
   getPendingPosts, moderatePost, markPostAiReviewed,
   logAiModerationAction, getAiModerationLog,
   // ID Verification
-  submitIdVerification, getPendingVerifications, getAllVerifications, reviewVerification, setVerificationAiResult,
+  submitIdVerification, getUserMedicalCertificate, setUserMedicalCertificate, getPendingVerifications, getAllVerifications, reviewVerification, setVerificationAiResult,
   // Admin Logs
   logAdminAction, getAdminLogs,
   // User Management

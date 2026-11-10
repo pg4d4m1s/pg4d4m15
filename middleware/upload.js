@@ -35,7 +35,7 @@ if (!hasCloudinary) {
 
 const storage = multer.memoryStorage();
 // id_front (school ID / government ID) and certificate fields allow PDFs and Word docs in addition to images
-const CERT_FIELDS = new Set(['cert_residency', 'cert_low_income', 'cert_enrollment', 'cert_grades', 'id_front']);
+const CERT_FIELDS = new Set(['cert_residency', 'cert_low_income', 'cert_enrollment', 'cert_grades', 'cert_medical', 'id_front']);
 const IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
 const DOCX_TYPES  = [
   'application/vnd.openxmlformats-officedocument.wordprocessingml.document', // .docx
@@ -287,7 +287,7 @@ async function processIdDocument(req, res, next) {
     }
 
     // ── ID docs and certs ────────────────────────────────────────────────
-    const fields = ['id_front', 'id_back', 'selfie', 'cert_residency', 'cert_low_income', 'cert_enrollment', 'cert_grades'];
+    const fields = ['id_front', 'id_back', 'selfie', 'cert_residency', 'cert_low_income', 'cert_enrollment', 'cert_grades', 'cert_medical'];
     const DOCX_MIMES = new Set([
       'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
       'application/msword',
@@ -382,6 +382,8 @@ module.exports = {
     { name: 'cert_enrollment', maxCount: 1 },
     { name: 'cert_grades',     maxCount: 1 },
   ]), processIdDocument],
+  // Medical Certificate: ONE file from an approved resident (not part of registration). Same validation/PDF/DOCX pipeline.
+  uploadMedicalCert: [multerUpload.single('cert_medical'), processIdDocument],
   // Low-level helpers exposed to route files for custom upload flows
   multerUpload,
   toCloudinary,

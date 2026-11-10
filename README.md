@@ -254,6 +254,7 @@ DAMIS/
 | **3 — Application** | Personal info: name, date of birth, sex (Male/Female), civil status, permanent + present address |
 | **4 — Profile** | School info (name, course, year level), family info (father/mother), monthly income bracket |
 | **5 — Documents** | Upload School ID or Government ID (front), Certificate of Residency, Certificate of Low Income, Certificate of Registration/Enrollment, Report Card / Certificate of Grades; live selfie with face verification |
+| *After approval* | Residents submit the **Medical Certificate** from *My Dormitory* (required, but not part of registration). Admins see it as "Not yet uploaded" until then; an **Application Form (PDF)** of the Step 3 data can be opened from any application view |
 
 After submission the account sits in `pending` status. The student cannot log in until an admin approves the application.
 

@@ -18,13 +18,15 @@ const express = require('express');
 const router  = express.Router();
 
 const { requireAuth } = require('../middleware/auth');
-const { uploadAvatar, uploadCover, uploadIdDocs, multerUpload, toCloudinary, resizeImage, hasCloudinary } = require('../middleware/upload');
+const { uploadAvatar, uploadCover, uploadIdDocs, uploadMedicalCert, multerUpload, toCloudinary, resizeImage, hasCloudinary } = require('../middleware/upload');
+const { trackUpload } = require('../middleware/uploadDiagnostics');
+const { sendApplicationFormPdf } = require('../utils/applicationForm');
 const {
   findUserById, findUserByUsername, updateUser, getUserPosts,
   toggleFollow, isFollowing, getFollowerCount, getFollowingCount,
   getSuggestedUsers, searchUsers,
   createNotification,
-  submitIdVerification,
+  submitIdVerification, getUserMedicalCertificate, setUserMedicalCertificate,
   sendFollowRequest, acceptFollowRequest, declineFollowRequest,
   cancelFollowRequest, getPendingFollowRequests, getFollowRequestStatus,
   sendFriendRequest, acceptFriendRequest, declineFriendRequest, removeFriend,
@@ -347,6 +349,44 @@ router.post('/api/users/me/submit-verification', requireAuth, ...uploadIdDocs, a
     console.error('submit-verification error:', err);
     res.status(500).json({ error: 'Failed to submit verification request.' });
   }
+});
+
+// ════════════════════════════════════════════════════
+// MEDICAL CERTIFICATE (required document, submitted AFTER approval)
+// ════════════════════════════════════════════════════
+// GET  /api/users/me/medical-certificate  -> { uploaded, url }
+// POST /api/users/me/medical-certificate  (multipart, field "cert_medical": JPG/PNG/WebP/PDF/DOCX)
+//      Uploading again replaces the previous file (the old Cloudinary asset is left in place -- see notes).
+router.get('/api/users/me/medical-certificate', requireAuth, (req, res) => {
+  const url = getUserMedicalCertificate(req.user.id);
+  res.json({ uploaded: !!url, url: url || null });
+});
+
+router.post('/api/users/me/medical-certificate', requireAuth,
+  trackUpload('medical-certificate'), ...uploadMedicalCert,
+  (req, res) => {
+    try {
+      const url = req.idDocUrls && req.idDocUrls.cert_medical;
+      if (!url) return res.status(400).json({ error: 'Please choose your Medical Certificate file (JPG, PNG, WebP, PDF or DOCX).', code: 'NO_FILE', field: 'cert_medical' });
+      const hadOne = !!getUserMedicalCertificate(req.user.id);
+      if (!setUserMedicalCertificate(req.user.id, url)) {
+        log.error(`[medical-cert] update touched 0 rows for user ${req.user.id}`);
+        return res.status(500).json({ error: 'Could not save your Medical Certificate. Please try again.' });
+      }
+      log.upload(`Medical certificate ${hadOne ? 'REPLACED' : 'submitted'} by @${req.user.username}`);
+      res.json({ success: true, uploaded: true, url, replaced: hadOne });
+    } catch (err) {
+      log.error(`[medical-cert] save failed for @${req.user && req.user.username}: ${err.stack || err.message}`);
+      res.status(500).json({ error: 'Could not save your Medical Certificate. Please try again.' });
+    }
+  });
+
+// GET /api/users/me/application-form[?download=1] — the resident's own soft copy of the Resident's Application Form
+router.get('/api/users/me/application-form', requireAuth, async (req, res) => {
+  const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
+  if (!user) return res.status(404).json({ error: 'Account not found.' });
+  const docs = db.prepare('SELECT * FROM id_verification_requests WHERE user_id = ? ORDER BY created_at DESC LIMIT 1').get(req.user.id) || {};
+  await sendApplicationFormPdf(req, res, { ...docs, ...user, id: user.id }, `@${user.username} (self)`);
 });
 
 // POST /api/users/:id/follow-only — follow without friending
