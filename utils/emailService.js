@@ -55,7 +55,9 @@
  * / bounce / dropped / blocked + the receiving server's reply). Enable it with:
  *   SENDGRID_WEBHOOK_PUBLIC_KEY[2..5]  — the "Verification Key" of each SendGrid account's Signed Event Webhook
  *   MAIL_SLOW_WARN_MS                  — warn when an e-mail is still unconfirmed after this long (default 30000)
- *   OTP_PREFER_GMAIL_API=true          — send OTP / password-reset e-mails through the Gmail API FIRST (SendGrid
+ *   EMAIL_GMAIL_FIRST=true             — Gmail API is the FIRST mailer for ALL e-mail; SendGrid is only the fallback
+ *                                        (it takes over automatically if Gmail fails or hits its daily limit)
+ *   OTP_PREFER_GMAIL_API=true          — narrower option: only OTP / password-reset e-mails go Gmail-first; send OTP / password-reset e-mails through the Gmail API FIRST (SendGrid
  *                                        stays the fallback). Other mail keeps the normal order, so bulk mail does
  *                                        not use up the Gmail daily quota.
  *   OTP_FAILOVER_AFTER_MS              — re-send the SAME OTP via the next driver if SendGrid has not confirmed
@@ -398,9 +400,11 @@ function _driversThrough(driver, order = DRIVER_CHAIN) {
  * once; SendGrid sending "From: …@gmail.com" cannot be authenticated and Gmail may defer or filter it.
  * With OTP_PREFER_GMAIL_API=true, time-critical codes try the Gmail API first.
  */
+const GMAIL_FIRST_ALL          = env('EMAIL_GMAIL_FIRST') === 'true';
 const PREFER_GMAIL_API_FOR_OTP = env('OTP_PREFER_GMAIL_API') === 'true';
 function _orderFor(kind) {
-  if (!PREFER_GMAIL_API_FOR_OTP || !GMAIL_API.enabled || (kind !== 'otp' && kind !== 'reset')) return DRIVER_CHAIN;
+  const wanted = GMAIL_FIRST_ALL || (PREFER_GMAIL_API_FOR_OTP && (kind === 'otp' || kind === 'reset'));
+  if (!wanted || !GMAIL_API.enabled) return DRIVER_CHAIN;
   return ['gmailapi', ...DRIVER_CHAIN.filter(d => d !== 'gmailapi')];
 }
 
@@ -501,7 +505,7 @@ function _redact(s = '') {
   SENDGRID_ACCOUNTS.forEach(a => console.log(`   SendGrid #${a.slot}  : from=${a.from}`));
   if (GMAIL_API.enabled) console.log(`   Gmail API    : user=${GMAIL_API.user}`);
   console.log(`   Console OTP  : ${CONSOLE_COUNTS_AS_SENT ? 'counts as sent (dev / ALLOW_CONSOLE_OTP)' : 'treated as FAILURE (production)'}`);
-  console.log(`   OTP routing  : ${PREFER_GMAIL_API_FOR_OTP && GMAIL_API.enabled ? 'Gmail API first, then ' + DRIVER_CHAIN.filter(d => d !== 'gmailapi' && d !== 'console').map(label).join(' → ') : 'normal chain order'}`);
+  console.log(`   OTP routing  : ${(GMAIL_FIRST_ALL || PREFER_GMAIL_API_FOR_OTP) && GMAIL_API.enabled ? (GMAIL_FIRST_ALL ? 'Gmail API first for ALL e-mail, then ' : 'Gmail API first for OTP/reset, then ') + DRIVER_CHAIN.filter(d => d !== 'gmailapi' && d !== 'console').map(label).join(' → ') : 'normal chain order'}`);
   console.log(`   Delivery log : ${TRACKING_ENABLED
     ? `ON — webhook keys for SendGrid slot(s) ${WEBHOOK_KEYS.map(k => k.slot).join(', ')}, slow-warn ${Math.round(SLOW_DELIVERY_WARN_MS / 1000)}s, OTP failover ${OTP_FAILOVER_AFTER_MS ? `after ${Math.round(OTP_FAILOVER_AFTER_MS / 1000)}s` : 'off'}`
     : 'OFF — set SENDGRID_WEBHOOK_PUBLIC_KEY (+ add the webhook in SendGrid) to see deferred/delivered/bounced events'}`);
