@@ -252,7 +252,7 @@ const FAQ = [
       "If your 6-digit code doesn't arrive:\n" +
       "• Check **Spam / Promotions** folders.\n" +
       "• Make sure the email is typed correctly.\n" +
-      "• Wait for the timer, then tap **Resend Code**. Codes are valid for **10 minutes**.\n" +
+      "• Wait for the timer, then tap **Resend Code** (it re-sends the **same** code, so an older email still works). Registration codes are valid for **30 minutes**; password-reset codes for **10 minutes**.\n" +
       "• Use a **real, active email** — temporary/disposable emails are blocked. Gmail works well.\n\n" +
       "Still nothing? Contact the admin below.",
     followups: ['how-to-register', 'forgot-password'],

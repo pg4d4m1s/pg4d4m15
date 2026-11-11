@@ -724,8 +724,13 @@ const users = { push: (u) => createUser(u) };
 // OTP FUNCTIONS
 // ══════════════════════════════════════════════════════
 
+// Registration code lifetime. Raised from 10 to 30 minutes because mail to some inboxes (Gmail Spam/Promotions
+// filtering, slow phone sync) arrives late and applicants found the code already dead. Still capped at 5 wrong
+// guesses per code, so a longer window does not make guessing easier. Password-reset codes stay at 10 minutes.
+const REG_OTP_TTL_MS = 30 * 60 * 1000;
+
 function saveOTP(email, otp, firstName) {
-  const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+  const expiresAt = new Date(Date.now() + REG_OTP_TTL_MS).toISOString();
   db.prepare(`
     INSERT INTO otp_store (email, otp, first_name, expires_at, attempts)
     VALUES (lower(?), ?, ?, ?, 0)
@@ -760,7 +765,7 @@ function verifyOTP(email, enteredOtp) {
  *
  * Safety: the wrong-attempt counter is NOT reset on reuse (the cap of 5 guesses applies to the code's whole
  * life, stricter than before) and a locked code (5 wrong tries) always gets replaced by a fresh one.
- * Expiry slides to 10 minutes from the latest send so the "expires in 10 minutes" text stays true.
+ * Expiry slides to REG_OTP_TTL_MS (30 min) from the latest send so the "expires in 30 minutes" text stays true.
  *
  * @param {function} generate  () => new 6-digit code (injected so this file stays free of crypto details)
  * @returns {{ otp: string, reused: boolean, ageMs: number }}  ageMs = time since the code was last (re)issued
@@ -770,9 +775,9 @@ function issueOTP(email, firstName, generate) {
   const rec = db.prepare('SELECT otp, first_name, attempts, expires_at FROM otp_store WHERE email = lower(?)').get(key);
   const now = Date.now();
   if (rec && rec.attempts < 5 && new Date(rec.expires_at).getTime() > now) {
-    const ageMs = Math.max(0, 10 * 60 * 1000 - (new Date(rec.expires_at).getTime() - now));
+    const ageMs = Math.max(0, REG_OTP_TTL_MS - (new Date(rec.expires_at).getTime() - now));
     db.prepare('UPDATE otp_store SET expires_at = ?, first_name = ? WHERE email = lower(?)')
-      .run(new Date(now + 10 * 60 * 1000).toISOString(), firstName || rec.first_name || 'there', key);
+      .run(new Date(now + REG_OTP_TTL_MS).toISOString(), firstName || rec.first_name || 'there', key);
     return { otp: rec.otp, reused: true, ageMs };
   }
   const otp = generate();

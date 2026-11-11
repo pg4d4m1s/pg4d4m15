@@ -726,12 +726,12 @@ const warningBox = (msg) =>
     <p style="color:#92400e;font-size:13px;margin:0;">&#9888;&#65039; ${msg}</p>
   </div>`;
 
-const otpBlock = (otp, bg = '#eff6ff', border = '#bfdbfe', color = '#1d4ed8') =>
+const otpBlock = (otp, bg = '#eff6ff', border = '#bfdbfe', color = '#1d4ed8', minutes = 30) =>
   `<div style="text-align:center;margin:0 0 28px;">
     <div style="display:inline-block;background:${bg};border:2px solid ${border};border-radius:16px;padding:20px 40px;">
       <div style="font-size:42px;font-weight:800;color:${color};letter-spacing:14px;font-family:monospace;">${otp}</div>
     </div>
-    <p style="color:#94a3b8;font-size:12px;margin:10px 0 0;">&#9200; Expires in <strong>10 minutes</strong></p>
+    <p style="color:#94a3b8;font-size:12px;margin:10px 0 0;">&#9200; Expires in <strong>${minutes} minutes</strong></p>
   </div>`;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -752,7 +752,7 @@ async function sendOTPEmail(toEmail, otp, firstName = 'there', opts = {}) {
     warningBox(`<strong>Never share this code.</strong> ${appName} staff will never ask for your OTP.`) +
     `<p style="color:#94a3b8;font-size:13px;margin:0;">If you didn't request this, ignore this email.</p>`
   );
-  const text = `${appName} Verification\n\nHi ${firstName},\n\nYour verification code: ${otp}\n\nExpires in 10 minutes. Never share this code.\n\nIf you didn't request this, ignore this email.`;
+  const text = `${appName} Verification\n\nHi ${firstName},\n\nYour verification code: ${otp}\n\nExpires in 30 minutes. Never share this code.\n\nIf you didn't request this, ignore this email.`;
   const msg  = { to: toEmail, subject: `${otp} — Your ${appName} verification code`, html: body, text, kind: 'otp' };
   try {
     const result = await _send(msg);
@@ -795,7 +795,7 @@ async function sendPasswordResetEmail(toEmail, otp, firstName = 'there') {
     'linear-gradient(135deg,#7c3aed,#4f46e5)', '&#128273;', 'Password Reset', appName,
     greeting(firstName) +
     para(`Use this code to reset your <strong>${appName}</strong> password.`) +
-    otpBlock(otp, '#f5f3ff', '#c4b5fd', '#4f46e5') +
+    otpBlock(otp, '#f5f3ff', '#c4b5fd', '#4f46e5', 10) +
     `<p style="color:#475569;font-size:13px;margin:0;">If you didn't request a password reset, ignore this email. Your account is safe.</p>`
   );
   const text = `${appName} Password Reset\n\nHi ${firstName},\n\nYour reset code: ${otp}\n\nExpires in 10 minutes.\n\nIf you didn't request this, ignore this email.`;
