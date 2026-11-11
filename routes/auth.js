@@ -15,7 +15,7 @@ const geminiPool = require('../utils/geminiPool');
 const supportKb  = require('../utils/supportKnowledge');
 const rateLimit  = require('express-rate-limit');
 
-const { generateOTP, sendOTPEmail, sendWelcomeEmail, sendPasswordResetEmail, sendAccountPendingEmail, sendAccountApprovedEmail, sendAccountRejectedEmail, sendContactEmail } = require('../utils/emailService');
+const { generateOTP, sendOTPEmail, getRecipientMailInfo, sendWelcomeEmail, sendPasswordResetEmail, sendAccountPendingEmail, sendAccountApprovedEmail, sendAccountRejectedEmail, sendContactEmail } = require('../utils/emailService');
 const { rejectDisposableEmail } = require('../utils/disposableEmailCheck');
 const { uploadIdDocs } = require('../middleware/upload');
 const { checkSelfie } = require('../utils/faceCheck');
@@ -24,7 +24,7 @@ const {
   findUserByEmail, findUserById, findUserByUsername, findUserByPhone,
   createUser, submitIdVerification,
   getPendingAccounts, approveAccount, rejectAccount,
-  saveOTP, verifyOTP, saveResetOTP, verifyResetOTP, consumeResetOTP,
+  saveOTP, verifyOTP, issueOTP, isCurrentOTP, saveResetOTP, verifyResetOTP, consumeResetOTP,
   recordFailedLogin, checkLoginLock, clearLoginAttempts,
   getRoomAvailability, resolveRoomPreference,
 } = require('../utils/db');
@@ -128,9 +128,10 @@ router.post('/api/auth/send-otp', async (req, res) => {
 
     const pg        = req.session.pendingGoogle;
     const firstName = pg?.firstName || req.body.firstName || 'there';
-    const otp       = generateOTP();
-    saveOTP(email.trim(), otp, firstName);
-    const result    = await sendOTPEmail(email.trim(), otp, firstName);
+    // Re-use the code that is already waiting (a late first e-mail must still work), otherwise make a new one.
+    const { otp, reused, ageMs } = issueOTP(email.trim(), firstName, generateOTP);
+    if (reused) log.info(`[OTP] ${req.path} ${email.trim()}: re-sending the SAME code (issued ${Math.round(ageMs / 1000)}s ago) so earlier e-mails stay valid [${req._id}]`);
+    const result    = await sendOTPEmail(email.trim(), otp, firstName, { stillNeeded: () => isCurrentOTP(email.trim(), otp) });
     if (!result.success)
       return res.status(500).json({ error: 'Failed to send verification email. Please try again.' });
 
@@ -162,9 +163,10 @@ router.post('/api/auth/resend-otp', async (req, res) => {
       return res.status(400).json({ error: 'Session expired. Please start registration again.' });
     const pg        = req.session.pendingGoogle;
     const firstName = pg?.firstName || 'there';
-    const otp       = generateOTP();
-    saveOTP(email.trim(), otp, firstName);
-    const result    = await sendOTPEmail(email.trim(), otp, firstName);
+    // Re-use the code that is already waiting (a late first e-mail must still work), otherwise make a new one.
+    const { otp, reused, ageMs } = issueOTP(email.trim(), firstName, generateOTP);
+    if (reused) log.info(`[OTP] ${req.path} ${email.trim()}: re-sending the SAME code (issued ${Math.round(ageMs / 1000)}s ago) so earlier e-mails stay valid [${req._id}]`);
+    const result    = await sendOTPEmail(email.trim(), otp, firstName, { stillNeeded: () => isCurrentOTP(email.trim(), otp) });
     if (!result.success) return res.status(500).json({ error: 'Failed to resend. Please try again.' });
     const response = { success: true, message: 'New code sent!' };
     if (result.previewUrl) response.previewUrl = result.previewUrl;
@@ -182,7 +184,12 @@ router.post('/api/auth/verify-otp', async (req, res) => {
     const { email, otp } = req.body;
     if (!email || !otp) return res.status(400).json({ error: 'Email and code are required.' });
     const result = verifyOTP(email.trim(), otp.trim());
-    if (!result.valid) return res.status(400).json({ error: result.reason });
+    if (!result.valid) {
+      // Say what we know about the e-mails sent to this address, so "wrong code" can be told apart from
+      // "the e-mail never arrived and the resident is typing an older code".
+      log.warn(`[OTP] verify failed for ${email.trim()}: ${result.reason} | ${getRecipientMailInfo(email.trim()).summary} [${req._id}]`);
+      return res.status(400).json({ error: result.reason });
+    }
     const pending = req.session.pendingRegistration;
     if (!pending || pending.email !== email.trim())
       return res.status(400).json({ error: 'Session expired. Please register again.' });

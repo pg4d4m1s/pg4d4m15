@@ -747,6 +747,41 @@ function verifyOTP(email, enteredOtp) {
   return { valid: true };
 }
 
+/**
+ * Issue a registration code for `email` — or RE-USE the one already waiting.
+ *
+ * Why: every "resend" used to overwrite the stored code. When the first e-mail arrived late (mail
+ * providers sometimes defer a message for minutes), the code in it was already dead and the resident
+ * burned all 5 attempts on it. Re-sending the SAME code means every e-mail in the thread works.
+ *
+ * Safety: the wrong-attempt counter is NOT reset on reuse (the cap of 5 guesses applies to the code's whole
+ * life, stricter than before) and a locked code (5 wrong tries) always gets replaced by a fresh one.
+ * Expiry slides to 10 minutes from the latest send so the "expires in 10 minutes" text stays true.
+ *
+ * @param {function} generate  () => new 6-digit code (injected so this file stays free of crypto details)
+ * @returns {{ otp: string, reused: boolean, ageMs: number }}  ageMs = time since the code was last (re)issued
+ */
+function issueOTP(email, firstName, generate) {
+  const key = email.trim();
+  const rec = db.prepare('SELECT otp, first_name, attempts, expires_at FROM otp_store WHERE email = lower(?)').get(key);
+  const now = Date.now();
+  if (rec && rec.attempts < 5 && new Date(rec.expires_at).getTime() > now) {
+    const ageMs = Math.max(0, 10 * 60 * 1000 - (new Date(rec.expires_at).getTime() - now));
+    db.prepare('UPDATE otp_store SET expires_at = ?, first_name = ? WHERE email = lower(?)')
+      .run(new Date(now + 10 * 60 * 1000).toISOString(), firstName || rec.first_name || 'there', key);
+    return { otp: rec.otp, reused: true, ageMs };
+  }
+  const otp = generate();
+  saveOTP(key, otp, firstName);
+  return { otp, reused: false, ageMs: 0 };
+}
+
+/** True while `otp` is still the live (unexpired, unused) code for `email`. */
+function isCurrentOTP(email, otp) {
+  const rec = db.prepare('SELECT otp, expires_at FROM otp_store WHERE email = lower(?)').get(email.trim());
+  return !!rec && rec.otp === otp && new Date(rec.expires_at).getTime() > Date.now();
+}
+
 // ── Password Reset OTP ─────────────────────────────────
 function saveResetOTP(email, otp) {
   const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
@@ -2498,7 +2533,7 @@ module.exports = {
   users, findUserByEmail, findUserById, findUserByUsername, findUserByPhone,
   createUser, updateUser,
   // OTP
-  saveOTP, verifyOTP, saveResetOTP, verifyResetOTP, consumeResetOTP,
+  saveOTP, verifyOTP, issueOTP, isCurrentOTP, saveResetOTP, verifyResetOTP, consumeResetOTP,
   // Login
   recordFailedLogin, checkLoginLock, clearLoginAttempts,
   // Posts

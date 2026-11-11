@@ -49,6 +49,16 @@
  *
  * Optional: EMAIL_HTTP_TIMEOUT_MS (default 10000), EMAIL_DRIVER_COOLDOWN_MS (default 600000)
  *
+ * Delivery tracking (optional, recommended) — SendGrid answers "202 Accepted" as soon as it QUEUES a
+ * message, long before the recipient's mail server takes it, so a slow OTP looks perfect in our own log.
+ * The SendGrid Event Webhook (routes/sendgridWebhook.js) reports what happens next (delivered / deferred
+ * / bounce / dropped / blocked + the receiving server's reply). Enable it with:
+ *   SENDGRID_WEBHOOK_PUBLIC_KEY[2..5]  — the "Verification Key" of each SendGrid account's Signed Event Webhook
+ *   MAIL_SLOW_WARN_MS                  — warn when an e-mail is still unconfirmed after this long (default 30000)
+ *   OTP_FAILOVER_AFTER_MS              — re-send the SAME OTP via the next driver if SendGrid has not confirmed
+ *                                        delivery after this long, or reports bounce/dropped/blocked (default 0 = off;
+ *                                        needs the webhook; try 20000)
+ *
  * Env values are trimmed and stripped of accidental wrapping quotes, because
  * pasting KEY="abc" into the Railway variables UI keeps the quotes.
  */
@@ -56,7 +66,9 @@
 'use strict';
 
 const nodemailer = require('nodemailer');
+const crypto = require('crypto');
 const { createGmailClient } = require('./gmailApi');
+const log = require('./logger');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Environment helpers
@@ -190,6 +202,201 @@ function _isPermanentDriverError(driver, msg = '') {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Delivery tracking (SendGrid Event Webhook) + per-recipient send history
+// ─────────────────────────────────────────────────────────────────────────────
+/** Verification keys of the Signed Event Webhook, one per SendGrid account (base64 DER, as shown by SendGrid). */
+const WEBHOOK_KEYS = (() => {
+  const out = [];
+  for (let n = 1; n <= 5; n++) {
+    const name = `SENDGRID_WEBHOOK_PUBLIC_KEY${n === 1 ? '' : n}`;
+    const raw  = env(name);
+    if (!raw) continue;
+    try {
+      const der = Buffer.from(raw.replace(/-----(BEGIN|END) PUBLIC KEY-----|\s+/g, ''), 'base64');
+      out.push({ slot: n, key: crypto.createPublicKey({ key: der, format: 'der', type: 'spki' }) });
+    } catch (e) {
+      console.warn(`⚠️  [emailService] ${name} is not a valid public key (${e.message}) — ignored`);
+    }
+  }
+  return out;
+})();
+
+const TRACKING_ENABLED      = WEBHOOK_KEYS.length > 0;
+const SLOW_DELIVERY_WARN_MS = Number(env('MAIL_SLOW_WARN_MS')) || 30_000;
+let   OTP_FAILOVER_AFTER_MS = Number(env('OTP_FAILOVER_AFTER_MS')) || 0;
+if (OTP_FAILOVER_AFTER_MS > 0 && !TRACKING_ENABLED) {
+  console.warn('⚠️  [emailService] OTP_FAILOVER_AFTER_MS needs SENDGRID_WEBHOOK_PUBLIC_KEY (delivery events) — failover disabled');
+  OTP_FAILOVER_AFTER_MS = 0;
+}
+
+const TRACK_TTL_MS      = 60 * 60 * 1000;
+const TRACK_MAX         = 500;
+const HISTORY_WINDOW_MS = 15 * 60 * 1000;
+const REPEAT_WARN_AT    = 3; // warn when this many e-mails went to one address inside the window
+
+const _tracked = new Map(); // SendGrid message id → record
+const _history = new Map(); // lower-case e-mail → [{ at, rec }]
+
+function _clearTimers(rec) {
+  (rec.timers || []).forEach(clearTimeout);
+  rec.timers = [];
+}
+
+function _pruneTracked(now = Date.now()) {
+  for (const [id, r] of _tracked) {            // Map iterates oldest-first; deleting while iterating is safe
+    if (now - r.acceptedAt > TRACK_TTL_MS || _tracked.size > TRACK_MAX) {
+      _clearTimers(r);
+      _tracked.delete(id);
+    }
+  }
+}
+
+/** Remember an accepted send. Returns { count, prevAgoMs } for this recipient inside the window. */
+function _recordSend(to, rec) {
+  const key = String(to).trim().toLowerCase();
+  const now = Date.now();
+  const list = (_history.get(key) || []).filter(h => now - h.at < HISTORY_WINDOW_MS);
+  const prev = list[list.length - 1];
+  list.push({ at: now, rec });
+  _history.set(key, list);
+  if (_history.size > 2000) {
+    for (const [k, v] of _history) {
+      if (!v.length || now - v[v.length - 1].at > HISTORY_WINDOW_MS) _history.delete(k);
+    }
+  }
+  return { count: list.length, prevAgoMs: prev ? now - prev.at : null };
+}
+
+/**
+ * What do we know about the e-mails sent to this address recently? Used by the verify-otp route so a
+ * "wrong code" log line says whether the user is probably typing a code from an e-mail that never arrived.
+ */
+function getRecipientMailInfo(email) {
+  const now  = Date.now();
+  const list = (_history.get(String(email || '').trim().toLowerCase()) || []).filter(h => now - h.at < HISTORY_WINDOW_MS);
+  if (!list.length) {
+    return { sends: 0, summary: 'no e-mail accepted by a provider for this address in the last 15 min (server restarted, or the send failed)' };
+  }
+  const last = list[list.length - 1];
+  const r    = last.rec;
+  const ago  = Math.round((now - last.at) / 1000);
+  let status;
+  if (r.tracked) status = r.status === 'accepted' ? 'accepted by SendGrid, no delivery event yet' : r.status + (r.deferrals ? ` after ${r.deferrals} deferral(s)` : '');
+  else           status = `unknown (no delivery events for ${r.driver}${TRACKING_ENABLED ? ' — add its webhook key' : '; webhook not configured'})`;
+  const why = r.reason ? ` (${r.reason.slice(0, 160)})` : '';
+  return {
+    sends: list.length,
+    summary: `${list.length} e-mail(s) to this address in 15 min | latest ${r.kind} via ${r.driver} ${ago}s ago | delivery: ${status}${why}`,
+  };
+}
+
+/** Public keys for routes/sendgridWebhook.js to verify signatures with. Empty = tracking disabled. */
+function getWebhookKeys() { return WEBHOOK_KEYS; }
+
+/**
+ * Feed SendGrid Event Webhook events in. Logs one line per delivery event with the time since we
+ * handed the message over, plus the receiving server's own reply (the real reason for a delay).
+ * Returns the number of events handled.
+ */
+function recordSendGridEvents(events) {
+  if (!Array.isArray(events)) return 0;
+  let handled = 0;
+  for (const ev of events.slice(0, 1000)) {
+    if (!ev || typeof ev !== 'object') continue;
+    const type = String(ev.event || '');
+    if (!['processed', 'deferred', 'delivered', 'bounce', 'dropped', 'blocked', 'spamreport'].includes(type)) continue;
+    handled++;
+
+    const id     = String(ev.sg_message_id || '').split('.')[0];
+    const rec    = _tracked.get(id);
+    const to     = ev.email || rec?.to || '?';
+    const evAt   = Number(ev.timestamp) ? Number(ev.timestamp) * 1000 : Date.now();
+    const lag    = rec ? Math.max(0, evAt - rec.acceptedAt) : null;
+    const lagStr = lag == null ? '' : ` +${(lag / 1000).toFixed(1)}s after we handed it over`;
+    const detail = String(ev.response || ev.reason || '').replace(/\s+/g, ' ').slice(0, 300);
+    const tag    = rec ? `${rec.kind} via ${rec.driver}` : 'not sent by this process';
+    const idStr  = id ? ` | id=${id}` : '';
+
+    if (rec) {
+      rec.status      = type;
+      rec.lastEventAt = evAt;
+      if (type === 'deferred') rec.deferrals++;
+      if (detail && type !== 'delivered' && type !== 'processed') rec.reason = detail;
+    }
+
+    switch (type) {
+      case 'processed':
+        break; // SendGrid queued it — nothing to say yet
+      case 'delivered':
+        if (rec) { rec.delivered = true; rec.reason = null; _clearTimers(rec); }
+        if (lag != null && lag > SLOW_DELIVERY_WARN_MS) {
+          log.warn(`[MAIL-EVT] 🐌 delivered → ${to} (${tag})${lagStr} — SLOW, the delay was between SendGrid and the recipient's server, not in our app${detail ? ` | ${detail}` : ''}${idStr}`);
+        } else {
+          log.info(`[MAIL-EVT] ✔ delivered → ${to} (${tag})${lagStr}${detail ? ` | ${detail}` : ''}${idStr}`);
+        }
+        break;
+      case 'deferred':
+        log.warn(`[MAIL-EVT] ⏳ deferred (attempt ${ev.attempt || '?'}) → ${to} (${tag})${lagStr} | ${detail || 'no reason given'}${idStr}`);
+        break;
+      case 'spamreport':
+        log.warn(`[MAIL-EVT] 🚩 recipient marked as spam → ${to} (${tag})${idStr}`);
+        break;
+      default: // bounce | dropped | blocked
+        log.error(`[MAIL-EVT] ❌ ${type} → ${to} (${tag})${lagStr} | ${detail || 'no reason given'}${idStr}`);
+        if (rec && rec.onFail) rec.onFail(type);
+    }
+  }
+  return handled;
+}
+
+/**
+ * After SendGrid accepts a message, watch for its delivery event. Warns when it is overdue and — if
+ * OTP_FAILOVER_AFTER_MS is set — re-sends through the next driver (same OTP, so a late first e-mail
+ * is still valid). `failover(why)` is supplied by the caller and must be idempotent-safe.
+ */
+function _armDeliveryWatch(rec, failover) {
+  if (!TRACKING_ENABLED || !rec.tracked) return;
+  rec.timers = [];
+
+  const warnTimer = setTimeout(() => {
+    if (rec.delivered) return;
+    log.warn(
+      `[MAIL] ⏱ ${rec.kind} to ${rec.to} NOT confirmed delivered ${Math.round(SLOW_DELIVERY_WARN_MS / 1000)}s after ${rec.driver} accepted it | ` +
+      `SendGrid status=${rec.status}${rec.reason ? ` | last reply: ${rec.reason}` : ' | no event yet'} | id=${rec.id}`
+    );
+  }, SLOW_DELIVERY_WARN_MS);
+  warnTimer.unref();
+  rec.timers.push(warnTimer);
+
+  if (OTP_FAILOVER_AFTER_MS > 0 && failover) {
+    const run = async (why) => {
+      if (rec.delivered || rec.failedOver) return;
+      rec.failedOver = true;
+      try { await failover(why); }
+      catch (e) { log.error(`[MAIL] ↪ failover for ${rec.to} crashed: ${e.message}`); }
+    };
+    rec.onFail = (type) => run(`SendGrid reported ${type}`);
+    const t = setTimeout(
+      () => run(`no delivery confirmation ${Math.round(OTP_FAILOVER_AFTER_MS / 1000)}s after ${rec.driver} accepted it`),
+      OTP_FAILOVER_AFTER_MS
+    );
+    t.unref();
+    rec.timers.push(t);
+  }
+}
+
+/** Drivers already tried: the chain up to and including `driver`. */
+function _driversThrough(driver) {
+  return new Set(DRIVER_CHAIN.slice(0, DRIVER_CHAIN.indexOf(driver) + 1));
+}
+
+function _fromFor(driver) {
+  if (driver === 'gmailapi') return GMAIL_API.user;
+  if (driver === 'smtp')     return FROM_EMAIL();
+  return SENDGRID_ACCOUNTS.find(a => a.driver === driver)?.from;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // SMTP transporter (Gmail) — local/VPS
 // ─────────────────────────────────────────────────────────────────────────────
 let smtpTransporter = null;
@@ -280,6 +487,9 @@ function _redact(s = '') {
   SENDGRID_ACCOUNTS.forEach(a => console.log(`   SendGrid #${a.slot}  : from=${a.from}`));
   if (GMAIL_API.enabled) console.log(`   Gmail API    : user=${GMAIL_API.user}`);
   console.log(`   Console OTP  : ${CONSOLE_COUNTS_AS_SENT ? 'counts as sent (dev / ALLOW_CONSOLE_OTP)' : 'treated as FAILURE (production)'}`);
+  console.log(`   Delivery log : ${TRACKING_ENABLED
+    ? `ON — webhook keys for SendGrid slot(s) ${WEBHOOK_KEYS.map(k => k.slot).join(', ')}, slow-warn ${Math.round(SLOW_DELIVERY_WARN_MS / 1000)}s, OTP failover ${OTP_FAILOVER_AFTER_MS ? `after ${Math.round(OTP_FAILOVER_AFTER_MS / 1000)}s` : 'off'}`
+    : 'OFF — set SENDGRID_WEBHOOK_PUBLIC_KEY (+ add the webhook in SendGrid) to see deferred/delivered/bounced events'}`);
 
   if (DRIVER_CHAIN.includes('smtp')) await initSMTP();
 })().catch(console.error);
@@ -288,7 +498,7 @@ function _redact(s = '') {
 // Per-driver send implementations
 // ─────────────────────────────────────────────────────────────────────────────
 /** One SendGrid account. Throws "SendGrid #N <status>: <detail>" on failure. */
-async function _sendSendGrid(account, { to, subject, html, text }) {
+async function _sendSendGrid(account, { to, subject, html, text, kind }) {
   const label = `SendGrid #${account.slot}`;
   let res;
   try {
@@ -306,6 +516,10 @@ async function _sendSendGrid(account, { to, subject, html, text }) {
           { type: 'text/plain', value: text },
           { type: 'text/html',  value: html },
         ],
+        // Click tracking rewrites every link to a sendgrid.net redirect and open tracking adds a pixel —
+        // both are spam signals on a one-time-code e-mail. Category = easy filter in SendGrid's Activity Feed.
+        tracking_settings: { click_tracking: { enable: false, enable_text: false }, open_tracking: { enable: false } },
+        categories: [`damis-${kind || 'mail'}`],
       }),
       // Without a timeout a stalled connection would hold the HTTP request open.
       signal: AbortSignal.timeout(HTTP_TIMEOUT_MS),
@@ -362,10 +576,12 @@ const _DRIVER_FN = {
 // Returns { success, driver, messageId?, delivered, error? }
 //   delivered=true only when a real provider accepted the message.
 // ─────────────────────────────────────────────────────────────────────────────
-async function _send({ to, subject, html, text }) {
+async function _send({ to, subject, html, text, kind = 'mail', skip = null }) {
   const attempts = []; // human-readable reason per driver that did not deliver
 
   for (const driver of DRIVER_CHAIN) {
+    if (skip && skip.has(driver)) continue; // already used (failover)
+
     if (driver === 'console') {
       const reason = attempts.length ? attempts.join(' | ') : 'no real email driver configured';
       console.error(`❌ [emailService] NOT DELIVERED → ${to} | "${_redact(subject).slice(0, 50)}" | ${reason}`);
@@ -380,23 +596,33 @@ async function _send({ to, subject, html, text }) {
       continue;
     }
 
+    const t0 = Date.now();
     try {
-      const messageId = await _DRIVER_FN[driver]({ to, subject, html, text });
+      const messageId = await _DRIVER_FN[driver]({ to, subject, html, text, kind });
+      const ms = Date.now() - t0;
       if (h.status === 'degraded') console.log(`✅ [emailService] ${driver} recovered — back in rotation`);
       h.status = 'ok'; h.since = null; h.lastError = null; h.lastOkAt = Date.now();
-      return { success: true, driver, messageId, delivered: true };
+      const rec = {
+        id: messageId, to, kind, driver, from: _fromFor(driver), acceptedAt: Date.now(),
+        status: 'accepted', reason: null, deferrals: 0, delivered: false, failedOver: false,
+        tracked: !!messageId && WEBHOOK_KEYS.some(k => k.slot === SENDGRID_ACCOUNTS.find(a => a.driver === driver)?.slot), timers: [],
+      };
+      if (rec.tracked) { _pruneTracked(); _tracked.set(messageId, rec); }
+      const sends = _recordSend(to, rec);
+      return { success: true, driver, messageId, delivered: true, ms, from: rec.from, rec, sends };
     } catch (err) {
       const msg = err.message || String(err);
+      const ms  = Date.now() - t0;
       h.lastError = msg;
-      attempts.push(`${driver}: ${msg}`);
+      attempts.push(`${driver}: ${msg} (${ms}ms)`);
 
       if (_isPermanentDriverError(driver, msg)) {
         h.status  = 'degraded';
         h.since   = h.since || Date.now();
         h.retryAt = Date.now() + COOLDOWN_MS;
-        console.error(`❌ [emailService] ${driver} DEGRADED (retry in ${Math.round(COOLDOWN_MS / 60000)}m): ${msg}`);
+        console.error(`❌ [emailService] ${driver} DEGRADED after ${ms}ms (retry in ${Math.round(COOLDOWN_MS / 60000)}m): ${msg}`);
       } else {
-        console.error(`⚠️  [emailService] ${driver} transient error: ${msg} → trying next driver`);
+        console.error(`⚠️  [emailService] ${driver} transient error after ${ms}ms: ${msg} → trying next driver`);
       }
     }
   }
@@ -482,7 +708,12 @@ const otpBlock = (otp, bg = '#eff6ff', border = '#bfdbfe', color = '#1d4ed8') =>
 // ─────────────────────────────────────────────────────────────────────────────
 // Public send functions
 // ─────────────────────────────────────────────────────────────────────────────
-async function sendOTPEmail(toEmail, otp, firstName = 'there') {
+/**
+ * @param {object}   [opts]
+ * @param {function} [opts.stillNeeded] returns false once this code is no longer wanted (verified / replaced) —
+ *                                      stops a late failover e-mail from going out.
+ */
+async function sendOTPEmail(toEmail, otp, firstName = 'there', opts = {}) {
   const appName = APP_NAME();
   const body = emailWrapper(
     'linear-gradient(135deg,#1e3a8a,#2563eb)', '&#128309;', 'Email Verification', appName,
@@ -493,11 +724,34 @@ async function sendOTPEmail(toEmail, otp, firstName = 'there') {
     `<p style="color:#94a3b8;font-size:13px;margin:0;">If you didn't request this, ignore this email.</p>`
   );
   const text = `${appName} Verification\n\nHi ${firstName},\n\nYour verification code: ${otp}\n\nExpires in 10 minutes. Never share this code.\n\nIf you didn't request this, ignore this email.`;
+  const msg  = { to: toEmail, subject: `${otp} — Your ${appName} verification code`, html: body, text, kind: 'otp' };
   try {
-    const result = await _send({ to: toEmail, subject: `${otp} — Your ${appName} verification code`, html: body, text });
+    const result = await _send(msg);
     if (result.driver !== 'console') {
       const ts = new Date().toLocaleTimeString('en-PH', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-      console.log(`  ✉  OTP sent [${result.driver}] → ${toEmail} | ${ts}${result.messageId ? ` | id=${result.messageId}` : ''}`);
+      const repeat = result.sends.count >= REPEAT_WARN_AT
+        ? ` ⚠ ${result.sends.count} e-mails to this address in 15 min — Gmail may throttle/defer repeats` : '';
+      console.log(
+        `  ✉  OTP sent [${result.driver}] → ${toEmail} | ${ts}${result.messageId ? ` | id=${result.messageId}` : ''}` +
+        ` | handed over in ${result.ms}ms | from=${result.from || '?'}` +
+        ` | #${result.sends.count} in 15 min${result.sends.prevAgoMs != null ? ` (previous ${Math.round(result.sends.prevAgoMs / 1000)}s ago)` : ''}${repeat}`
+      );
+
+      _armDeliveryWatch(result.rec, async (why) => {
+        if (opts.stillNeeded && !opts.stillNeeded()) {
+          log.info(`[MAIL] ↪ failover skipped for ${toEmail}: the code was already used or replaced (${why})`);
+          return;
+        }
+        const skip = _driversThrough(result.driver);
+        if (!DRIVER_CHAIN.some(d => d !== 'console' && !skip.has(d))) {
+          log.warn(`[MAIL] ↪ no other e-mail driver to fail over to for ${toEmail} (${why})`);
+          return;
+        }
+        log.warn(`[MAIL] ↪ OTP failover → ${toEmail}: ${why}; re-sending the SAME code through the next driver`);
+        const r2 = await _send({ ...msg, skip });
+        if (r2.delivered) log.info(`[MAIL] ↪ failover OTP accepted by ${r2.driver} in ${r2.ms}ms → ${toEmail}${r2.messageId ? ` | id=${r2.messageId}` : ''}`);
+        else              log.error(`[MAIL] ↪ failover OTP NOT delivered → ${toEmail} | ${r2.error}`);
+      });
     }
     return result;
   } catch (err) {
@@ -517,7 +771,7 @@ async function sendPasswordResetEmail(toEmail, otp, firstName = 'there') {
   );
   const text = `${appName} Password Reset\n\nHi ${firstName},\n\nYour reset code: ${otp}\n\nExpires in 10 minutes.\n\nIf you didn't request this, ignore this email.`;
   try {
-    const result = await _send({ to: toEmail, subject: `${otp} — Your ${appName} password reset code`, html: body, text });
+    const result = await _send({ to: toEmail, subject: `${otp} — Your ${appName} password reset code`, html: body, text, kind: 'reset' });
     if (result.driver !== 'console') console.log(`  🔑 Password reset sent [${result.driver}] → ${toEmail}`);
     return result;
   } catch (err) {
@@ -766,4 +1020,9 @@ module.exports = {
   getDriver: () => (DRIVER.startsWith('sendgrid') ? 'sendgrid' : DRIVER),
   /** Per-driver health snapshot (no secrets) — safe to expose on an admin route */
   getHealth,
+  /** SendGrid Event Webhook plumbing (routes/sendgridWebhook.js) */
+  recordSendGridEvents,
+  getWebhookKeys,
+  /** Recent-send summary for one address — used in the verify-otp failure log */
+  getRecipientMailInfo,
 };

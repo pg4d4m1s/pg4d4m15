@@ -42,6 +42,7 @@ const adminRoutes        = require('./routes/admin');
 const aiRoutes           = require('./routes/ai');
 const researchRoutes     = require('./routes/research');
 const announcementRoutes = require('./routes/announcements');
+const sendgridWebhookRoutes = require('./routes/sendgridWebhook');
 
 const app        = express();
 const httpServer = http.createServer(app);
@@ -190,6 +191,11 @@ if (process.env.NODE_ENV !== 'production') {
 } else {
   app.use(morgan('combined', { skip: morganSkip }));
 }
+
+// ── SendGrid Event Webhook ────────────────────────────
+// Mounted BEFORE the global body parser (it verifies the signature against the raw bytes) and before
+// session/passport (SendGrid is a server, not a browser — it must not create a session row per POST).
+app.use('/api/webhooks/sendgrid', sendgridWebhookRoutes);
 
 // ── Body parsers ──────────────────────────────────────
 app.use(express.json());
