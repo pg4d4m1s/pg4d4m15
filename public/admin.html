@@ -5794,9 +5794,10 @@
 
   function buildDormRooms() {
     // Build 26 rooms from local state (or DB once backend is ready)
+    // Default layout: Rooms 1-13 = male (ground floor), 14-26 = female (second floor)
     const rooms = [];
     for (let i = 1; i <= 26; i++) {
-      const gender = i <= 13 ? 'female' : 'male';
+      const gender = i <= 13 ? 'male' : 'female';
       rooms.push({ roomNo: i, gender, beds: [
         { bed: 1, student: null },
         { bed: 2, student: null },

@@ -418,6 +418,11 @@ migrate(`CREATE TABLE IF NOT EXISTS friendships (id TEXT PRIMARY KEY, user_a TEX
 migrate(`ALTER TABLE users ADD COLUMN civil_status       TEXT DEFAULT ''`);
 
 // ── Dormitory Management Tables ────────────────────────────────────
+// Default dorm layout: Rooms 1–13 = MALE (ground floor), Rooms 14–26 = FEMALE (second floor).
+// Single source of truth for the first-run seeder AND the one-time layout migration
+// (see "Dorm layout migration" further down, after bed_assignments/room_preference exist).
+function defaultRoomGender(roomNo) { return roomNo <= 13 ? 'male' : 'female'; }
+
 // CREATE TABLE IF NOT EXISTS never throws "already exists" in SQLite — the
 // try/catch here guards only the seeder logic inside, not the DDL itself.
 try {
@@ -435,10 +440,9 @@ try {
   if (roomCount === 0) {
     const seedRoom = db.prepare('INSERT INTO dorm_rooms (room_number, gender) VALUES (?, ?)');
     db.transaction(() => {
-      for (let i = 1;  i <= 13; i++) seedRoom.run(i, 'female');
-      for (let i = 14; i <= 26; i++) seedRoom.run(i, 'male');
+      for (let i = 1; i <= 26; i++) seedRoom.run(i, defaultRoomGender(i));
     })();
-    log.info('[db] Seeded 26 default dorm rooms (first-run only).');
+    log.info('[db] Seeded 26 default dorm rooms — 1-13 male (ground floor), 14-26 female (2nd floor) (first-run only).');
   }
 } catch (e) {
   log.warn(`[db] dorm_rooms setup error: ${e.message}`);
@@ -2196,6 +2200,65 @@ migrate(`ALTER TABLE users ADD COLUMN room_preference INTEGER DEFAULT NULL`);
 // Free-text request from the applicant, e.g. "I'd like to share a room with Maria Santos".
 migrate(`ALTER TABLE users ADD COLUMN roommate_note TEXT DEFAULT ''`);
 db.exec(`CREATE INDEX IF NOT EXISTS idx_users_room_pref ON users(room_preference);`);
+
+try {
+  // ── Dorm layout migration (one-time). Old default was 1-13 female / 14-26 male ──────────────
+  // Existing databases (e.g. production on Railway) were already seeded with the OLD
+  // layout, and the seeder above never runs again, so flip them once here.
+  // Safety rules:
+  //   • runs once only (flag in app_settings) — later manual admin edits are never overwritten
+  //   • a room is NOT flipped if a resident of the other gender is already bedded in it
+  //     (it is skipped and logged loudly so the admin can sort it out manually)
+  //   • only rooms 1–26 that exist are touched; custom rooms (27+) are left alone
+  const LAYOUT_FLAG = 'dorm_layout_male_1_13_female_14_26';
+  const layoutDone = db.prepare('SELECT value FROM app_settings WHERE key=?').get(LAYOUT_FLAG);
+  if (!layoutDone) {
+    const existing = db.prepare('SELECT id, room_number, gender FROM dorm_rooms WHERE room_number BETWEEN 1 AND 26').all();
+    const occupantSexes = db.prepare(
+      'SELECT u.sex FROM bed_assignments ba JOIN users u ON u.id = ba.user_id WHERE ba.room_id = ?'
+    );
+    const flipRoom = db.prepare('UPDATE dorm_rooms SET gender = ? WHERE id = ?');
+    const flipped = [];
+    const skipped = [];
+    db.transaction(() => {
+      for (const r of existing) {
+        const target = defaultRoomGender(r.room_number);
+        if (r.gender === target) continue;
+        const conflict = occupantSexes.all(r.id).some(o => {
+          const v = String(o.sex || '').trim().toLowerCase();
+          const g = (v === 'male' || v === 'm') ? 'male' : (v === 'female' || v === 'f') ? 'female' : null;
+          return g && g !== target;
+        });
+        if (conflict) { skipped.push(r.room_number); continue; }
+        flipRoom.run(target, r.id);
+        flipped.push(r.room_number);
+      }
+      db.prepare('INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)')
+        .run(LAYOUT_FLAG, new Date().toISOString());
+    })();
+    log.info(`[db] Dorm layout migration: flipped ${flipped.length} room(s) to 1-13 male / 14-26 female.`);
+    if (skipped.length) {
+      log.warn(`[db] Dorm layout migration: SKIPPED room(s) ${skipped.join(', ')} — residents of the other gender are still assigned. Move them, then use Edit Room to change the gender.`);
+    }
+    // Registration room preferences were chosen against the old layout. They are NOT
+    // rewritten (that would be guessing), but surface how many now point at a room of
+    // the wrong gender so the admin knows to expect mismatches when assigning beds.
+    try {
+      const stale = db.prepare(`
+        SELECT COUNT(*) AS n
+          FROM users u JOIN dorm_rooms r ON r.room_number = u.room_preference
+         WHERE u.room_preference IS NOT NULL
+           AND LOWER(COALESCE(u.sex,'')) IN ('male','female')
+           AND LOWER(u.sex) <> r.gender
+      `).get().n;
+      if (stale) log.warn(`[db] ${stale} resident(s) have a registration room preference in a room of the other gender after the layout change (not modified).`);
+    } catch (e) {
+      log.warn(`[db] Could not count stale room preferences: ${e.message}`);
+    }
+  }
+} catch (e) {
+  log.warn(`[db] Dorm layout migration failed (will retry next restart): ${e.message}`);
+}
 
 // idx_users_status depends on account_status, which is only guaranteed to exist
 // once the migration above (and the account_status migration earlier in this
