@@ -53,6 +53,8 @@
     <input id="nav-search" type="text" placeholder="Search people or posts…" class="bg-transparent text-sm outline-none w-full text-slate-700 dark:text-slate-200 placeholder-slate-400"/>
   </div>
   <div class="flex items-center gap-2">
+    <!-- Search (mobile only; desktop has the search box) -->
+    <a href="/search.html" aria-label="Search" class="md:hidden w-9 h-9 rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 flex items-center justify-center transition-colors"><i class="fa-solid fa-magnifying-glass text-slate-600 dark:text-slate-300 text-sm"></i></a>
     <!-- Messages -->
     <a href="/messages.html" class="relative w-9 h-9 rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 flex items-center justify-center transition-colors">
       <i class="fa-regular fa-comment-dots text-slate-600 dark:text-slate-300 text-sm"></i>
@@ -215,30 +217,18 @@
 </div>
 
 <!-- ═══ MOBILE BOTTOM NAV ═══ -->
-<nav id="mobile-nav" class="fixed bottom-0 left-0 right-0 z-90 bg-white dark:bg-slate-900 border-t border-slate-200 dark:border-slate-800 flex items-center justify-around px-1 py-2 md:hidden">
-  <a href="/feed.html" class="flex flex-col items-center gap-0.5 text-brand-600 px-1 py-1">
-    <i class="fa-solid fa-house text-lg"></i><span class="text-[10px] font-medium">Home</span>
+<nav id="mobile-nav" aria-label="Main navigation" class="fixed bottom-0 left-0 right-0 z-[90] bg-white dark:bg-slate-900 border-t border-slate-200 dark:border-slate-800 flex items-center justify-around px-1 py-2 md:hidden">
+  <a href="/feed.html" aria-current="page" class="flex flex-col items-center gap-0.5 px-1 py-1 text-brand-600">
+    <i class="fa-solid fa-house text-xl"></i><span class="text-[10px] font-medium">Home</span>
   </a>
-  <a href="/search.html" class="flex flex-col items-center gap-0.5 text-slate-400 px-1 py-1">
-    <i class="fa-solid fa-magnifying-glass text-lg"></i><span class="text-[10px]">Search</span>
+  <a href="/feed.html?panel=dorm" onclick="openDormPanel(); return false;" class="flex flex-col items-center gap-0.5 px-1 py-1 text-slate-400">
+    <i class="fa-solid fa-building text-xl"></i><span class="text-[10px]">Dormitory</span>
   </a>
-  <a href="#" onclick="openDormPanel(); return false;" class="flex flex-col items-center gap-0.5 text-slate-400 px-1 py-1">
-    <i class="fa-solid fa-building text-lg"></i><span class="text-[10px]">Dormitory</span>
+  <a href="/feed.html?panel=residents" onclick="openResidentsPanel(); return false;" class="flex flex-col items-center gap-0.5 px-1 py-1 text-slate-400">
+    <i class="fa-solid fa-people-group text-xl"></i><span class="text-[10px]">Residents</span>
   </a>
-  <a href="#" onclick="openResidentsPanel(); return false;" class="flex flex-col items-center gap-0.5 text-slate-400 px-1 py-1">
-    <i class="fa-solid fa-people-group text-lg"></i><span class="text-[10px]">Residents</span>
-  </a>
-  <a href="/messages.html" class="relative flex flex-col items-center gap-0.5 text-slate-400 px-1 py-1">
-    <i class="fa-regular fa-comment-dots text-lg"></i><span class="text-[10px]">Messages</span>
-    <span id="mob-msg-badge" class="absolute -top-1 right-1 notif-badge hidden">0</span>
-  </a>
-  <a href="/notifications.html" class="relative flex flex-col items-center gap-0.5 text-slate-400 px-1 py-1">
-    <i class="fa-solid fa-bell text-lg"></i><span class="text-[10px]">Alerts</span>
-    <span id="mob-notif-badge" class="absolute -top-1 right-1 notif-badge hidden">0</span>
-  </a>
-  <a href="#" onclick="goProfile()" class="flex flex-col items-center gap-0.5 text-slate-400 px-1 py-1">
-    <img id="mob-avatar" src="" class="w-6 h-6 rounded-full object-cover" onerror="this.src='https://ui-avatars.com/api/?name=U&background=1a8cff&color=fff'"/>
-    <span class="text-[10px]">Profile</span>
+  <a href="#" onclick="goProfile(); return false;" class="flex flex-col items-center gap-0.5 px-1 py-1 text-slate-400">
+    <i class="fa-solid fa-user text-xl"></i><span class="text-[10px]">Profile</span>
   </a>
 </nav>
 
@@ -463,7 +453,7 @@
     window.__currentUser=currentUser;
     socket.emit('join',currentUser.id);
     const av=currentUser.avatar||avatarUrl(currentUser.firstName,currentUser.lastName);
-    ['nav-avatar','create-avatar','left-avatar','mob-avatar'].forEach(id=>{const el=document.getElementById(id);if(el)el.src=av;});
+    ['nav-avatar','create-avatar','left-avatar'].forEach(id=>{const el=document.getElementById(id);if(el)el.src=av;});
     document.getElementById('left-name').textContent=fullName(currentUser);
     document.getElementById('left-username').textContent=`@${currentUser.username}`;
     document.getElementById('left-user-card').classList.remove('hidden');
@@ -755,8 +745,8 @@
         fetch('/api/notifications/unread-count').then(r=>r.json()),
         fetch('/api/messages/unread-count').then(r=>r.json()).catch(()=>({count:0}))
       ]);
-      setBadge('notif-badge',n.count); setBadge('sidebar-notif-badge',n.count); setBadge('mob-notif-badge',n.count);
-      setBadge('msg-badge',m.count);   setBadge('sidebar-msg-badge',m.count);   setBadge('mob-msg-badge',m.count);
+      setBadge('notif-badge',n.count); setBadge('sidebar-notif-badge',n.count);
+      setBadge('msg-badge',m.count);   setBadge('sidebar-msg-badge',m.count);  
     }catch{}
   }
   function setBadge(id,count){const el=document.getElementById(id);if(!el)return;if(count>0){el.textContent=count>99?'99+':count;el.classList.remove('hidden');}else el.classList.add('hidden');}
@@ -1691,7 +1681,18 @@
     }).join('');
   }
 
-    init();
+  // Landing from another page's bottom nav (/feed.html?panel=dorm | residents): open that slide-over,
+  // then drop the param so a refresh or Back doesn't re-open it.
+  function openPanelFromUrl() {
+    if (!currentUser) return;                       // init() bailed out (not logged in) and is redirecting
+    const p = new URLSearchParams(location.search).get('panel');
+    if (!p) return;
+    history.replaceState(null, '', location.pathname + location.hash);
+    if (p === 'dorm') openDormPanel();
+    else if (p === 'residents') openResidentsPanel();
+  }
+
+    init().then(openPanelFromUrl);
 </script>
 
 <!-- AI Caption Generator Modal -->

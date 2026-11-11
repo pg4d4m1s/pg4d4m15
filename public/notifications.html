@@ -41,6 +41,7 @@
     <input id="nav-search" type="text" placeholder="Search..." class="bg-transparent text-sm outline-none w-full text-slate-700 dark:text-slate-200 placeholder-slate-400"/>
   </div>
   <div class="flex items-center gap-2">
+    <a href="/search.html" aria-label="Search" class="md:hidden w-9 h-9 rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 flex items-center justify-center transition-colors"><i class="fa-solid fa-magnifying-glass text-slate-600 dark:text-slate-300 text-sm"></i></a>
     <a href="/messages.html" class="relative w-9 h-9 rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 flex items-center justify-center transition-colors">
       <i class="fa-regular fa-comment-dots text-slate-600 dark:text-slate-300 text-sm"></i><span id="msg-badge" class="notif-badge hidden">0</span>
     </a>
@@ -111,12 +112,19 @@
 </div>
 
 <!-- MOBILE NAV -->
-<nav id="mobile-nav" class="fixed bottom-0 left-0 right-0 z-[90] bg-white dark:bg-slate-900 border-t border-slate-200 dark:border-slate-800 flex items-center justify-around px-2 py-2 md:hidden">
-  <a href="/feed.html" class="flex flex-col items-center gap-0.5 text-slate-400 px-3 py-1"><i class="fa-solid fa-house text-xl"></i><span class="text-xs">Home</span></a>
-  <a href="/search.html" class="flex flex-col items-center gap-0.5 text-slate-400 px-3 py-1"><i class="fa-solid fa-magnifying-glass text-xl"></i><span class="text-xs">Search</span></a>
-  <a href="/messages.html" class="relative flex flex-col items-center gap-0.5 text-slate-400 px-3 py-1"><i class="fa-regular fa-comment-dots text-xl"></i><span class="text-xs">Messages</span><span id="mob-msg-badge" class="absolute -top-1 right-1 notif-badge hidden">0</span></a>
-  <a href="/notifications.html" class="relative flex flex-col items-center gap-0.5 text-brand-600 px-3 py-1"><i class="fa-solid fa-bell text-xl"></i><span class="text-xs font-medium">Alerts</span></a>
-  <a href="#" onclick="goProfile()" class="flex flex-col items-center gap-0.5 text-slate-400 px-3 py-1"><i class="fa-solid fa-user text-xl"></i><span class="text-xs">Profile</span></a>
+<nav id="mobile-nav" aria-label="Main navigation" class="fixed bottom-0 left-0 right-0 z-[90] bg-white dark:bg-slate-900 border-t border-slate-200 dark:border-slate-800 flex items-center justify-around px-1 py-2 md:hidden">
+  <a href="/feed.html" class="flex flex-col items-center gap-0.5 px-1 py-1 text-slate-400">
+    <i class="fa-solid fa-house text-xl"></i><span class="text-[10px]">Home</span>
+  </a>
+  <a href="/feed.html?panel=dorm" class="flex flex-col items-center gap-0.5 px-1 py-1 text-slate-400">
+    <i class="fa-solid fa-building text-xl"></i><span class="text-[10px]">Dormitory</span>
+  </a>
+  <a href="/feed.html?panel=residents" class="flex flex-col items-center gap-0.5 px-1 py-1 text-slate-400">
+    <i class="fa-solid fa-people-group text-xl"></i><span class="text-[10px]">Residents</span>
+  </a>
+  <a href="#" onclick="goProfile(); return false;" class="flex flex-col items-center gap-0.5 px-1 py-1 text-slate-400">
+    <i class="fa-solid fa-user text-xl"></i><span class="text-[10px]">Profile</span>
+  </a>
 </nav>
 
 <script src="/js/api.js"></script>
@@ -156,7 +164,7 @@
 
   async function loadNavCounts(){
     try{const[n,m]=await Promise.all([fetch('/api/notifications/unread-count').then(r=>r.json()),fetch('/api/messages/unread-count').then(r=>r.json()).catch(()=>({count:0}))]);
-    ['notif-badge','sidebar-notif-badge'].forEach(id=>setBadge(id,n.count));['msg-badge','sidebar-msg-badge','mob-msg-badge'].forEach(id=>setBadge(id,m.count));}catch{}
+    ['notif-badge','sidebar-notif-badge'].forEach(id=>setBadge(id,n.count));['msg-badge','sidebar-msg-badge'].forEach(id=>setBadge(id,m.count));}catch{}
   }
 
   async function loadNotifications(){

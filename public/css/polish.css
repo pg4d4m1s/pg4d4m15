@@ -115,14 +115,16 @@
 
 /* ════════════════════════════════════════════════════
    2. BOTTOM NAV — fit and colour
-   In a justify-around flex row each item is sized by its own
-   label, so "Dormitory" and "Residents" steal width from their
-   neighbours and the row drifts off-centre. Auto-flow columns
-   give every item an identical slot.
+   The same four items on every page (feed, profile, search,
+   notifications): Home, Dormitory, Residents, Profile. Search,
+   Messages and Alerts live in the top bar, not here.
 
-   grid-auto-columns is used rather than a fixed column count
-   because the nav has 7 items on feed.html and 5 on the other
-   pages — this adapts to both.
+   Dormitory and Residents are slide-over panels owned by feed.html,
+   so on the other pages those two items link to
+   /feed.html?panel=dorm | residents, which opens the panel on load.
+
+   grid-auto-columns gives every item an identical slot, so a longer
+   label can't push its neighbours off-centre.
    ════════════════════════════════════════════════════ */
 
 #mobile-nav {
@@ -131,9 +133,9 @@
   display: none;
   grid-auto-flow: column;
   grid-auto-columns: minmax(0, 1fr);
-  align-items: end;
-  gap: 0.125rem;
-  padding: 0.375rem 0.125rem calc(env(safe-area-inset-bottom, 0px) + 0.375rem);
+  align-items: stretch;
+  gap: 0.25rem;
+  padding: 0.375rem 0.5rem calc(env(safe-area-inset-bottom, 0px) + 0.375rem);
   /* Lifts the bar off a light background and separates it from cards. */
   box-shadow: 0 -1px 12px rgba(15, 23, 42, 0.06);
 }
@@ -150,18 +152,19 @@ html.dark #mobile-nav { box-shadow: 0 -1px 12px rgba(0, 0, 0, 0.45); }
 
 #mobile-nav > a {
   min-width: 0;
+  min-height: 2.75rem;               /* 44px touch target */
+  justify-content: center;
   padding: 0.3125rem 0.125rem;
   border-radius: 0.75rem;
   transition: background 0.15s, transform 0.12s;
 }
 #mobile-nav > a:active { transform: scale(0.94); }
 
-/* Labels get a fixed slot and truncate rather than wrap.
-   :not(.notif-badge) keeps the unread counters out of this. */
-#mobile-nav > a > span:not(.notif-badge) {
+/* Labels get a fixed slot and truncate rather than wrap. */
+#mobile-nav > a > span {
   display: block;
   width: 100%;
-  font-size: 10px;
+  font-size: 11px;
   line-height: 1.2;
   text-align: center;
   white-space: nowrap;
@@ -169,50 +172,34 @@ html.dark #mobile-nav { box-shadow: 0 -1px 12px rgba(0, 0, 0, 0.45); }
   text-overflow: ellipsis;
 }
 
-#mobile-nav > a i { font-size: 1.0625rem; line-height: 1; }
+#mobile-nav > a i { font-size: 1.25rem; line-height: 1; }
 
 /* ── Per-item colour ──────────────────────────────────
-   Keyed to the Font Awesome icon class rather than nth-child, because
-   the nav has a different item count AND order on feed.html (Home,
-   Search, Dormitory, Residents, Messages, Alerts, Profile) than on
-   search/profile/notifications (Home, Search, Messages, Alerts,
-   Profile). Keying on the icon means each destination keeps its colour
-   everywhere, and adding or reordering items can't shuffle the palette.
-
-   Declared on the <i> directly so it beats the text-slate-400 colour
-   the anchor passes down by inheritance. */
-#mobile-nav a i.fa-house            { color: #2563eb; }  /* Home      — blue */
-#mobile-nav a i.fa-magnifying-glass { color: #0891b2; }  /* Search    — cyan */
-#mobile-nav a i.fa-building         { color: #4f46e5; }  /* Dormitory — indigo */
-#mobile-nav a i.fa-people-group     { color: #7c3aed; }  /* Residents — violet */
-#mobile-nav a i.fa-comment-dots     { color: #059669; }  /* Messages  — emerald */
-#mobile-nav a i.fa-bell             { color: #d97706; }  /* Alerts    — amber */
-#mobile-nav a i.fa-user             { color: #64748b; }  /* Profile   — slate */
+   Keyed to the Font Awesome icon class, so each destination keeps its
+   colour on every page. Declared on the <i> directly so it beats the
+   text-slate-400 colour the anchor passes down by inheritance. */
+#mobile-nav a i.fa-house        { color: #2563eb; }  /* Home      — blue   */
+#mobile-nav a i.fa-building     { color: #16a34a; }  /* Dormitory — green  */
+#mobile-nav a i.fa-people-group { color: #7c3aed; }  /* Residents — violet */
+#mobile-nav a i.fa-user         { color: #64748b; }  /* Profile   — slate  */
 
 /* Brighter in dark mode — the 600-weight hues go muddy on #161b22. */
-html.dark #mobile-nav a i.fa-house            { color: #60a5fa; }
-html.dark #mobile-nav a i.fa-magnifying-glass { color: #22d3ee; }
-html.dark #mobile-nav a i.fa-building         { color: #818cf8; }
-html.dark #mobile-nav a i.fa-people-group     { color: #a78bfa; }
-html.dark #mobile-nav a i.fa-comment-dots     { color: #34d399; }
-html.dark #mobile-nav a i.fa-bell             { color: #fbbf24; }
-html.dark #mobile-nav a i.fa-user             { color: #94a3b8; }
+html.dark #mobile-nav a i.fa-house        { color: #60a5fa; }
+html.dark #mobile-nav a i.fa-building     { color: #4ade80; }
+html.dark #mobile-nav a i.fa-people-group { color: #a78bfa; }
+html.dark #mobile-nav a i.fa-user         { color: #94a3b8; }
 
 /* ── Active item ──────────────────────────────────────
-   Each page marks its own nav link with text-brand-600, so that class
-   is the active flag. Keeping the indicator as a tinted pill means the
-   colours above stay visible on every item while the current page
-   still reads as current. */
+   Each page marks its own nav link with text-brand-600 (+ aria-current),
+   so that class is the active flag. A tinted pill keeps the icon colours
+   visible while the current page still reads as current. */
 #mobile-nav > a.text-brand-600 {
   background: var(--brand-light);
 }
-#mobile-nav > a.text-brand-600 > span:not(.notif-badge) {
+#mobile-nav > a.text-brand-600 > span {
   font-weight: 700;
   color: var(--brand);
 }
-
-/* Unread badges sit above a taller icon now. */
-#mobile-nav .notif-badge { top: 0; right: 0.375rem; }
 
 /* ════════════════════════════════════════════════════
    3. GENERAL MOBILE OVERFLOW GUARD
