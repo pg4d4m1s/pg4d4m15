@@ -3187,7 +3187,7 @@ function selfiePermSteps() {
     steps: [
       'Open your phone\u2019s Settings app and scroll down to Chrome.',
       'Turn ON \u201CCamera\u201D.',
-      'Come back here and tap \u201CI allowed it \u2014 Try again\u201D.'
+      'Come back here and tap \u201CStart Live Selfie\u201D.'
     ]
   };
   if (e.ios) return {
@@ -3196,7 +3196,7 @@ function selfiePermSteps() {
     steps: [
       'Tap the \u201CaA\u201D icon at the left of the address bar.',
       'Tap \u201CWebsite Settings\u201D, then set \u201CCamera\u201D to \u201CAllow\u201D.',
-      'Tap \u201CI allowed it \u2014 Try again\u201D below. If the page reloads, go back to the Profile Photo step.'
+      'Then tap \u201CStart Live Selfie\u201D above. If the page reloads, go back to the Profile Photo step.'
     ]
   };
   if (e.android) return {
@@ -3206,7 +3206,7 @@ function selfiePermSteps() {
       e.samsung ? 'Tap the \u2630 menu, then the lock/settings icon next to the address.'
                 : 'Tap the lock (or settings) icon at the left of the address bar.',
       'Tap \u201CPermissions\u201D, then \u201CCamera\u201D, then choose \u201CAllow\u201D.',
-      'Tap \u201CI allowed it \u2014 Try again\u201D below. If the page reloads, go back to the Profile Photo step.'
+      'Then tap \u201CStart Live Selfie\u201D above. If the page reloads, go back to the Profile Photo step.'
     ]
   };
   return {
@@ -3215,7 +3215,7 @@ function selfiePermSteps() {
     steps: [
       'Click the camera or lock icon at the left of the address bar.',
       'Set \u201CCamera\u201D to \u201CAllow\u201D.',
-      'Click \u201CI allowed it \u2014 Try again\u201D below (reload the page first if your browser asks you to).'
+      'Then click \u201CStart Live Selfie\u201D above (reload the page first if your browser asks you to).'
     ]
   };
 }
@@ -3243,7 +3243,7 @@ function watchCameraPermission() {
       st.onchange = function () {
         if (st.state === 'granted') { hideSelfiePermHelp(); showToast('Camera allowed \u2014 tap Start Live Selfie.', 'success'); }
       };
-    }).catch(function () { /* Safari/Firefox cannot query "camera" — the Try again button still works */ });
+    }).catch(function () { /* Safari/Firefox cannot query "camera" — tapping Start Live Selfie again still works */ });
   } catch (e) { /* ignore */ }
 }
 
@@ -3255,8 +3255,6 @@ async function cameraIsBlocked() {
     return st.state === 'denied';
   } catch (e) { return false; }
 }
-
-function retrySelfieAfterPermission() { hideSelfiePermHelp(); doModeSelfie(); }
 
 // ── open the camera and start scanning ──
 async function doModeSelfie() {
