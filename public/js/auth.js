@@ -3149,14 +3149,128 @@ function loadFaceScanner() {
   return _faceLibPromise;
 }
 
+// ── camera-permission help ──────────────────────────────────────────────────────
+// A browser only shows its "Allow camera?" pop-up while the permission is still undecided. Once the user taps
+// "Don't allow" (or the page runs inside an in-app browser that never grants it) getUserMedia() fails instantly and
+// NO script can re-open the pop-up — only the person can change it. So we (1) tell them to tap Allow BEFORE the
+// pop-up appears (index.html), (2) skip the pointless call when we can see it is already blocked, and (3) show
+// device-specific, step-by-step unblock instructions instead of a one-line error.
+var _camPermWatching = false;
+
+function selfieEnv() {
+  var ua = navigator.userAgent || '';
+  var ios = /iPad|iPhone|iPod/.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  return {
+    inApp:   /FBAN|FBAV|FB_IAB|FBIOS|Messenger|Instagram|Line\/|MicroMessenger|TikTok|musical_ly|Snapchat|Twitter|; wv\)/i.test(ua),
+    ios:     ios,
+    android: /Android/i.test(ua),
+    iosChrome: ios && /CriOS/.test(ua),
+    samsung: /SamsungBrowser/i.test(ua),
+    firefox: /Firefox|FxiOS/i.test(ua)
+  };
+}
+
+function selfiePermSteps() {
+  var e = selfieEnv();
+  if (e.inApp) return {
+    title: 'Open this page in your phone\u2019s browser',
+    intro: 'The app you opened this link from (Facebook, Messenger, etc.) does not allow camera access.',
+    steps: [
+      'Tap the \u22EE or \u2022\u2022\u2022 menu at the top corner of the screen.',
+      'Choose \u201COpen in Chrome\u201D, \u201COpen in browser\u201D or \u201COpen in Safari\u201D.',
+      'In the browser, go to the Profile Photo step again and tap \u201CAllow\u201D when asked to use the camera.'
+    ]
+  };
+  if (e.ios && e.iosChrome) return {
+    title: 'Camera is blocked for Chrome',
+    intro: 'Your phone remembers that camera access was denied.',
+    steps: [
+      'Open your phone\u2019s Settings app and scroll down to Chrome.',
+      'Turn ON \u201CCamera\u201D.',
+      'Come back here and tap \u201CI allowed it \u2014 Try again\u201D.'
+    ]
+  };
+  if (e.ios) return {
+    title: 'Camera is blocked for this site',
+    intro: 'Your browser remembers that camera access was denied.',
+    steps: [
+      'Tap the \u201CaA\u201D icon at the left of the address bar.',
+      'Tap \u201CWebsite Settings\u201D, then set \u201CCamera\u201D to \u201CAllow\u201D.',
+      'Tap \u201CI allowed it \u2014 Try again\u201D below. If the page reloads, go back to the Profile Photo step.'
+    ]
+  };
+  if (e.android) return {
+    title: 'Camera is blocked for this site',
+    intro: 'Your browser remembers that camera access was denied.',
+    steps: [
+      e.samsung ? 'Tap the \u2630 menu, then the lock/settings icon next to the address.'
+                : 'Tap the lock (or settings) icon at the left of the address bar.',
+      'Tap \u201CPermissions\u201D, then \u201CCamera\u201D, then choose \u201CAllow\u201D.',
+      'Tap \u201CI allowed it \u2014 Try again\u201D below. If the page reloads, go back to the Profile Photo step.'
+    ]
+  };
+  return {
+    title: 'Camera is blocked for this site',
+    intro: 'Your browser remembers that camera access was denied.',
+    steps: [
+      'Click the camera or lock icon at the left of the address bar.',
+      'Set \u201CCamera\u201D to \u201CAllow\u201D.',
+      'Click \u201CI allowed it \u2014 Try again\u201D below (reload the page first if your browser asks you to).'
+    ]
+  };
+}
+
+function showSelfiePermHelp() {
+  var box = $('selfie-perm-help'); if (!box) return;
+  var h = selfiePermSteps();
+  var t = $('selfie-perm-title'), i = $('selfie-perm-intro'), ol = $('selfie-perm-steps');
+  if (t) t.textContent = h.title;
+  if (i) i.textContent = h.intro;
+  if (ol) { ol.textContent = ''; h.steps.forEach(function (st) { var li = document.createElement('li'); li.textContent = st; ol.appendChild(li); }); }
+  box.classList.remove('hidden');
+  try { box.scrollIntoView({ block: 'center', behavior: 'smooth' }); } catch (e) { /* old browser */ }
+  watchCameraPermission();
+  console.warn('[Selfie] camera blocked — showing unblock guide');
+}
+function hideSelfiePermHelp() { var box = $('selfie-perm-help'); if (box) box.classList.add('hidden'); }
+
+// If the person fixes the permission in browser settings while this page stays open, clear the guide automatically.
+function watchCameraPermission() {
+  if (_camPermWatching || !navigator.permissions || !navigator.permissions.query) return;
+  try {
+    navigator.permissions.query({ name: 'camera' }).then(function (st) {
+      _camPermWatching = true;
+      st.onchange = function () {
+        if (st.state === 'granted') { hideSelfiePermHelp(); showToast('Camera allowed \u2014 tap Start Live Selfie.', 'success'); }
+      };
+    }).catch(function () { /* Safari/Firefox cannot query "camera" — the Try again button still works */ });
+  } catch (e) { /* ignore */ }
+}
+
+// true only when the browser positively reports the camera as blocked
+async function cameraIsBlocked() {
+  try {
+    if (!navigator.permissions || !navigator.permissions.query) return false;
+    var st = await navigator.permissions.query({ name: 'camera' });
+    return st.state === 'denied';
+  } catch (e) { return false; }
+}
+
+function retrySelfieAfterPermission() { hideSelfiePermHelp(); doModeSelfie(); }
+
 // ── open the camera and start scanning ──
 async function doModeSelfie() {
   if (_scan) return;                                   // already running (double tap)
   hideStepError(4);
+  hideSelfiePermHelp();
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-    showStepError(4, 'This browser cannot open the camera. Please use the latest Chrome, Safari or Edge on a phone or laptop that has a camera.');
+    // In-app browsers (Facebook/Messenger/...) often have no camera API at all — tell those users to switch browser.
+    if (selfieEnv().inApp) showSelfiePermHelp();
+    else showStepError(4, 'This browser cannot open the camera. Please use the latest Chrome, Safari or Edge on a phone or laptop that has a camera.');
     return;
   }
+  if (await cameraIsBlocked()) { showSelfiePermHelp(); return; }   // already denied: the browser would not ask again
+  if (_scan) return;                                   // a second tap landed while we were checking
   var session = {
     cancelled: false, done: false, stage: 'align', challenges: [], idx: 0, good: 0, chHold: 0, chStart: 0,
     resets: 0, errors: 0, tick: 0, luma: null, lostSince: 0, lastCx: null, flash: '', flashUntil: 0,
@@ -3204,7 +3318,7 @@ function scanFailed(err) {
   stopSelfieCamera();
   var name = (err && err.name) || '', msg;
   if (name === 'NotAllowedError' || name === 'PermissionDeniedError')
-    msg = 'Camera permission was denied. Allow camera access for this site in your browser settings, then tap Start Live Selfie again.';
+    msg = null;                                        // shown as the step-by-step unblock guide below
   else if (name === 'NotFoundError' || name === 'DevicesNotFoundError' || name === 'OverconstrainedError')
     msg = 'No camera was found on this device. A live selfie is required, so please use a phone or laptop with a camera.';
   else if (name === 'NotReadableError' || name === 'TrackStartError')
@@ -3215,7 +3329,7 @@ function scanFailed(err) {
     msg = 'The face scanner could not start (' + String((err && err.message) || 'unknown error').slice(0, 80) + '). Check your internet connection and tap Start Live Selfie to try again.';
   if (s && s.hadPhoto) { setSelfieVerified(s.prevVerified); setStep4Mode('captured'); var vf = $('av-viewfinder-wrap'); if (vf) { vf.classList.remove('hidden'); vf.classList.add('flex'); } }
   else setStep4Mode('idle');
-  showStepError(4, msg);
+  if (msg === null) showSelfiePermHelp(); else showStepError(4, msg);
 }
 
 function stopSelfieCamera() {
