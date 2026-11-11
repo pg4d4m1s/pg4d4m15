@@ -55,6 +55,9 @@
  * / bounce / dropped / blocked + the receiving server's reply). Enable it with:
  *   SENDGRID_WEBHOOK_PUBLIC_KEY[2..5]  — the "Verification Key" of each SendGrid account's Signed Event Webhook
  *   MAIL_SLOW_WARN_MS                  — warn when an e-mail is still unconfirmed after this long (default 30000)
+ *   OTP_PREFER_GMAIL_API=true          — send OTP / password-reset e-mails through the Gmail API FIRST (SendGrid
+ *                                        stays the fallback). Other mail keeps the normal order, so bulk mail does
+ *                                        not use up the Gmail daily quota.
  *   OTP_FAILOVER_AFTER_MS              — re-send the SAME OTP via the next driver if SendGrid has not confirmed
  *                                        delivery after this long, or reports bounce/dropped/blocked (default 0 = off;
  *                                        needs the webhook; try 20000)
@@ -386,8 +389,19 @@ function _armDeliveryWatch(rec, failover) {
 }
 
 /** Drivers already tried: the chain up to and including `driver`. */
-function _driversThrough(driver) {
-  return new Set(DRIVER_CHAIN.slice(0, DRIVER_CHAIN.indexOf(driver) + 1));
+function _driversThrough(driver, order = DRIVER_CHAIN) {
+  return new Set(order.slice(0, order.indexOf(driver) + 1));
+}
+
+/**
+ * Gmail API sends from the Gmail account itself (authenticated by Google), so it reaches Gmail inboxes at
+ * once; SendGrid sending "From: …@gmail.com" cannot be authenticated and Gmail may defer or filter it.
+ * With OTP_PREFER_GMAIL_API=true, time-critical codes try the Gmail API first.
+ */
+const PREFER_GMAIL_API_FOR_OTP = env('OTP_PREFER_GMAIL_API') === 'true';
+function _orderFor(kind) {
+  if (!PREFER_GMAIL_API_FOR_OTP || !GMAIL_API.enabled || (kind !== 'otp' && kind !== 'reset')) return DRIVER_CHAIN;
+  return ['gmailapi', ...DRIVER_CHAIN.filter(d => d !== 'gmailapi')];
 }
 
 function _fromFor(driver) {
@@ -487,6 +501,7 @@ function _redact(s = '') {
   SENDGRID_ACCOUNTS.forEach(a => console.log(`   SendGrid #${a.slot}  : from=${a.from}`));
   if (GMAIL_API.enabled) console.log(`   Gmail API    : user=${GMAIL_API.user}`);
   console.log(`   Console OTP  : ${CONSOLE_COUNTS_AS_SENT ? 'counts as sent (dev / ALLOW_CONSOLE_OTP)' : 'treated as FAILURE (production)'}`);
+  console.log(`   OTP routing  : ${PREFER_GMAIL_API_FOR_OTP && GMAIL_API.enabled ? 'Gmail API first, then ' + DRIVER_CHAIN.filter(d => d !== 'gmailapi' && d !== 'console').map(label).join(' → ') : 'normal chain order'}`);
   console.log(`   Delivery log : ${TRACKING_ENABLED
     ? `ON — webhook keys for SendGrid slot(s) ${WEBHOOK_KEYS.map(k => k.slot).join(', ')}, slow-warn ${Math.round(SLOW_DELIVERY_WARN_MS / 1000)}s, OTP failover ${OTP_FAILOVER_AFTER_MS ? `after ${Math.round(OTP_FAILOVER_AFTER_MS / 1000)}s` : 'off'}`
     : 'OFF — set SENDGRID_WEBHOOK_PUBLIC_KEY (+ add the webhook in SendGrid) to see deferred/delivered/bounced events'}`);
@@ -578,8 +593,9 @@ const _DRIVER_FN = {
 // ─────────────────────────────────────────────────────────────────────────────
 async function _send({ to, subject, html, text, kind = 'mail', skip = null }) {
   const attempts = []; // human-readable reason per driver that did not deliver
+  const order = _orderFor(kind);
 
-  for (const driver of DRIVER_CHAIN) {
+  for (const driver of order) {
     if (skip && skip.has(driver)) continue; // already used (failover)
 
     if (driver === 'console') {
@@ -609,7 +625,7 @@ async function _send({ to, subject, html, text, kind = 'mail', skip = null }) {
       };
       if (rec.tracked) { _pruneTracked(); _tracked.set(messageId, rec); }
       const sends = _recordSend(to, rec);
-      return { success: true, driver, messageId, delivered: true, ms, from: rec.from, rec, sends };
+      return { success: true, driver, messageId, delivered: true, ms, from: rec.from, rec, sends, order };
     } catch (err) {
       const msg = err.message || String(err);
       const ms  = Date.now() - t0;
@@ -742,8 +758,8 @@ async function sendOTPEmail(toEmail, otp, firstName = 'there', opts = {}) {
           log.info(`[MAIL] ↪ failover skipped for ${toEmail}: the code was already used or replaced (${why})`);
           return;
         }
-        const skip = _driversThrough(result.driver);
-        if (!DRIVER_CHAIN.some(d => d !== 'console' && !skip.has(d))) {
+        const skip = _driversThrough(result.driver, result.order);
+        if (!result.order.some(d => d !== 'console' && !skip.has(d))) {
           log.warn(`[MAIL] ↪ no other e-mail driver to fail over to for ${toEmail} (${why})`);
           return;
         }
