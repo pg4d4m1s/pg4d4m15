@@ -4,7 +4,11 @@
  * WATERFALL DRIVER SYSTEM — drivers are tried in priority order until one
  * accepts the message. Chain (only configured drivers are included):
  *
- *   SENDGRID #1 → #2 → #3 → #4 → #5 → GMAIL API → SMTP (Gmail) → CONSOLE
+ *   GMAIL API → SENDGRID #1 → #2 → #3 → #4 → #5 → SMTP (Gmail) → CONSOLE
+ *
+ *   Gmail API is the PRIMARY mailer. SendGrid only sends when the Gmail API fails
+ *   (token revoked, daily limit hit, Google outage, timeout, ...). Set
+ *   EMAIL_GMAIL_FIRST=false to restore the old order (SendGrid first, Gmail API after) without a code change.
  *
  * SendGrid accounts (up to 5, each needs a KEY *and* its own verified FROM):
  *
@@ -24,8 +28,10 @@
  *   OAuth2 refresh-token flow with the gmail.send scope (see utils/gmailApi.js).
  *   Free, ~500 emails/day for a personal Gmail account. All four variables are
  *   required; if only some are set the driver is disabled and a warning is
- *   logged at boot. It is tried after SendGrid, so it acts as the fallback when
- *   SendGrid hits its daily limit.
+ *   logged at boot. It is tried FIRST (see EMAIL_GMAIL_FIRST); a quota / auth failure marks it
+ *   "degraded" so mail goes straight to SendGrid for EMAIL_DRIVER_COOLDOWN_MS, then Gmail is retried.
+ *   ⚠ If the Google Cloud OAuth consent screen is in "Testing" status, Google expires the refresh
+ *   token after 7 days (→ "invalid_grant"). Publish the app ("In production") to avoid weekly breakage.
  *
  * Gmail SMTP (unchanged):
  *   USE_REAL_EMAIL=true + EMAIL_USER + EMAIL_PASS  (Gmail App Password, 16 chars)
@@ -55,14 +61,14 @@
  * / bounce / dropped / blocked + the receiving server's reply). Enable it with:
  *   SENDGRID_WEBHOOK_PUBLIC_KEY[2..5]  — the "Verification Key" of each SendGrid account's Signed Event Webhook
  *   MAIL_SLOW_WARN_MS                  — warn when an e-mail is still unconfirmed after this long (default 30000)
- *   EMAIL_GMAIL_FIRST=true             — Gmail API is the FIRST mailer for ALL e-mail; SendGrid is only the fallback
- *                                        (it takes over automatically if Gmail fails or hits its daily limit)
- *   OTP_PREFER_GMAIL_API=true          — narrower option: only OTP / password-reset e-mails go Gmail-first; send OTP / password-reset e-mails through the Gmail API FIRST (SendGrid
- *                                        stays the fallback). Other mail keeps the normal order, so bulk mail does
- *                                        not use up the Gmail daily quota.
+ *   EMAIL_GMAIL_FIRST                  — default ON: Gmail API is the FIRST mailer for ALL e-mail; SendGrid is only the
+ *                                        fallback (takes over automatically if Gmail fails or hits its daily limit).
+ *                                        Set to "false" to put SendGrid first again. (Replaces OTP_PREFER_GMAIL_API,
+ *                                        which is no longer read.)
  *   OTP_FAILOVER_AFTER_MS              — re-send the SAME OTP via the next driver if SendGrid has not confirmed
  *                                        delivery after this long, or reports bounce/dropped/blocked (default 0 = off;
- *                                        needs the webhook; try 20000)
+ *                                        needs the webhook; try 20000). Only applies to mail that SendGrid accepted
+ *                                        (i.e. when Gmail failed first) — the Gmail API gives no delivery events.
  *
  * Env values are trimmed and stripped of accidental wrapping quotes, because
  * pasting KEY="abc" into the Railway variables UI keeps the quotes.
@@ -163,11 +169,17 @@ const GMAIL_API = (() => {
 })();
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Driver chain: SENDGRID #1..#5 → GMAIL API → SMTP → CONSOLE
+// Driver chain: GMAIL API → SENDGRID #1..#5 → SMTP → CONSOLE
+// (EMAIL_GMAIL_FIRST=false flips it back to SENDGRID #1..#5 → GMAIL API → ...)
 // ─────────────────────────────────────────────────────────────────────────────
+const GMAIL_FIRST = env('EMAIL_GMAIL_FIRST').toLowerCase() !== 'false';
+
 const DRIVER_CHAIN = (() => {
   const chain = SENDGRID_ACCOUNTS.map(a => a.driver);
-  if (GMAIL_API.enabled) chain.push('gmailapi');
+  if (GMAIL_API.enabled) {
+    if (GMAIL_FIRST) chain.unshift('gmailapi');
+    else             chain.push('gmailapi');
+  }
   if (env('USE_REAL_EMAIL') === 'true') chain.push('smtp');
   chain.push('console'); // always last
   return chain;
@@ -194,6 +206,9 @@ const _health = Object.fromEntries(
 function _isPermanentDriverError(driver, msg = '') {
   const m = msg.toLowerCase();
   if (driver === 'smtp' && /timeout|etimedout|econnrefused|enetunreach|ehostunreach|esocket/.test(m)) return true;
+  // Gmail API quota / throttling arrives as 429 (or 403 with a rate-limit reason). Retrying it on every
+  // send just burns time before SendGrid takes over, so park the driver for the cooldown instead.
+  if (driver === 'gmailapi' && (m.includes(' 429:') || /ratelimitexceeded|userratelimitexceeded|quotaexceeded|rate limit exceeded/.test(m))) return true;
   if (m.includes(' 401:') || m.includes(' 403:')) return true;
   return [
     'unauthorized', 'forbidden', 'invalid api key', 'api key is invalid', 'key not found',
@@ -287,6 +302,7 @@ function getRecipientMailInfo(email) {
   const ago  = Math.round((now - last.at) / 1000);
   let status;
   if (r.tracked) status = r.status === 'accepted' ? 'accepted by SendGrid, no delivery event yet' : r.status + (r.deferrals ? ` after ${r.deferrals} deferral(s)` : '');
+  else if (r.driver === 'gmailapi') status = 'accepted by Gmail API (Gmail gives no delivery events; a bounce would arrive in the Gmail inbox)';
   else           status = `unknown (no delivery events for ${r.driver}${TRACKING_ENABLED ? ' — add its webhook key' : '; webhook not configured'})`;
   const why = r.reason ? ` (${r.reason.slice(0, 160)})` : '';
   return {
@@ -395,19 +411,6 @@ function _driversThrough(driver, order = DRIVER_CHAIN) {
   return new Set(order.slice(0, order.indexOf(driver) + 1));
 }
 
-/**
- * Gmail API sends from the Gmail account itself (authenticated by Google), so it reaches Gmail inboxes at
- * once; SendGrid sending "From: …@gmail.com" cannot be authenticated and Gmail may defer or filter it.
- * With OTP_PREFER_GMAIL_API=true, time-critical codes try the Gmail API first.
- */
-const GMAIL_FIRST_ALL          = env('EMAIL_GMAIL_FIRST') === 'true';
-const PREFER_GMAIL_API_FOR_OTP = env('OTP_PREFER_GMAIL_API') === 'true';
-function _orderFor(kind) {
-  const wanted = GMAIL_FIRST_ALL || (PREFER_GMAIL_API_FOR_OTP && (kind === 'otp' || kind === 'reset'));
-  if (!wanted || !GMAIL_API.enabled) return DRIVER_CHAIN;
-  return ['gmailapi', ...DRIVER_CHAIN.filter(d => d !== 'gmailapi')];
-}
-
 function _fromFor(driver) {
   if (driver === 'gmailapi') return GMAIL_API.user;
   if (driver === 'smtp')     return FROM_EMAIL();
@@ -482,6 +485,9 @@ function _redact(s = '') {
 
   SENDGRID_WARNINGS.forEach(w => console.warn(`⚠️  [emailService] ${w}`));
   if (GMAIL_API.warning) console.warn(`⚠️  [emailService] ${GMAIL_API.warning}`);
+  if (GMAIL_FIRST && !GMAIL_API.enabled && SENDGRID_ACCOUNTS.length) {
+    console.warn('⚠️  [emailService] Gmail API is NOT configured (GMAIL_CLIENT_ID / GMAIL_CLIENT_SECRET / GMAIL_REFRESH_TOKEN / GMAIL_USER) — SendGrid is the primary mailer');
+  }
 
   if (DRIVER_CHAIN[0] === 'console') {
     console.log('');
@@ -505,7 +511,7 @@ function _redact(s = '') {
   SENDGRID_ACCOUNTS.forEach(a => console.log(`   SendGrid #${a.slot}  : from=${a.from}`));
   if (GMAIL_API.enabled) console.log(`   Gmail API    : user=${GMAIL_API.user}`);
   console.log(`   Console OTP  : ${CONSOLE_COUNTS_AS_SENT ? 'counts as sent (dev / ALLOW_CONSOLE_OTP)' : 'treated as FAILURE (production)'}`);
-  console.log(`   OTP routing  : ${(GMAIL_FIRST_ALL || PREFER_GMAIL_API_FOR_OTP) && GMAIL_API.enabled ? (GMAIL_FIRST_ALL ? 'Gmail API first for ALL e-mail, then ' : 'Gmail API first for OTP/reset, then ') + DRIVER_CHAIN.filter(d => d !== 'gmailapi' && d !== 'console').map(label).join(' → ') : 'normal chain order'}`);
+  console.log(`   Primary      : ${label(DRIVER_CHAIN[0])}${DRIVER_CHAIN[0] === 'gmailapi' ? ' — SendGrid is fallback only' : GMAIL_API.enabled ? ' (EMAIL_GMAIL_FIRST=false)' : ''}`);
   console.log(`   Delivery log : ${TRACKING_ENABLED
     ? `ON — webhook keys for SendGrid slot(s) ${WEBHOOK_KEYS.map(k => k.slot).join(', ')}, slow-warn ${Math.round(SLOW_DELIVERY_WARN_MS / 1000)}s, OTP failover ${OTP_FAILOVER_AFTER_MS ? `after ${Math.round(OTP_FAILOVER_AFTER_MS / 1000)}s` : 'off'}`
     : 'OFF — set SENDGRID_WEBHOOK_PUBLIC_KEY (+ add the webhook in SendGrid) to see deferred/delivered/bounced events'}`);
@@ -597,7 +603,7 @@ const _DRIVER_FN = {
 // ─────────────────────────────────────────────────────────────────────────────
 async function _send({ to, subject, html, text, kind = 'mail', skip = null }) {
   const attempts = []; // human-readable reason per driver that did not deliver
-  const order = _orderFor(kind);
+  const order = DRIVER_CHAIN;
 
   for (const driver of order) {
     if (skip && skip.has(driver)) continue; // already used (failover)
@@ -641,6 +647,9 @@ async function _send({ to, subject, html, text, kind = 'mail', skip = null }) {
         h.since   = h.since || Date.now();
         h.retryAt = Date.now() + COOLDOWN_MS;
         console.error(`❌ [emailService] ${driver} DEGRADED after ${ms}ms (retry in ${Math.round(COOLDOWN_MS / 60000)}m): ${msg}`);
+        if (driver === 'gmailapi' && /invalid_grant|invalid_client|unauthorized_client/i.test(msg)) {
+          console.error('   ↳ Gmail API credentials were rejected: generate a new GMAIL_REFRESH_TOKEN (and publish the Google OAuth consent screen — "Testing" tokens expire after 7 days). SendGrid is covering meanwhile.');
+        }
       } else {
         console.error(`⚠️  [emailService] ${driver} transient error after ${ms}ms: ${msg} → trying next driver`);
       }
@@ -1036,7 +1045,7 @@ module.exports = {
   sendDormReminderEmail,
   sendBedAssignedEmail,
   sendBedUnassignedEmail,
-  /** Returns the active driver name — used by server.js startup log */
+  /** Returns the primary driver name ('gmailapi' | 'sendgrid' | 'smtp' | 'console') — used by server.js startup log */
   getDriver: () => (DRIVER.startsWith('sendgrid') ? 'sendgrid' : DRIVER),
   /** Per-driver health snapshot (no secrets) — safe to expose on an admin route */
   getHealth,

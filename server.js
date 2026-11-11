@@ -585,13 +585,15 @@ httpServer.listen(PORT, async () => {
     ? `✔ Gemini (free) · ${poolStatus.keyCount} key${poolStatus.keyCount>1?'s':''} · ${poolStatus.keyCount*poolStatus.rpdLimit} req/day total${hasGithub ? ' · DeepSeek fallback ✔' : ''}`
     : hasGithub ? '✔ DeepSeek-V3 (GitHub Models)' : '✖ NOT configured';
   log.info(`AI Moderation: ${aiStatus}`);
-  const { getDriver } = require('./utils/emailService');
+  const { getDriver, getHealth } = require('./utils/emailService');
   const emailDriverLabel = {
+    gmailapi: `✔ Gmail API (${process.env.GMAIL_USER || '?'}) — primary`,
     sendgrid: `✔ SendGrid API (${process.env.SENDGRID_FROM || process.env.EMAIL_USER || '?'})`,
     smtp:     `✔ Gmail SMTP (${process.env.EMAIL_USER || '?'})`,
-    console:  '⚠ Console/dev — no real delivery (set SENDGRID_API_KEY + SENDGRID_FROM for production)',
+    console:  '⚠ Console/dev — no real delivery (set GMAIL_* or SENDGRID_API_KEY + SENDGRID_FROM for production)',
   }[getDriver()] || '?';
   log.info(`Email        : ${emailDriverLabel}`);
+  log.info(`Email chain  : ${getHealth().chain.join(' → ')}`);
   log.divider();
 
   // Auto-create admin account from .env if not already present
