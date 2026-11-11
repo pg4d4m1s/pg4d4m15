@@ -21,6 +21,7 @@ const { requireAuth } = require('../middleware/auth');
 const { uploadAvatar, uploadCover, uploadIdDocs, uploadMedicalCert, multerUpload, toCloudinary, resizeImage, hasCloudinary } = require('../middleware/upload');
 const { trackUpload } = require('../middleware/uploadDiagnostics');
 const { sendApplicationFormPdf, withBedAssignment } = require('../utils/applicationForm');
+const { createFormLink, verifyFormLink } = require('../utils/formLink');
 const {
   findUserById, findUserByUsername, updateUser, getUserPosts,
   toggleFollow, isFollowing, getFollowerCount, getFollowingCount,
@@ -381,12 +382,39 @@ router.post('/api/users/me/medical-certificate', requireAuth,
     }
   });
 
-// GET /api/users/me/application-form[?download=1] — the resident's own soft copy of the Resident's Application Form
-router.get('/api/users/me/application-form', requireAuth, async (req, res) => {
-  const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
+/** Loads the user's row + latest ID-verification row and streams their Application Form PDF. */
+async function sendOwnApplicationForm(req, res, userId, via) {
+  const user = db.prepare('SELECT * FROM users WHERE id = ?').get(userId);
   if (!user) return res.status(404).json({ error: 'Account not found.' });
-  const docs = db.prepare('SELECT * FROM id_verification_requests WHERE user_id = ? ORDER BY created_at DESC LIMIT 1').get(req.user.id) || {};
-  await sendApplicationFormPdf(req, res, withBedAssignment(db, user.id, { ...docs, ...user, id: user.id }), `@${user.username} (self)`);
+  const docs = db.prepare('SELECT * FROM id_verification_requests WHERE user_id = ? ORDER BY created_at DESC LIMIT 1').get(userId) || {};
+  await sendApplicationFormPdf(req, res, withBedAssignment(db, user.id, { ...docs, ...user, id: user.id }), `@${user.username} (${via})`);
+}
+
+// GET /api/users/me/application-form[?download=1] — the resident's own soft copy (needs the session cookie)
+router.get('/api/users/me/application-form', requireAuth, (req, res) => sendOwnApplicationForm(req, res, req.user.id, 'self'));
+
+// GET /api/users/me/application-form/link — returns a short-lived signed URL for the same PDF.
+// The page calls this (with the cookie) and then navigates to the returned URL. Needed because inside
+// Facebook/Messenger in-app browsers the PDF download is handed to the phone's download manager / external
+// Chrome, which has NO session cookie and used to get {"error":"You must be logged in to do that."}.
+router.get('/api/users/me/application-form/link', requireAuth, (req, res) => {
+  res.set('Cache-Control', 'private, no-store');
+  res.json({ url: createFormLink(req.user.id) });
+});
+
+// GET /api/application-form/download?u=&e=&s=&download=1 — NO login required, the signed link IS the proof.
+// Only serves the Application Form of the user the link was signed for, for 3 minutes (see utils/formLink.js).
+router.get('/api/application-form/download', async (req, res) => {
+  const v = verifyFormLink(req.query);
+  if (!v.ok) {
+    log.warn(`[application-form] signed link rejected (${v.reason}) ip=${req.ip}`);
+    return res.status(v.reason === 'expired' ? 410 : 403).json({
+      error: v.reason === 'expired'
+        ? 'This download link has expired. Go back to My Dormitory and tap "My Application Form" again.'
+        : 'This download link is not valid. Go back to My Dormitory and tap "My Application Form" again.',
+    });
+  }
+  await sendOwnApplicationForm(req, res, v.userId, 'signed-link');
 });
 
 // POST /api/users/:id/follow-only — follow without friending
