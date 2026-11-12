@@ -250,11 +250,15 @@ router.get('/api/auth/revision', (req, res) => {
       snapshot, docs,
       avatarUrl: rec.avatar || rec.selfie_url || '',
       idType: rec.id_type || 'school_id',
-      // Records rejected BEFORE wizard snapshots existed: restore the plain fields from the columns instead.
+      // Records rejected BEFORE wizard snapshots existed: the browser restores the form from these saved columns instead.
+      // (Address, school, year level and course are included — without them a legacy record reopened with those fields blank.)
       fields: snapshot ? null : {
         firstName: rec.first_name, middleName: rec.middle_name, lastName: rec.last_name, suffix: rec.suffix,
         birthday: rec.birthday, sex: rec.sex, civilStatus: rec.civil_status, phone: rec.phone, bio: rec.bio,
         monthlyIncome: rec.monthly_income, fatherInfo: rec.father_info, motherInfo: rec.mother_info, guardianInfo: rec.guardian_info,
+        permanentAddress: rec.permanent_address || '', presentAddress: rec.present_address || '',
+        schoolName: rec.school_name || '', schoolAddress: rec.school_address || '',
+        yearLevel: rec.year_level || '', course: rec.course || '', specialization: rec.specialization || '',
         roomPreference: Number.isInteger(rec.room_preference) ? rec.room_preference : null, roommateNote: rec.roommate_note || '',
       },
     },
@@ -365,6 +369,20 @@ router.post('/api/auth/complete-registration',
     if (!birthday)          return fail(400, 'VALIDATION', 'Date of birth is required.', { field: 'birthday' });
     if (getAge(birthday) < 13) return fail(400, 'VALIDATION', 'You must be at least 13 years old.', { field: 'birthday' });
     if (!sex)               return fail(400, 'VALIDATION', 'Sex is required.', { field: 'sex' });
+
+    // Address / year level / course. The wizard requires them on Step 3, but a returned application reopens on the first
+    // flagged step (often Step 5), so half-restored answers used to reach this route and overwrite the saved data with blanks.
+    // "[Purok - ]Barangay, City, [Province,] Region, Philippines" has at least 4 comma segments; fewer means a dropdown was left empty.
+    const addrSegments = (a) => String(a || '').split(',').map(s => s.trim()).filter(Boolean).length;
+    if (addrSegments(permanentAddress) < 4)
+      return fail(400, 'VALIDATION', 'Your permanent address is incomplete. Please choose your city/municipality and barangay and enter your purok / sitio.', { field: 'permanentAddress' });
+    if (addrSegments(presentAddress) < 4)
+      return fail(400, 'VALIDATION', 'Your present address is incomplete. Please choose your city/municipality and barangay and enter your purok / sitio.', { field: 'presentAddress' });
+    const yearLevelClean = String(yearLevel || '').trim();
+    if (!yearLevelClean || /^[\u2014\u2013-]|^select\b/i.test(yearLevelClean))   // a dropdown placeholder is not an answer
+      return fail(400, 'VALIDATION', 'Please select your year level.', { field: 'yearLevel' });
+    if (!String(course || '').trim())
+      return fail(400, 'VALIDATION', 'Please select your program / course.', { field: 'course' });
 
     if (!phone?.trim()) return fail(400, 'VALIDATION', 'Phone number is required.', { field: 'phone' });
     const phoneClean = phone.trim().replace(/\D/g, '');

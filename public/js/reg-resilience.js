@@ -862,7 +862,7 @@
       if (flags.length) h += '<p class="mt-3 font-semibold">Please correct or replace:</p><ul class="list-disc pl-5 mt-1 space-y-1">' +
         flags.map(function (f) { return '<li><strong>' + escH(f.label) + '</strong>' + (f.note ? ' &mdash; ' + escH(f.note) : '') + '</li>'; }).join('') + '</ul>';
       h += '<p class="mt-3 text-xs leading-snug">Nothing you entered was lost. Fix only the items above, then submit again on the last step.' +
-           (rev.snapshot ? '' : ' Your address, school and course could not be restored automatically &mdash; please choose them again.') + '</p>';
+           (rev.snapshot ? '' : ' This application was saved by an older version of the form &mdash; please double-check your address, school and course below.') + '</p>';
       b.innerHTML = h;
       s1.parentNode.insertBefore(b, s1);
     }
@@ -908,8 +908,91 @@
     });
   }
 
-  /** Records rejected before wizard snapshots existed: restore the plain fields from the saved columns. */
-  function restoreLegacy(rev) {
+  // ── Records rejected BEFORE wizard snapshots existed: rebuild the form from the saved database columns ─────────────
+  // The columns hold the TEXT the wizard produced (address string, "3rd Year", course code …), so every dropdown is matched
+  // back by its visible text. Anything that cannot be matched is left empty and Step 3 validation makes the applicant pick it.
+  function nrmTxt(s) { return String(s == null ? '' : s).replace(/\s+\(\d{4}\)$/, '').replace(/\s+/g, ' ').trim().toLowerCase(); }
+  function optByText(sel, text) {
+    var t = nrmTxt(text); if (!sel || !t) return null;
+    for (var i = 0; i < sel.options.length; i++) { var o = sel.options[i]; if (o.value && nrmTxt(o.text) === t) return o; }
+    return null;
+  }
+  function isPlaceholderText(s) { return !s || /^[\u2014\u2013-]|^select\b/i.test(String(s).trim()); }   // "— Select Year Level —" etc. is not an answer
+  function catalogEntry(code) {
+    var c = String(code || '').trim().toLowerCase(), list = global.ASCOT_COURSES;
+    if (!c || !Array.isArray(list)) return null;
+    for (var i = 0; i < list.length; i++) if (String(list[i].value).toLowerCase() === c) return list[i];
+    return null;
+  }
+
+  /**
+   * "[Purok - ]Barangay, City/Municipality, [Province,] Region, Philippines" → Region → Province → City → Barangay dropdowns + purok.
+   * Works right-to-left, one level at a time, because each level's list depends on the one above. Returns true when the barangay was matched.
+   */
+  async function restoreAddrFromString(prefix, str) {
+    var parts = String(str || '').split(',').map(function (x) { return x.trim(); }).filter(Boolean);
+    if (parts.length && /^philippines$/i.test(parts[parts.length - 1])) parts.pop();
+    var r = $(prefix + '-region'); if (!parts.length || !r) return false;
+    var ro = optByText(r, parts[parts.length - 1]);
+    if (!ro) { console.warn('[RegResilience] ' + prefix + ' address: region not recognised — "' + str + '"'); return false; }
+    parts.pop(); r.value = ro.value;
+    await call('loadAddrCascade', prefix, 'province');
+    var p = $(prefix + '-province');
+    if (p && p.value !== '__ncr__' && p.value !== '__none__') {            // NCR / regions without provinces go straight to cities
+      var po = parts.length ? optByText(p, parts[parts.length - 1]) : null;
+      if (!po) { call('buildAddrString', prefix); return false; }
+      p.value = po.value; parts.pop();
+      await call('loadAddrCascade', prefix, 'city');
+    }
+    var c = $(prefix + '-city'), co = parts.length ? optByText(c, parts[parts.length - 1]) : null;
+    if (!co) { call('buildAddrString', prefix); return false; }
+    c.value = co.value; parts.pop();
+    await call('loadAddrCascade', prefix, 'brgy');
+    var b = $(prefix + '-brgy'), seg = parts.length ? parts[parts.length - 1] : '';
+    if (seg && b) {
+      var bo = optByText(b, seg), purok = '', idx = seg.indexOf(' - ');
+      while (!bo && idx > -1) {                                           // "Purok 3 - Barangay": barangay names may contain " - " too, so try every split
+        bo = optByText(b, seg.slice(idx + 3));
+        if (bo) purok = seg.slice(0, idx); else idx = seg.indexOf(' - ', idx + 3);
+      }
+      if (bo) { b.value = bo.value; var pk = $(prefix + '-purok'); if (pk && purok && !pk.value) pk.value = purok; }
+    }
+    call('buildAddrString', prefix);
+    return !!(b && b.value);
+  }
+
+  function restoreSchoolFromColumns(f) {
+    var nm = String(f.schoolName || '').trim(), ad = String(f.schoolAddress || '').trim();
+    if (nm && nrmTxt(nm).indexOf('aurora state college of technology') !== 0) { setChecked('school-name-manual-toggle', true); call('toggleSchoolManual', 'name'); setVal('reg-school', nm); }
+    if (ad && nrmTxt(ad) !== 'zabali, baler, aurora')                          { setChecked('school-addr-manual-toggle', true); call('toggleSchoolManual', 'addr'); setVal('reg-schooladdr', ad); }
+  }
+
+  /** Year level first (it filters the course list), then course, then major — the same order the wizard itself uses. */
+  function restoreYearCourseFromColumns(f) {
+    var yl = String(f.yearLevel || '').trim(), yearOk = false;
+    if (!isPlaceholderText(yl)) {
+      var ys = $('reg-yearlevel'), m = /^\s*([1-5])(?:st|nd|rd|th)?\b/i.exec(yl), yo = optByText(ys, yl);
+      if (!yo && m && hasOption(ys, m[1])) yo = { value: m[1] };
+      if (yo) { ys.value = yo.value; call('onYearLevelChange'); }
+      else { setChecked('yearlevel-manual-toggle', true); call('toggleYearLevelManualMode'); setVal('reg-yearlevel-manual', yl); }   // typed via "Not listed"
+      yearOk = true;
+    }
+    var code = String(f.course || '').trim(), spec = String(f.specialization || '').trim();
+    if (!code && !spec) return;
+    var entry = catalogEntry(code) || catalogEntry(spec), cs = $('reg-course');
+    if (entry && yearOk && cs && hasOption(cs, entry.family)) {
+      cs.value = entry.family; call('onCourseChange');
+      var ss = $('reg-specialization');
+      if (entry.major && ss && hasOption(ss, entry.value)) ss.value = entry.value;
+      return;
+    }
+    if (entry && !yearOk) return;   // the course list is locked until a year level is chosen — the applicant picks both again
+    // not a catalog code (typed via "Not listed"), or not offered for that year level → keep exactly what was saved, as text
+    setChecked('course-manual-toggle', true); call('toggleCourseManualMode');
+    setVal('reg-course-manual', code || spec); setVal('reg-specialization-manual', spec && spec !== code ? spec : '');
+  }
+
+  async function restoreLegacy(rev) {
     var f = rev.fields || {};
     function tenDigits(p) { var d = String(p || '').replace(/\D/g, ''); return d.slice(-10); }
     setVal('reg-fname', f.firstName); setVal('reg-mname', f.middleName); setVal('reg-lname', f.lastName); setVal('reg-suffix', f.suffix);
@@ -918,10 +1001,16 @@
     if (f.monthlyIncome && hasOption($('reg-income'), f.monthlyIncome)) setVal('reg-income', f.monthlyIncome);
     Array.prototype.forEach.call(document.querySelectorAll('input[name="sex"]'), function (rd) { if (String(rd.value).toLowerCase() === String(f.sex || '').toLowerCase()) rd.checked = true; });
     var ph = $('reg-phone'); if (ph && f.phone) { ph.value = tenDigits(f.phone); call('formatPhone', ph); call('validatePhoneInline'); }
-    [['father', f.fatherInfo], ['mother', f.motherInfo], ['guardian', f.guardianInfo]].forEach(function (pair) {
-      var p = pair[0], o = null;
-      try { o = pair[1] ? JSON.parse(pair[1]) : null; } catch (e) {}
-      if (!o) return;
+
+    restoreSchoolFromColumns(f);
+    restoreYearCourseFromColumns(f);
+
+    var fam = [['father', f.fatherInfo], ['mother', f.motherInfo], ['guardian', f.guardianInfo]].map(function (pair) {
+      var o = null; try { o = pair[1] ? JSON.parse(pair[1]) : null; } catch (e) {}
+      return { p: pair[0], o: o };
+    });
+    fam.forEach(function (x) {
+      var p = x.p, o = x.o; if (!o) return;
       setVal(p + '-fname', o.firstName); setVal(p + '-mname', o.middleName); setVal(p + '-lname', o.lastName); setVal(p + '-suffix', o.suffix);
       if (p === 'guardian') setVal('guardian-relationship', o.relationship);
       if (o.deceased) { setChecked(p + '-deceased', true); call('toggleParentDeceased', p); }
@@ -929,6 +1018,19 @@
     });
     if (f.roomPreference != null) setVal('reg-room-pref', f.roomPreference);
     setVal('reg-roommate-note', f.roommateNote);
+
+    // Addresses last (they need the network / bundled PSGC lists). Identical to the permanent address → the "Same as Permanent" box.
+    var perm = String(f.permanentAddress || '').trim(), pres = String(f.presentAddress || '').trim();
+    await restoreAddrFromString('perm', perm);
+    if (pres && pres === perm) { setChecked('same-as-permanent', true); call('toggleSameAsPermanent'); }
+    else await restoreAddrFromString('pres', pres);
+    for (var i = 0; i < fam.length; i++) {
+      var p = fam[i].p, o = fam[i].o, addr = o && !o.deceased ? String(o.address || '').trim() : '';
+      if (!addr) continue;
+      if (p === 'guardian') { var gs = $('guardian-section'); if (!gs || gs.classList.contains('hidden')) continue; }
+      if (perm && addr === perm) { setChecked(p + '-same-as-perm', true); call('toggleParentSameAsPerm', p); }
+      else await restoreAddrFromString(p, addr);
+    }
   }
 
   /**
@@ -969,8 +1071,14 @@
     } else {
       await FileStore.clear();                                 // never mix leftovers of another attempt into this application
       if (rev.snapshot) await restoreDraft({ v: 1, email: rev.email, step: startStep, fields: rev.snapshot.fields || {}, addr: rev.snapshot.addr || {} });
-      else { state.restoring = true; try { restoreLegacy(rev); } finally { state.restoring = false; } showStep(startStep); }
+      else { state.restoring = true; try { await restoreLegacy(rev); } finally { state.restoring = false; } showStep(startStep); }
       if (rev.idType && hasOption($('reg-id-type'), rev.idType)) setVal('reg-id-type', rev.idType);
+    }
+    // The wizard opens on the first FLAGGED step, which may be 4 or 5. If anything in Step 3 is still missing after the restore
+    // (an old record, an address that could not be matched …), open on Step 3 instead so nothing incomplete can be submitted.
+    if (curStep() > 3) {
+      var step3Ok = await call('validateStep', 3);
+      if (!step3Ok) { showStep(3); report('revision_step3_incomplete', { phase: rev.snapshot ? 'snapshot' : 'legacy' }); }
     }
     state.lastSig = '';
     revRefresh(keepsSelfie() ? 'idle' : 'other');

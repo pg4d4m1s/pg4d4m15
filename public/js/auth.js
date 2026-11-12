@@ -1923,6 +1923,16 @@ async function completeRegistration() {
   }
   var revDocErr = RegResilience.revisionCheck('docs');
   if (revDocErr) { showStepError(5, revDocErr); return; }
+  // Step 3 is normally validated when the applicant taps Continue. A returned application reopens on the FIRST FLAGGED step
+  // (e.g. Step 5 when only a document was flagged), so Step 3 may never have been checked — and blank or half-restored answers
+  // (address, year level, course …) were submitted and overwrote the saved ones. Always re-run the full Step 3 validation here.
+  var step3Ok = await validateStep(3);   // shows its own message in Step 3
+  if (!step3Ok) {
+    var step3Msg = ($('err-3') && $('err-3').textContent || '').trim().slice(0, 30);
+    RegResilience.report('submit_blocked_step3', { phase: 'submit', code: step3Msg });
+    $('step-5').classList.add('hidden'); $('step-3').classList.remove('hidden'); currentStep = 3; updateProgress(3);
+    return;
+  }
   if (!haveDoc('school-id'))  { showStepError(5, 'Please upload your School ID or a valid Government ID.'); return; }
   if (!haveDoc('residency'))  { showStepError(5, 'Please upload your Certificate of Residency.'); return; }
   if (!haveDoc('low-income')) { showStepError(5, 'Please upload your Certificate of Low Income.'); return; }
@@ -1980,7 +1990,7 @@ async function completeRegistration() {
     var yearIsManual = !!($('yearlevel-manual-toggle') && $('yearlevel-manual-toggle').checked);
     var yearLevelVal = yearIsManual
       ? (($('reg-yearlevel-manual')||{}).value||'').trim()
-      : ($('reg-yearlevel') ? $('reg-yearlevel').options[$('reg-yearlevel').selectedIndex].text : '');
+      : (($('reg-yearlevel') && $('reg-yearlevel').value) ? $('reg-yearlevel').options[$('reg-yearlevel').selectedIndex].text : '');   // '' (not the "— Select Year Level —" label) when nothing is chosen
     fd.append('yearLevel', yearLevelVal);
 
     // Course: if a specialization was selected, its value IS the specific course code
