@@ -2219,7 +2219,7 @@
     socket.on('new-notification',()=>{refreshAll();});
     socket.on('new-registration',(data)=>{
       updateRegBadge(1);
-      toast(`New registration: @${data.username}`, 'info');
+      toast(data.resubmission ? `Corrected application resubmitted: @${data.username}` : `New registration: @${data.username}`, 'info');
       // If on registrations tab, refresh it
       if(document.getElementById('tab-registrations').classList.contains('active')) loadPendingAccounts();
     });
@@ -2774,6 +2774,7 @@
     const r=await fetch('/api/admin/accounts/pending');
     const d=await r.json();
     _regAccounts = d.accounts || [];
+    await ensureRevisionItems();   // the Reject form's checklist + the "resubmitted" notice need the labels
     if(!_regAccounts.length){
       el.innerHTML='<div class="bg-white dark:bg-slate-900 rounded-2xl border border-slate-100 dark:border-slate-800 p-12 text-center"><i class="fa-solid fa-user-check text-4xl text-green-400 mb-3 block"></i><p class="font-display font-semibold text-slate-700 dark:text-slate-300">No pending registrations!</p><p class="text-sm text-slate-400 mt-1">All accounts have been reviewed.</p></div>';
       const countEl = document.getElementById('reg-count');
@@ -2932,6 +2933,62 @@
       <p class="text-xs text-slate-400 mb-0.5"><i class="fa-solid ${escHtml(icon)} mr-1"></i>${escHtml(label)}</p>
       <p class="text-sm font-semibold text-slate-700 dark:text-slate-200 truncate" title="${escHtml(String(value))}">${escHtml(String(value))}</p>
     </div>`;
+  }
+
+  // ── "Reject" = return the application for correction ────────────────────────────────────────
+  // The applicant keeps every answer/document, sees the admin's comment + exactly which items were ticked, and resubmits.
+  // The checklist comes from the server (utils/applicationRevision.js) so labels never drift from what the applicant sees.
+  let _revItems = null;   // [{ key, label, group:'info'|'photo'|'doc', step }]
+  async function ensureRevisionItems(){
+    if(_revItems && _revItems.length) return _revItems;
+    try{
+      const r=await fetch('/api/admin/revision-items'); const d=await r.json();
+      if(Array.isArray(d.items)) _revItems=d.items;
+    }catch(e){ console.error('[revision-items]',e); }
+    return _revItems||[];
+  }
+  function regRejectChecklistHtml(a){
+    if(!_revItems||!_revItems.length)
+      return '<p class="text-sm text-amber-700 dark:text-amber-400 mb-3">The checklist could not be loaded — refresh the page to get it. You can still write a comment below.</p>';
+    // Pre-tick what is obviously missing so the admin only has to confirm.
+    const missing={ selfie:!(a.selfie_url||a.avatar), doc_school_id:!a.id_front_url, doc_residency:!a.cert_residency_url,
+                    doc_low_income:!a.cert_low_income_url, doc_enrollment:!a.cert_enrollment_url, doc_grades:!a.cert_grades_url };
+    const groups=[['info','Information that is wrong'],['photo','Face / selfie photo'],['doc','Documents to replace']];
+    return groups.map(function(g){
+      const rows=_revItems.filter(function(i){return i.group===g[0];}).map(function(i){
+        const id='rej-flag-'+a.id+'-'+i.key, pre=missing[i.key];
+        return '<div data-flag-row class="rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900">'
+          + '<label for="'+id+'" class="flex items-start gap-3 min-h-[44px] px-3 py-2.5 cursor-pointer">'
+          + '<input type="checkbox" id="'+id+'" data-flag-key="'+escHtml(i.key)+'" class="mt-0.5 w-5 h-5 flex-shrink-0 accent-red-500" onchange="regFlagToggle(this)"'+(pre?' checked':'')+'/>'
+          + '<span class="text-sm font-semibold text-slate-700 dark:text-slate-200 leading-snug">'+escHtml(i.label)
+          + (pre?' <span class="text-xs font-bold text-red-500">(missing)</span>':'')+'</span></label>'
+          + '<div data-flag-notewrap class="'+(pre?'':'hidden ')+'px-3 pb-3">'
+          + '<input type="text" maxlength="200" data-flag-note="'+escHtml(i.key)+'" placeholder="Optional: what exactly is wrong?" '
+          + 'class="w-full text-base sm:text-sm rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-800 dark:text-slate-200 px-3 py-2.5 outline-none focus:ring-2 focus:ring-red-300"/></div>'
+          + '</div>';
+      }).join('');
+      return '<div class="mb-4"><p class="text-xs font-extrabold text-slate-500 uppercase tracking-widest mb-2">'+g[1]+'</p><div class="space-y-2">'+rows+'</div></div>';
+    }).join('');
+  }
+  function regFlagToggle(cb){
+    const row=cb.closest('[data-flag-row]'); if(!row) return;
+    const wrap=row.querySelector('[data-flag-notewrap]'); if(wrap) wrap.classList.toggle('hidden',!cb.checked);
+  }
+  // Shown on a pending card when the applicant already fixed and resubmitted after an earlier rejection.
+  function regResubmissionHtml(a){
+    const n=Number(a.resubmit_count)||0; if(!n) return '';
+    let prev=null; try{ prev=a.prev_rejection?JSON.parse(a.prev_rejection):null; }catch(e){}
+    const labels={}; (_revItems||[]).forEach(function(i){labels[i.key]=i.label;});
+    const items=(prev&&Array.isArray(prev.flags)?prev.flags:[]).map(function(f){
+      return '<li><strong>'+escHtml(labels[f.key]||f.key)+'</strong>'+(f.note?' — '+escHtml(f.note):'')+'</li>';
+    }).join('');
+    return '<div class="flex items-start gap-3 p-4 bg-blue-50 dark:bg-blue-950/20 border-2 border-blue-200 dark:border-blue-800 rounded-2xl">'
+      + '<i class="fa-solid fa-rotate text-blue-500 text-xl mt-0.5 flex-shrink-0"></i><div class="min-w-0">'
+      + '<p class="text-xs font-extrabold text-blue-600 uppercase tracking-wider mb-1">Resubmitted application (returned '+n+(n===1?' time':' times')+')</p>'
+      + '<p class="text-sm text-slate-600 dark:text-slate-300 mb-1">Check that the items below were corrected:</p>'
+      + (prev&&prev.reason?'<p class="text-sm text-slate-700 dark:text-slate-300 mb-2 break-words" style="white-space:pre-wrap;"><strong>Your earlier comment:</strong> '+escHtml(prev.reason)+'</p>':'')
+      + (items?'<ul class="text-sm text-slate-700 dark:text-slate-300 list-disc pl-5 space-y-0.5">'+items+'</ul>':'')
+      + '</div></div>';
   }
 
   function renderRegistrationCard(a){
@@ -3159,6 +3216,8 @@
       <!-- ═══ BODY ═══ -->
       <div class="p-5 space-y-5">
 
+        ${regResubmissionHtml(a)}
+
         <!-- PERSONAL INFORMATION -->
         <div>
           ${sec('fa-user', 'Personal Information')}
@@ -3237,19 +3296,22 @@
           </div>` : ''}
         </div>
 
-        <!-- Reject reason (hidden) -->
-        <div id="reg-reject-form-${a.id}" class="hidden">
-          <p class="text-sm font-extrabold text-slate-500 uppercase tracking-widest mb-3">Rejection Reason</p>
-          <textarea id="reg-reject-reason-${a.id}" rows="3"
-            placeholder="Explain why this application is being rejected (will be emailed to the applicant)…"
-            class="w-full rounded-2xl border-2 border-red-200 dark:border-red-800 bg-red-50 dark:bg-red-950/30 text-base text-slate-800 dark:text-slate-200 px-4 py-3 outline-none resize-none mb-3 focus:ring-2 focus:ring-red-300"></textarea>
-          <div class="flex gap-3">
-            <button onclick="confirmRejectAccount('${a.id}')"
-              class="flex-1 text-base font-bold text-white bg-red-500 hover:bg-red-600 px-4 py-3 rounded-2xl transition-colors flex items-center justify-center gap-2">
-              <i class="fa-solid fa-xmark text-lg"></i> Confirm Reject
+        <!-- Return for correction (hidden until "Reject" is pressed) -->
+        <div id="reg-reject-form-${a.id}" class="hidden rounded-2xl border-2 border-red-200 dark:border-red-800 bg-red-50/60 dark:bg-red-950/20 p-4">
+          <p class="text-sm font-extrabold text-red-600 uppercase tracking-widest mb-1">Return application for correction</p>
+          <p class="text-xs text-slate-500 dark:text-slate-400 mb-4 leading-relaxed">The applicant goes back to their application with everything they entered kept. They will see your comment and exactly the items you tick — and only need to fix those.</p>
+          ${regRejectChecklistHtml(a)}
+          <p class="text-xs font-extrabold text-slate-500 uppercase tracking-widest mb-2">Comment to the applicant</p>
+          <textarea id="reg-reject-reason-${a.id}" rows="3" maxlength="1000"
+            placeholder="Explain what is wrong and how to fix it (shown to the applicant and emailed)…"
+            class="w-full rounded-2xl border-2 border-red-200 dark:border-red-800 bg-white dark:bg-slate-900 text-base text-slate-800 dark:text-slate-200 px-4 py-3 outline-none resize-none mb-3 focus:ring-2 focus:ring-red-300"></textarea>
+          <div class="flex flex-col sm:flex-row gap-3">
+            <button data-reject-confirm onclick="confirmRejectAccount('${a.id}')"
+              class="w-full sm:flex-1 min-h-[48px] text-base font-bold text-white bg-red-500 hover:bg-red-600 px-4 py-3 rounded-2xl transition-colors flex items-center justify-center gap-2">
+              <i class="fa-solid fa-rotate-left text-lg"></i> Send back for correction
             </button>
             <button onclick="document.getElementById('reg-reject-form-${a.id}').classList.add('hidden')"
-              class="text-base font-semibold text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 px-5 py-3 rounded-2xl transition-colors border-2 border-slate-200 dark:border-slate-700">
+              class="w-full sm:w-auto min-h-[48px] text-base font-semibold text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 px-5 py-3 rounded-2xl transition-colors border-2 border-slate-200 dark:border-slate-700">
               Cancel
             </button>
           </div>
@@ -3284,12 +3346,28 @@
   }
 
   async function confirmRejectAccount(id){
-    const reason = (document.getElementById(`reg-reject-reason-${id}`)?.value||'').trim();
-    const r=await fetch(`/api/admin/accounts/${id}/reject`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({reason})});
-    const d=await r.json();
-    if(d.error){ toast(d.error,'error'); return; }
+    const form=document.getElementById(`reg-reject-form-${id}`);
+    const reason=(document.getElementById(`reg-reject-reason-${id}`)?.value||'').trim();
+    const flags=[...(form?form.querySelectorAll('[data-flag-key]:checked'):[])].map(cb=>({
+      key:cb.dataset.flagKey,
+      note:(form.querySelector(`[data-flag-note="${cb.dataset.flagKey}"]`)?.value||'').trim()
+    }));
+    if(!reason && !flags.length){ toast('Tick at least one item to correct and/or write a comment — otherwise the applicant will not know what to fix.','error'); return; }
+    const btn=form?form.querySelector('[data-reject-confirm]'):null;
+    const btnHtml=btn?btn.innerHTML:'';
+    if(btn){ btn.disabled=true; btn.innerHTML='<i class="fa-solid fa-spinner animate-spin mr-1"></i>Sending…'; }
+    try{
+      const r=await fetch(`/api/admin/accounts/${id}/reject`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({reason,flags})});
+      const d=await r.json().catch(()=>({error:'Unexpected server reply (HTTP '+r.status+').'}));
+      if(!r.ok||d.error){ toast(d.error||'Could not send the application back.','error'); if(btn){btn.disabled=false;btn.innerHTML=btnHtml;} return; }
+    }catch(e){
+      console.error('[confirmRejectAccount]',e);
+      toast('Network error — nothing was changed. Please try again.','error');
+      if(btn){btn.disabled=false;btn.innerHTML=btnHtml;}
+      return;
+    }
     document.getElementById(`reg-card-${id}`)?.remove();
-    toast('Account rejected. User has been notified.','info');
+    toast('Application sent back for correction. The applicant has been emailed. ↩','info');
     updateRegBadge(-1);
     fetch('/api/admin/stats').then(r=>r.json()).then(s=>{ _lastStats=s; renderStatCards(s); });
   }
@@ -4850,7 +4928,8 @@
       a.year_level ? escHtml(a.year_level) : null,
       a.course ? escHtml(courseLabel(a.course)||a.course) : null,
       (a.specialization && a.specialization !== '(none)') ? `<span class="text-brand-400">${escHtml(majorDisplay(a))}</span>` : null,
-      a.rejection_reason ? `<span class="text-red-400">${escHtml(a.rejection_reason.slice(0,60)+(a.rejection_reason.length>60?'…':''))}</span>` : null,
+      a.rejection_reason ? `<span class="text-red-400">${escHtml(a.rejection_reason.slice(0,60)+(a.rejection_reason.length>60?'…':''))}</span>`
+        : (a.rejection_flags||[]).length ? `<span class="text-red-400">${a.rejection_flags.length} item${a.rejection_flags.length===1?'':'s'} flagged</span>` : null,
     ].filter(Boolean).join(' &nbsp;·&nbsp; ');
     return `<div>
       <button data-rej-toggle="${a.id}" class="w-full flex items-center gap-4 px-5 py-4 hover:bg-slate-50 dark:hover:bg-slate-800/60 transition-colors text-left group">
@@ -5118,13 +5197,16 @@
       <!-- BODY -->
       <div class="p-5 space-y-5">
 
-        <!-- REJECTION REASON (prominent) -->
-        ${a.rejection_reason ? `
+        <!-- REJECTION: comment + checklist the applicant sees -->
+        ${(a.rejection_reason || (a.rejection_flags||[]).length) ? `
         <div class="flex items-start gap-3 p-4 bg-red-50 dark:bg-red-950/20 border-2 border-red-200 dark:border-red-800 rounded-2xl">
           <i class="fa-solid fa-circle-xmark text-red-500 text-xl mt-0.5 flex-shrink-0"></i>
-          <div>
-            <p class="text-xs font-extrabold text-red-500 uppercase tracking-wider mb-1">Reason for Rejection</p>
-            <p class="text-sm text-slate-700 dark:text-slate-300 leading-relaxed">${escHtml(a.rejection_reason)}</p>
+          <div class="min-w-0">
+            ${a.rejection_reason ? `<p class="text-xs font-extrabold text-red-500 uppercase tracking-wider mb-1">Admin comment</p>
+            <p class="text-sm text-slate-700 dark:text-slate-300 leading-relaxed break-words mb-3" style="white-space:pre-wrap;">${escHtml(a.rejection_reason)}</p>` : ''}
+            ${(a.rejection_flags||[]).length ? `<p class="text-xs font-extrabold text-red-500 uppercase tracking-wider mb-1">Applicant must correct</p>
+            <ul class="text-sm text-slate-700 dark:text-slate-300 list-disc pl-5 space-y-0.5">${a.rejection_flags.map(f=>`<li><strong>${escHtml(f.label)}</strong>${f.note?' — '+escHtml(f.note):''}</li>`).join('')}</ul>` : ''}
+            <p class="text-xs text-slate-500 dark:text-slate-400 mt-3">${a.has_password||a.auth_provider==='google' ? 'The applicant can log back in and fix these items; their other answers and documents are kept.' : 'No password was saved for this record — the applicant can reopen it by registering again with the same email and the 6-digit code.'}</p>
           </div>
         </div>` : ''}
 

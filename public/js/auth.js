@@ -701,6 +701,10 @@ async function validateStep(step) {
       if (guardianErr) { showStepError(3, guardianErr.msg); $(guardianErr.focusId)?.focus(); return false; }
     }
 
+    // Returned application: every piece of information the admin flagged must be confirmed as corrected.
+    var revInfoErr = window.RegResilience ? RegResilience.revisionCheck('info') : '';
+    if (revInfoErr) { showStepError(3, revInfoErr); return false; }
+
     hideStepError(3);
     return true;
   }
@@ -709,6 +713,7 @@ async function validateStep(step) {
     // Profile photo only - required
     var hasPhoto = avatarFileRef || capturedPhotoData || ($('av-cropped-data') && $('av-cropped-data').value);
     if (_scan) { showStepError(4, 'Finish the face scan first \u2014 follow the instructions on the camera.'); return false; }
+    if (revisionKeepsSelfie()) { hideStepError(4); return true; }   // returned application: the accepted photo is kept unless retaken
     if (!hasPhoto) { showStepError(4, 'Please take a live selfie with the camera to continue.'); return false; }
     if (!selfieIsVerified()) { showStepError(4, 'Your selfie has not passed the face scan. Tap \u201cRetake Selfie\u201d and follow the on-screen steps.'); return false; }
     hideStepError(4);
@@ -870,9 +875,12 @@ async function verifyOTP() {
     updateProgress(3);
     document.querySelector('.overflow-y-auto').scrollTop = 0;
     // populate address dropdowns, then restore any saved answers for this e-mail (e.g. session expired earlier)
-    initAddrDropdowns()
-      .then(function(){ return RegResilience.restoreAfterVerify(); })
-      .catch(function(e){ console.warn('[Resume]', e); });
+    // An admin may have returned this e-mail's earlier application for correction → reopen it with the saved answers.
+    var revOpen = data.revision ? RegResilience.openRevision() : Promise.resolve(false);
+    revOpen.then(function(opened){
+      if (opened) return;
+      return initAddrDropdowns().then(function(){ return RegResilience.restoreAfterVerify(); });
+    }).catch(function(e){ console.warn('[Resume]', e); });
     RegResilience.onStepChange(3);
 
   } catch(e) {
@@ -1900,16 +1908,26 @@ async function loadRoomPreferences(manual) {
 async function completeRegistration() {
   var docs = window._damis_docs || {};
   // Safety net: a draft restored after a refresh can land on Step 5 with a photo that never passed the live scan.
-  if (!selfieIsVerified() || !(avatarFileRef || capturedPhotoData)) {
+  if (!revisionKeepsSelfie() && (!selfieIsVerified() || !(avatarFileRef || capturedPhotoData))) {
     clearSelfiePhoto();
     backToSelfieStep('Please take your live selfie again \u2014 it has to pass the face scan before you can submit.');
     return;
   }
-  if (!docs['school-id'])  { showStepError(5, 'Please upload your School ID or a valid Government ID.'); return; }
-  if (!docs['residency'])  { showStepError(5, 'Please upload your Certificate of Residency.'); return; }
-  if (!docs['low-income']) { showStepError(5, 'Please upload your Certificate of Low Income.'); return; }
-  if (!docs['enrollment']) { showStepError(5, 'Please upload your Certificate of Registration/Enrollment.'); return; }
-  if (!docs['grades'])     { showStepError(5, 'Please upload your Report Card / Certificate of Grades from last semester.'); return; }
+  // Returned application: documents the admin did not flag are kept server-side (window._damis_kept) — only flagged ones must be re-uploaded.
+  var kept = window._damis_kept || {};
+  function haveDoc(k) { return !!docs[k] || !!kept[k]; }
+  var revInfoErr = RegResilience.revisionCheck('info');
+  if (revInfoErr) {      // acknowledgements live on Step 3 (they are not saved across a reload) → take the applicant there
+    $('step-5').classList.add('hidden'); $('step-3').classList.remove('hidden'); currentStep = 3; updateProgress(3);
+    showStepError(3, revInfoErr); return;
+  }
+  var revDocErr = RegResilience.revisionCheck('docs');
+  if (revDocErr) { showStepError(5, revDocErr); return; }
+  if (!haveDoc('school-id'))  { showStepError(5, 'Please upload your School ID or a valid Government ID.'); return; }
+  if (!haveDoc('residency'))  { showStepError(5, 'Please upload your Certificate of Residency.'); return; }
+  if (!haveDoc('low-income')) { showStepError(5, 'Please upload your Certificate of Low Income.'); return; }
+  if (!haveDoc('enrollment')) { showStepError(5, 'Please upload your Certificate of Registration/Enrollment.'); return; }
+  if (!haveDoc('grades'))     { showStepError(5, 'Please upload your Report Card / Certificate of Grades from last semester.'); return; }
   if (!$('chk-terms').checked) { showStepError(5, 'You must agree to the Terms & Conditions.'); return; }
 
   // NOTE: the Student Residents Questionnaire used to be required here before
@@ -2026,6 +2044,11 @@ async function completeRegistration() {
     fd.append('roomPreference', $('reg-room-pref') ? $('reg-room-pref').value : '');
     fd.append('roommateNote',   $('reg-roommate-note') ? $('reg-roommate-note').value.trim().slice(0, 300) : '');
 
+    // The wizard's exact answers (so an application that is returned later reopens with every dropdown restored) and, for a
+    // returned application, which flagged items the applicant confirmed. The server re-checks both (routes/auth.js).
+    try { fd.append('formSnapshot', JSON.stringify(RegResilience.snapshot())); } catch (snapErr) { console.warn('[REG] snapshot skipped', snapErr); }
+    fd.append('revisionAck', JSON.stringify(RegResilience.revisionAck()));
+
     // Attach DAMIS document files + profile photo.
     // Photos are resized to ≤1600 px JPEG first (a 4 MB phone photo → a few hundred KB) and files are copied
     // into memory, so the upload is small and cannot be broken by a picker file disappearing (reg-resilience.js).
@@ -2130,7 +2153,7 @@ async function completeRegistration() {
       var emailEl = $('reg-email') || $('reg-email-display');
       confirmEmail.textContent = emailEl ? emailEl.value.trim() : '';
     }
-    showToast('Registration submitted! Check your email for next steps. ⏳');
+    showToast(outcome.data && outcome.data.resubmitted ? 'Corrections submitted! An admin will review your application again. \u23F3' : 'Registration submitted! Check your email for next steps. ⏳');
 
   } catch(e) {
     console.error('completeRegistration error:', e);
@@ -2610,6 +2633,16 @@ async function handleLogin() {
       return;
     }
 
+    if (data.applicationReturned) {      // not logged in: the admin sent this application back for correction
+      $('login-pass').value = '';
+      $('login-err').classList.add('hidden');
+      var opened = await RegResilience.openRevision();
+      btn.disabled = false; btn.textContent = 'Sign In';
+      if (opened) { showToast('Your application needs a few corrections \u2014 it is open now.', 'info'); return; }
+      showLoginError('We could not open your saved application. Please try again.');
+      return;
+    }
+
     showToast('Welcome back, ' + data.user.firstName + '! 👋');
     btn.innerHTML = '✓ Success! Redirecting...';
     // [TESTING] Admins go directly to admin panel
@@ -3076,7 +3109,19 @@ function selfieHasPhoto() {
 }
 
 // idle = nothing taken yet · scanning = camera open · captured = verified photo is showing
+// Does the returned application keep its already-accepted selfie? (admin did not flag it and the applicant has not retaken it)
+function revisionKeepsSelfie() {
+  var r = window._revision;
+  if (!r || !r.avatarUrl) return false;
+  if (avatarFileRef || capturedPhotoData) return false;
+  return !(r.flags || []).some(function(f){ return f.key === 'selfie'; });
+}
+
 function setStep4Mode(mode) {
+  _setStep4ModeBase(mode);
+  if (window.RegResilience && RegResilience.revRefresh) RegResilience.revRefresh(mode);
+}
+function _setStep4ModeBase(mode) {
   var panel = $('selfie-panel'), ph = $('av-placeholder-wrap'), vf = $('av-viewfinder-wrap');
   var btn = $('btn-selfie-start'), txt = $('btn-selfie-start-txt'), hint = $('selfie-hint');
   function show(el, on) { if (el) el.classList.toggle('hidden', !on); }

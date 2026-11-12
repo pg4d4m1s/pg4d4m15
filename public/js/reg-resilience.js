@@ -17,6 +17,9 @@
  *                           refresh / reloaded tab resumes at the right step WITHOUT a new OTP.
  *   5. Diagnostics         – failures, interruptions and real upload speeds are reported to the server
  *                           (POST /api/auth/client-report) so the logs show the actual root cause.
+ *   6. Returned application – when an admin rejects an application it is sent BACK for correction. After login /
+ *                           Google / e-mail OTP the wizard reopens (openRevision) with every saved answer, the admin's
+ *                           comment, the checklist of flagged items, and un-flagged documents/selfie kept as they were.
  *
  * Privacy: the draft holds the resident's own answers/photos on THEIR device only, expires after 24 h
  * (same as the server session), never contains passwords/OTPs, and is wiped on successful submission
@@ -29,6 +32,7 @@
     STATUS: '/api/auth/registration-status',
     RESET:  '/api/auth/registration-reset',
     REPORT: '/api/auth/client-report',
+    REVISION: '/api/auth/revision',
   };
   var DRAFT_KEY    = 'damis_reg_draft_v1';
   var INFLIGHT_KEY = 'damis_reg_inflight_v1';
@@ -53,6 +57,7 @@
   var state = {
     uploading: false, backgrounded: false, restoring: false, submitted: false,
     lastSig: '', avatarSig: null, abortFn: null, uploadCtx: null, timer: null,
+    revision: null,   // the returned application being corrected (set by openRevision)
   };
 
   // ── tiny helpers ───────────────────────────────────────────────────────────
@@ -345,6 +350,12 @@
     var saved = ' Your answers and documents are saved on this device.';
     if (code === 'SESSION_EXPIRED' || code === 'EMAIL_NOT_VERIFIED')
       return { message: withRef(d.error, d), hint: 'Reload this page and verify your email again — your answers will be restored automatically.', code: code };
+    if (code === 'REVISION_ACK_REQUIRED')
+      return { message: withRef(d.error, d), hint: 'We took you back to confirm your corrections.', code: code, goStep: 3 };
+    if (code === 'REVISION_DOC_REQUIRED')
+      return { message: withRef(d.error, d), hint: 'Upload a new file for each document the admin asked you to replace.', code: code, field: d.field };
+    if (code === 'REVISION_GONE')
+      return { message: withRef(d.error, d), hint: 'Reload this page to continue.', code: code };
     if (code === 'VALIDATION')
       return { message: withRef(d.error, d), hint: 'We took you back to fix it.', code: code, field: d.field, goStep: 3 };
     if (/^SELFIE_/.test(code || ''))   // server-side face check rejected / missed the live selfie → back to Step 4
@@ -504,7 +515,7 @@
     var roomPref = $('reg-room-pref');       if (roomPref && roomPref.value) fields['reg-room-pref'] = roomPref.value;
     var roomNote = $('reg-roommate-note');   if (roomNote && roomNote.value) fields['reg-roommate-note'] = roomNote.value;
     var idTypeSel = $('reg-id-type');        if (idTypeSel && idTypeSel.value) fields['reg-id-type'] = idTypeSel.value;   // which ID the applicant is uploading
-    return { v: 1, email: verifiedEmail(), step: curStep(), fields: fields, addr: addr };
+    return { v: 1, email: verifiedEmail(), step: curStep(), fields: fields, addr: addr, rev: state.revision ? state.revision.id : null };
   }
 
   function saveDraft() {
@@ -659,11 +670,11 @@
 
     // 7) choose the step — never past what the restored data supports
     var target = Math.min(Math.max(d.step || 3, 3), 5);
-    if (target >= 4) {
+    if (target >= 4 && !state.revision) {
       var v3 = await call('validateStep', 3);
       if (!v3) target = 3;
     }
-    if (target >= 5 && !restored.avatar) target = 4;
+    if (target >= 5 && !restored.avatar && !state.revision) target = 4;
     showStep(target);
     state.lastSig = '';
     return restored;
@@ -711,6 +722,9 @@
     }
     if (!st.active) return false;
     if (opts.googleEmail && norm(opts.googleEmail) !== norm(st.email)) return false;
+    if (st.revision && st.emailVerified) {          // an admin returned this applicant's application for correction
+      if (await openRevision()) { report('revision_resumed', {}); return true; }
+    }
 
     // show the sign-up panel with the right e-mail
     call('showTab', 'signup');
@@ -753,16 +767,228 @@
     report('draft_restored_after_verify', { code: r.fields + 'f/' + r.docs + 'd/' + (r.avatar ? 'a' : '-') });
   }
 
+
+  // ── 6. returned application (admin "Reject" = send back for correction) ────────────────────────────────
+  // Server: GET /api/auth/revision (session-gated) → { id, email, isGoogle, reason, flags:[{key,label,note,group,step,docKey}],
+  // snapshot, docs:{docKey:url}, avatarUrl, idType, fields }. Anything NOT flagged is kept server-side, so the applicant only
+  // re-uploads what the admin ticked. Documents the server will keep are shown as "kept"; flagged ones must be replaced.
+  function escH(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
+  function safeUrl(u) { return /^https?:\/\//i.test(u || '') ? u : ''; }
+  function revFlags() { var rev = global._revision; return rev && rev.flags ? rev.flags : []; }
+  function revFlagged(key) { return revFlags().some(function (f) { return f.key === key; }); }
+  function keepsSelfie() {
+    var rev = global._revision; if (!rev || !rev.avatarUrl || revFlagged('selfie')) return false;
+    var f = null, d = null;
+    try { f = avatarFileRef; } catch (e) {}
+    try { d = capturedPhotoData; } catch (e) {}
+    return !(f || d);
+  }
+
+  function clearRevisionUI() {
+    Array.prototype.slice.call(document.querySelectorAll('.rev-ui')).forEach(function (el) { el.remove(); });
+    DOC_KEYS.forEach(function (k) { var z = $('doc-zone-' + k); if (z) z.classList.remove('hidden'); });
+  }
+
+  /** Keeps the per-document boxes (and the kept-selfie box) in sync with what the applicant did. `mode` = Step 4 mode, when called from setStep4Mode(). */
+  function revRefresh(mode) {
+    var rev = global._revision; if (!rev) return;
+    DOC_KEYS.forEach(function (k) {
+      var box = $('rev-doc-' + k), zone = $('doc-zone-' + k); if (!box || !zone) return;
+      var flag = revFlags().filter(function (x) { return x.docKey === k; })[0];
+      var hasNew = !!(global._damis_docs && global._damis_docs[k]);
+      var keptUrl = safeUrl(global._damis_kept && global._damis_kept[k]);
+      var cls = 'mb-2 p-3 rounded-xl border text-sm ', html = '', hideZone = false;
+      if (hasNew) {
+        cls += 'border-green-300 bg-green-50 text-green-800 dark:bg-green-950/30 dark:text-green-200 dark:border-green-700';
+        html = '<span class="font-semibold">&#10003; New file selected &mdash; it replaces ' + (flag ? 'the file the admin rejected' : 'the saved one') + '.</span>';
+      } else if (flag) {
+        cls += 'border-red-300 bg-red-50 text-red-800 dark:bg-red-950/30 dark:text-red-200 dark:border-red-700';
+        html = '<span class="font-bold"><i class="fa-solid fa-triangle-exclamation mr-1"></i>The admin asked you to replace this document.</span>' +
+               (flag.note ? '<br><span class="text-xs">Admin: ' + escH(flag.note) + '</span>' : '') + '<br><span class="text-xs">Upload a new file below.</span>';
+      } else if (keptUrl) {
+        cls += 'border-green-300 bg-green-50 text-green-800 dark:bg-green-950/30 dark:text-green-200 dark:border-green-700 flex flex-wrap items-center gap-2';
+        html = '<span class="font-semibold flex-1" style="min-width:10rem">&#10003; Saved from your earlier application &mdash; kept as is.</span>' +
+               '<a href="' + escH(keptUrl) + '" target="_blank" rel="noopener" class="inline-flex items-center min-h-[44px] px-3 text-xs font-bold underline">View</a>' +
+               '<button type="button" data-rev-replace class="min-h-[44px] px-3 rounded-xl border border-green-400 text-xs font-bold">Replace</button>';
+        hideZone = true;
+      } else { box.className = 'hidden'; box.innerHTML = ''; zone.classList.remove('hidden'); return; }
+      box.className = 'rev-ui ' + cls; box.innerHTML = html;
+      zone.classList.toggle('hidden', hideZone);
+      var rb = box.querySelector('[data-rev-replace]');
+      if (rb) rb.onclick = function () { zone.classList.remove('hidden'); var fi = $('doc-file-' + k); if (fi) fi.click(); };
+    });
+    if (mode) {   // Step 4: show the accepted photo instead of the empty camera placeholder while the applicant has not retaken it
+      var keep = keepsSelfie() && mode === 'idle', kb = $('rev-kept-avatar');
+      if (kb) kb.classList.toggle('hidden', !keep);
+      if (keep) ['av-placeholder-wrap', 'btn-selfie-start', 'selfie-hint'].forEach(function (id) { var el = $(id); if (el) el.classList.add('hidden'); });
+    }
+  }
+
+  /** '' when fine, otherwise a message. scope 'info' = flagged information was confirmed; 'docs' = flagged documents were replaced. */
+  function revisionCheck(scope) {
+    if (!global._revision) return '';
+    if (scope === 'info') {
+      var unacked = revFlags().filter(function (f) {
+        if (f.group !== 'info') return false;
+        var cb = document.querySelector('[data-rev-ack="' + f.key + '"]');
+        return !(cb && cb.checked);
+      });
+      if (unacked.length) {
+        var box = $('rev-ack-box'); if (box && box.scrollIntoView) { try { box.scrollIntoView({ block: 'center', behavior: 'smooth' }); } catch (e) {} }
+        return 'The admin flagged: ' + unacked.map(function (f) { return f.label; }).join('; ') + '. Fix it, then tick \u201cI have corrected / checked this\u201d just above the Continue button.';
+      }
+    } else if (scope === 'docs') {
+      var miss = revFlags().filter(function (f) { return f.docKey && !(global._damis_docs && global._damis_docs[f.docKey]); });
+      if (miss.length) return 'The admin asked you to replace: ' + miss.map(function (f) { return f.label; }).join('; ') + '. Please upload a new file for each.';
+    }
+    return '';
+  }
+  function revisionAck() {
+    return Array.prototype.slice.call(document.querySelectorAll('[data-rev-ack]')).filter(function (cb) { return cb.checked; })
+      .map(function (cb) { return cb.getAttribute('data-rev-ack'); });
+  }
+
+  function buildRevisionUI(rev) {
+    clearRevisionUI();
+    var flags = rev.flags || [];
+    // 1) banner: the admin's comment + the checklist
+    var s1 = $('step-1');
+    if (s1 && s1.parentNode) {
+      var b = document.createElement('div');
+      b.id = 'rev-banner';
+      b.className = 'rev-ui mx-4 sm:mx-8 mb-3 p-4 rounded-xl border-2 border-amber-300 bg-amber-50 text-amber-900 dark:bg-amber-950/30 dark:text-amber-200 dark:border-amber-700 text-sm';
+      var h = '<p class="font-bold text-base flex items-start gap-2"><i class="fa-solid fa-triangle-exclamation mt-1 flex-shrink-0"></i><span>Your application needs corrections</span></p>';
+      if (rev.reason) h += '<p class="mt-2 break-words" style="white-space:pre-wrap"><strong>Admin comment:</strong> ' + escH(rev.reason) + '</p>';
+      if (flags.length) h += '<p class="mt-3 font-semibold">Please correct or replace:</p><ul class="list-disc pl-5 mt-1 space-y-1">' +
+        flags.map(function (f) { return '<li><strong>' + escH(f.label) + '</strong>' + (f.note ? ' &mdash; ' + escH(f.note) : '') + '</li>'; }).join('') + '</ul>';
+      h += '<p class="mt-3 text-xs leading-snug">Nothing you entered was lost. Fix only the items above, then submit again on the last step.' +
+           (rev.snapshot ? '' : ' Your address, school and course could not be restored automatically &mdash; please choose them again.') + '</p>';
+      b.innerHTML = h;
+      s1.parentNode.insertBefore(b, s1);
+    }
+    // 2) Step 3: confirm each flagged piece of information
+    var infoFlags = flags.filter(function (f) { return f.group === 'info'; }), err3 = $('err-3');
+    if (infoFlags.length && err3 && err3.parentNode) {
+      var ab = document.createElement('div');
+      ab.id = 'rev-ack-box';
+      ab.className = 'rev-ui mb-4 p-3 rounded-xl border-2 border-amber-300 bg-amber-50 text-amber-900 dark:bg-amber-950/30 dark:text-amber-200 dark:border-amber-700';
+      ab.innerHTML = '<p class="text-sm font-bold">Confirm your corrections</p><p class="text-xs mb-1">The admin flagged the information below. Review it above, fix anything wrong, then tick each box.</p>' +
+        infoFlags.map(function (f) {
+          return '<label class="flex items-start gap-3 min-h-[44px] py-2 cursor-pointer text-sm"><input type="checkbox" data-rev-ack="' + escH(f.key) + '" class="mt-0.5 w-5 h-5 flex-shrink-0 accent-blue-600"/>' +
+                 '<span><strong>' + escH(f.label) + '</strong>' + (f.note ? '<br><span class="text-xs">Admin: ' + escH(f.note) + '</span>' : '') +
+                 '<br><span class="text-xs">I have corrected / checked this.</span></span></label>';
+        }).join('');
+      err3.parentNode.insertBefore(ab, err3);
+    }
+    // 3) Step 4: selfie flagged → say so; otherwise show the accepted photo (kept unless retaken)
+    var s4 = $('step-4');
+    if (s4) {
+      var sf = flags.filter(function (f) { return f.key === 'selfie'; })[0];
+      if (sf) {
+        var n4 = document.createElement('div');
+        n4.className = 'rev-ui mb-3 p-3 rounded-xl border border-red-300 bg-red-50 text-red-800 dark:bg-red-950/30 dark:text-red-200 dark:border-red-700 text-sm';
+        n4.innerHTML = '<span class="font-bold"><i class="fa-solid fa-triangle-exclamation mr-1"></i>The admin asked you to retake your selfie.</span>' + (sf.note ? '<br><span class="text-xs">Admin: ' + escH(sf.note) + '</span>' : '');
+        s4.insertBefore(n4, s4.firstChild);
+      } else if (safeUrl(rev.avatarUrl)) {
+        var kb = document.createElement('div');
+        kb.id = 'rev-kept-avatar';
+        kb.className = 'rev-ui hidden flex items-center gap-4 mb-4 p-3 rounded-xl border border-green-300 bg-green-50 text-green-800 dark:bg-green-950/30 dark:text-green-200 dark:border-green-700';
+        kb.innerHTML = '<img src="' + escH(safeUrl(rev.avatarUrl)) + '" alt="Your saved profile photo" class="w-20 h-20 rounded-xl object-cover flex-shrink-0"/>' +
+          '<div class="min-w-0"><p class="text-sm font-bold">&#10003; Your profile photo was accepted</p><p class="text-xs">You can keep it. Retake it only if you want to change it.</p>' +
+          '<button type="button" data-rev-retake class="mt-2 min-h-[44px] px-4 rounded-xl border border-green-400 text-xs font-bold">Retake selfie</button></div>';
+        var sp = $('selfie-panel'); if (sp && sp.parentNode) sp.parentNode.insertBefore(kb, sp); else s4.insertBefore(kb, s4.firstChild);
+        var rt = kb.querySelector('[data-rev-retake]'); if (rt) rt.onclick = function () { call('doModeSelfie'); };
+      }
+    }
+    // 4) Step 5: one status box above each document slot
+    DOC_KEYS.forEach(function (k) {
+      var zone = $('doc-zone-' + k); if (!zone || !zone.parentNode) return;
+      var box = document.createElement('div'); box.id = 'rev-doc-' + k; box.className = 'hidden';
+      zone.parentNode.insertBefore(box, zone);
+    });
+  }
+
+  /** Records rejected before wizard snapshots existed: restore the plain fields from the saved columns. */
+  function restoreLegacy(rev) {
+    var f = rev.fields || {};
+    function tenDigits(p) { var d = String(p || '').replace(/\D/g, ''); return d.slice(-10); }
+    setVal('reg-fname', f.firstName); setVal('reg-mname', f.middleName); setVal('reg-lname', f.lastName); setVal('reg-suffix', f.suffix);
+    setVal('reg-bday', f.birthday); setVal('reg-bio', f.bio);
+    if (f.civilStatus && hasOption($('reg-civil'), f.civilStatus)) setVal('reg-civil', f.civilStatus);
+    if (f.monthlyIncome && hasOption($('reg-income'), f.monthlyIncome)) setVal('reg-income', f.monthlyIncome);
+    Array.prototype.forEach.call(document.querySelectorAll('input[name="sex"]'), function (rd) { if (String(rd.value).toLowerCase() === String(f.sex || '').toLowerCase()) rd.checked = true; });
+    var ph = $('reg-phone'); if (ph && f.phone) { ph.value = tenDigits(f.phone); call('formatPhone', ph); call('validatePhoneInline'); }
+    [['father', f.fatherInfo], ['mother', f.motherInfo], ['guardian', f.guardianInfo]].forEach(function (pair) {
+      var p = pair[0], o = null;
+      try { o = pair[1] ? JSON.parse(pair[1]) : null; } catch (e) {}
+      if (!o) return;
+      setVal(p + '-fname', o.firstName); setVal(p + '-mname', o.middleName); setVal(p + '-lname', o.lastName); setVal(p + '-suffix', o.suffix);
+      if (p === 'guardian') setVal('guardian-relationship', o.relationship);
+      if (o.deceased) { setChecked(p + '-deceased', true); call('toggleParentDeceased', p); }
+      else { var pp = $(p + '-phone'); if (pp && o.phone) { pp.value = tenDigits(o.phone); pp.dispatchEvent(new Event('input', { bubbles: true })); } setVal(p + '-employer', o.employer); }
+    });
+    if (f.roomPreference != null) setVal('reg-room-pref', f.roomPreference);
+    setVal('reg-roommate-note', f.roommateNote);
+  }
+
+  /**
+   * Reopen the wizard for an application an admin sent back. Called after login ("applicationReturned"), after Google
+   * sign-in, after a fresh e-mail OTP (verify-otp says revision:true) and on page reload (registration-status says revision:true).
+   * Returns true when it took over the UI.
+   */
+  async function openRevision() {
+    var rev = null;
+    try {
+      var resp = await fetch(API.REVISION, { cache: 'no-store', credentials: 'same-origin' });
+      if (!resp.ok) return false;
+      rev = (await resp.json()).revision;
+    } catch (e) { return false; }
+    if (!rev) return false;
+
+    global._revision = rev; state.revision = rev;
+    global._damis_kept = {};
+    DOC_KEYS.forEach(function (k) {
+      var flagged = revFlags().some(function (f) { return f.docKey === k; });
+      if (rev.docs && rev.docs[k] && !flagged) global._damis_kept[k] = rev.docs[k];
+    });
+
+    call('showTab', 'signup');
+    var em = $('reg-email');
+    if (rev.isGoogle) { var already = false; try { already = isGoogleSignup; } catch (e) {} if (!already) call('applyGoogleSignupUi', rev.email); }
+    else if (em) { em.value = rev.email; em.readOnly = true; }
+    try { otpVerified = true; } catch (e) {}
+    call('lockOtpStepUi');
+    await call('initAddrDropdowns');
+    buildRevisionUI(rev);
+
+    var flagSteps = revFlags().map(function (f) { return f.step; });
+    var startStep = flagSteps.length ? Math.min(5, Math.max(3, Math.min.apply(null, flagSteps))) : 3;
+    var d = loadDraft();
+    if (d && norm(d.email) === norm(rev.email) && d.rev === rev.id) {
+      await restoreDraft(d);                                   // the applicant already started correcting on this device → continue there
+    } else {
+      await FileStore.clear();                                 // never mix leftovers of another attempt into this application
+      if (rev.snapshot) await restoreDraft({ v: 1, email: rev.email, step: startStep, fields: rev.snapshot.fields || {}, addr: rev.snapshot.addr || {} });
+      else { state.restoring = true; try { restoreLegacy(rev); } finally { state.restoring = false; } showStep(startStep); }
+      if (rev.idType && hasOption($('reg-id-type'), rev.idType)) setVal('reg-id-type', rev.idType);
+    }
+    state.lastSig = '';
+    revRefresh(keepsSelfie() ? 'idle' : 'other');
+    report('revision_opened', { code: (rev.flags || []).map(function (f) { return f.key; }).join(',') || 'comment-only', phase: rev.snapshot ? 'snapshot' : 'legacy' });
+    return true;
+  }
+
   // ── hooks called from auth.js ──────────────────────────────────────────────
   function onStepChange(step) { saveDraft(); if (step >= 5) persistAvatar(); }
   function onDocSelected(key, file) {
+    revRefresh();
     if (state.restoring) return;
     prepareFile('doc:' + key, file, IMG.EDGE_DOC)
       .then(function (r) { return canSave() ? FileStore.put('doc:' + key, r.blob, r.name) : null; })
       .catch(function () {});
   }
-  function onDocCleared(key) { delete prepared['doc:' + key]; FileStore.del('doc:' + key); }
-  function onSubmitted() { state.submitted = true; markInflight(false); lsDel(DRAFT_KEY); FileStore.clear(); }
+  function onDocCleared(key) { delete prepared['doc:' + key]; FileStore.del('doc:' + key); revRefresh(); }
+  function onSubmitted() { state.submitted = true; markInflight(false); lsDel(DRAFT_KEY); FileStore.clear(); clearRevisionUI(); global._revision = null; global._damis_kept = {}; state.revision = null; }
 
   var debounceT = null;
   function init() {
@@ -789,6 +1015,8 @@
     prepareFiles: prepareFiles, submit: submit, report: report, explain: explain,
     onStepChange: onStepChange, onDocSelected: onDocSelected, onDocCleared: onDocCleared, onSubmitted: onSubmitted,
     isUploading: function () { return state.uploading; },
+    openRevision: openRevision, revRefresh: revRefresh, revisionCheck: revisionCheck, revisionAck: revisionAck,
+    snapshot: function () { return captureDraft(); },
     progressUI: ui, fmtBytes: fmtBytes,
     _test: { compressImage: compressImage, captureDraft: captureDraft, restoreDraft: restoreDraft, loadDraft: loadDraft, saveDraft: saveDraft, FileStore: FileStore, uploadWithProgress: uploadWithProgress, state: state },
   };

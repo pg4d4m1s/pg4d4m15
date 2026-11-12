@@ -33,7 +33,7 @@ const {
   createDbArchive, getDbArchives, getDbArchiveById, deleteDbArchiveById,
 } = require('../utils/db');
 const { sendAccountApprovedEmail, sendAccountRejectedEmail } = require('../utils/emailService');
-const { sanitizeFlags, decorateFlags, cleanReason } = require('../utils/applicationRevision');
+const { REVISION_ITEMS, sanitizeFlags, decorateFlags, cleanReason } = require('../utils/applicationRevision');
 const { sendApplicationFormPdf, withBedAssignment } = require('../utils/applicationForm');
 const { createSemesterAnnouncement } = require('../utils/announcements');
 const { getViewingArchive, getArchiveHandle, closeArchiveHandle } = require('../utils/archiveView');
@@ -825,6 +825,12 @@ router.put('/api/admin/accounts/:id/reject', requireAdmin, async (req, res) => {
   if (io) io.to('admins').emit('account-rejected', { userId: req.params.id });
 
   res.json({ success: true });
+});
+
+// Checklist items an admin can flag when returning an application (the Reject form is built from this, so the labels
+// the admin ticks and the labels the applicant sees can never drift apart).
+router.get('/api/admin/revision-items', requireAdmin, (req, res) => {
+  res.json({ items: Object.entries(REVISION_ITEMS).map(([key, v]) => ({ key, label: v.label, group: v.group, step: v.step })) });
 });
 
 // ── Rejected Registrations Archive ────────────────────
