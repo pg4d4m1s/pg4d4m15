@@ -1627,6 +1627,120 @@
   </div>
 </div>
 
+<!-- ANNOUNCEMENT EMAIL MODAL — audience checklist → review → progress -->
+<div id="ann-mail-modal" class="hidden fixed inset-0 z-[160] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm" onclick="if(event.target===this)closeAnnEmail()" role="dialog" aria-modal="true" aria-labelledby="ann-mail-title">
+  <div class="bg-white dark:bg-slate-900 rounded-2xl shadow-2xl w-full max-w-lg max-h-[90dvh] flex flex-col overflow-hidden">
+    <div class="flex items-center justify-between px-5 py-3 border-b border-slate-100 dark:border-slate-800 flex-shrink-0">
+      <h2 id="ann-mail-title" class="font-display font-bold text-lg text-slate-800 dark:text-slate-100">Email announcement</h2>
+      <button onclick="closeAnnEmail()" class="w-11 h-11 -mr-2 rounded-full flex items-center justify-center text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors" aria-label="Close"><i class="fa-solid fa-xmark"></i></button>
+    </div>
+
+    <!-- STEP 1 · COMPOSE -->
+    <div id="ann-mail-step-compose" class="flex flex-col min-h-0 flex-1">
+      <div class="p-5 space-y-4 overflow-y-auto flex-1">
+        <div>
+          <div class="flex items-baseline justify-between mb-1">
+            <label for="ann-mail-subject" class="text-xs font-semibold text-slate-500 uppercase tracking-wider">Subject</label>
+            <span id="ann-mail-subject-count" class="text-xs text-slate-400 tabular-nums">0/150</span>
+          </div>
+          <input id="ann-mail-subject" type="text" maxlength="150" oninput="annMailCounts()"
+            class="w-full text-base sm:text-sm bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl px-3 py-2.5 outline-none focus:border-brand-500 text-slate-800 dark:text-slate-100"/>
+        </div>
+        <div>
+          <div class="flex items-baseline justify-between mb-1">
+            <label for="ann-mail-message" class="text-xs font-semibold text-slate-500 uppercase tracking-wider">Message</label>
+            <span id="ann-mail-message-count" class="text-xs text-slate-400 tabular-nums">0/5000</span>
+          </div>
+          <textarea id="ann-mail-message" rows="6" maxlength="5000" oninput="annMailCounts()"
+            class="w-full text-base sm:text-sm bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl px-3 py-2.5 outline-none focus:border-brand-500 text-slate-800 dark:text-slate-100 resize-y"></textarea>
+          <p class="text-xs text-slate-400 mt-1">Each person gets their own copy, addressed by first name. Blank line = new paragraph.</p>
+        </div>
+
+        <fieldset>
+          <legend class="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2">Who should receive it?</legend>
+          <div class="space-y-1">
+            <label class="flex items-start gap-3 min-h-[44px] py-1 cursor-pointer">
+              <input id="ann-mail-all" type="checkbox" onchange="annMailToggleAll(this.checked)" class="mt-0.5 w-5 h-5 flex-shrink-0 accent-brand-600"/>
+              <span class="text-sm text-slate-700 dark:text-slate-300"><strong>Everyone</strong> <span id="ann-mail-n-all" class="text-slate-400"></span><br><span class="text-xs text-slate-400">All approved residents and pending applicants.</span></span>
+            </label>
+            <div class="pl-4 sm:pl-8 space-y-1 border-l-2 border-slate-100 dark:border-slate-800 ml-2.5">
+              <label class="flex items-start gap-3 min-h-[44px] py-1 cursor-pointer">
+                <input type="checkbox" data-ann-grp="assigned" onchange="annMailChanged()" class="mt-0.5 w-5 h-5 flex-shrink-0 accent-brand-600"/>
+                <span class="text-sm text-slate-700 dark:text-slate-300">Residents with a bed <span id="ann-mail-n-assigned" class="text-slate-400"></span></span>
+              </label>
+              <label class="flex items-start gap-3 min-h-[44px] py-1 cursor-pointer">
+                <input type="checkbox" data-ann-grp="unassigned" onchange="annMailChanged()" class="mt-0.5 w-5 h-5 flex-shrink-0 accent-brand-600"/>
+                <span class="text-sm text-slate-700 dark:text-slate-300">Approved, no bed yet <span id="ann-mail-n-unassigned" class="text-slate-400"></span></span>
+              </label>
+              <label class="flex items-start gap-3 min-h-[44px] py-1 cursor-pointer">
+                <input type="checkbox" data-ann-grp="pending" onchange="annMailChanged()" class="mt-0.5 w-5 h-5 flex-shrink-0 accent-brand-600"/>
+                <span class="text-sm text-slate-700 dark:text-slate-300">Pending applicants <span id="ann-mail-n-pending" class="text-slate-400"></span></span>
+              </label>
+            </div>
+            <label class="flex items-start gap-3 min-h-[44px] py-1 cursor-pointer">
+              <input id="ann-mail-rooms-on" type="checkbox" onchange="annMailToggleRooms(this.checked)" class="mt-0.5 w-5 h-5 flex-shrink-0 accent-brand-600"/>
+              <span class="text-sm text-slate-700 dark:text-slate-300"><strong>Selected rooms</strong><br><span class="text-xs text-slate-400">Residents sleeping in the rooms you tick below.</span></span>
+            </label>
+            <div id="ann-mail-rooms-box" class="hidden ml-2.5 pl-4 sm:pl-8 border-l-2 border-slate-100 dark:border-slate-800 pb-1">
+              <div class="flex flex-wrap gap-2 mb-2">
+                <button type="button" onclick="annMailPickRooms('male')" class="min-h-[44px] sm:min-h-[36px] px-3 rounded-xl border border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800">Male rooms</button>
+                <button type="button" onclick="annMailPickRooms('female')" class="min-h-[44px] sm:min-h-[36px] px-3 rounded-xl border border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800">Female rooms</button>
+                <button type="button" onclick="annMailPickRooms('none')" class="min-h-[44px] sm:min-h-[36px] px-3 rounded-xl border border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800">Clear</button>
+              </div>
+              <div id="ann-mail-rooms" class="grid grid-cols-2 min-[400px]:grid-cols-3 gap-2"></div>
+            </div>
+          </div>
+        </fieldset>
+
+        <div id="ann-mail-prev" class="hidden rounded-xl bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-900 px-3 py-2 text-xs text-amber-800 dark:text-amber-300"></div>
+
+        <div class="rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 px-4 py-3" aria-live="polite">
+          <p id="ann-mail-count" class="text-sm font-semibold text-slate-700 dark:text-slate-200">Pick who should receive this.</p>
+          <p id="ann-mail-sample" class="text-xs text-slate-400 mt-0.5 break-words"></p>
+        </div>
+      </div>
+      <div class="flex flex-col-reverse sm:flex-row gap-2 px-5 py-4 border-t border-slate-100 dark:border-slate-800 flex-shrink-0">
+        <button id="ann-mail-test-btn" onclick="annMailTest()" class="sm:flex-1 min-h-[44px] rounded-xl bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 text-sm font-semibold hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors inline-flex items-center justify-center gap-2"><i class="fa-solid fa-flask"></i>Send test to me</button>
+        <button id="ann-mail-review-btn" onclick="annMailReview()" disabled class="sm:flex-1 min-h-[44px] rounded-xl bg-brand-600 hover:bg-brand-700 text-white text-sm font-semibold transition-colors inline-flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed">Review &amp; send<i class="fa-solid fa-arrow-right"></i></button>
+      </div>
+    </div>
+
+    <!-- STEP 2 · CONFIRM -->
+    <div id="ann-mail-step-confirm" class="hidden flex flex-col min-h-0 flex-1">
+      <div class="p-5 space-y-3 overflow-y-auto flex-1">
+        <div class="w-12 h-12 rounded-full bg-amber-100 dark:bg-amber-950 flex items-center justify-center mx-auto"><i class="fa-solid fa-paper-plane text-amber-600"></i></div>
+        <h3 id="ann-mail-confirm-title" class="font-display font-bold text-slate-900 dark:text-slate-100 text-center text-lg">Send to 0 people?</h3>
+        <p id="ann-mail-confirm-who" class="text-sm text-slate-500 dark:text-slate-400 text-center"></p>
+        <div class="rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 px-4 py-3">
+          <p id="ann-mail-confirm-subject" class="text-sm font-semibold text-slate-800 dark:text-slate-100 break-words"></p>
+          <p id="ann-mail-confirm-body" class="text-xs text-slate-500 dark:text-slate-400 mt-1 whitespace-pre-line break-words line-clamp-5"></p>
+        </div>
+        <p class="text-xs text-slate-400 text-center">Emails cannot be unsent. Sending may take a minute or two.</p>
+      </div>
+      <div class="flex flex-col-reverse sm:flex-row gap-2 px-5 py-4 border-t border-slate-100 dark:border-slate-800 flex-shrink-0">
+        <button onclick="annMailBack()" class="sm:flex-1 min-h-[44px] rounded-xl bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 text-sm font-semibold hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors"><i class="fa-solid fa-arrow-left mr-2"></i>Back</button>
+        <button id="ann-mail-send-btn" onclick="annMailSend()" class="sm:flex-1 min-h-[44px] rounded-xl bg-brand-600 hover:bg-brand-700 text-white text-sm font-semibold transition-colors inline-flex items-center justify-center gap-2 disabled:opacity-50">Send email</button>
+      </div>
+    </div>
+
+    <!-- STEP 3 · PROGRESS -->
+    <div id="ann-mail-step-progress" class="hidden flex flex-col min-h-0 flex-1">
+      <div class="p-5 space-y-3 overflow-y-auto flex-1">
+        <h3 id="ann-mail-prog-title" class="font-display font-bold text-slate-900 dark:text-slate-100 text-center text-lg">Sending…</h3>
+        <div class="h-3 rounded-full bg-slate-100 dark:bg-slate-800 overflow-hidden" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="ann-mail-bar-wrap">
+          <div id="ann-mail-bar" class="h-full bg-brand-600 transition-all duration-500" style="width:0%"></div>
+        </div>
+        <p id="ann-mail-prog-text" class="text-sm text-slate-600 dark:text-slate-300 text-center tabular-nums"></p>
+        <p id="ann-mail-prog-note" class="text-xs text-slate-400 text-center">You can close this window — sending continues and you will get a message when it finishes.</p>
+        <div id="ann-mail-prog-fail" class="hidden rounded-xl bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-900 px-3 py-2 text-xs text-red-700 dark:text-red-300 break-words"></div>
+      </div>
+      <div class="px-5 py-4 border-t border-slate-100 dark:border-slate-800 flex-shrink-0">
+        <button onclick="closeAnnEmail()" class="w-full min-h-[44px] rounded-xl bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 text-sm font-semibold hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors">Close</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- CONFIRM MODAL -->
 <div id="confirm-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm">
   <div class="bg-white dark:bg-slate-900 rounded-2xl shadow-2xl w-full max-w-sm p-6">
@@ -4434,6 +4548,7 @@
         <p class="text-xs text-slate-400 mt-2">${window_} · Posted ${escHtml(annStamp(a.createdAt))}</p>
         <div class="flex flex-wrap gap-2 mt-3">
           <button onclick="openAnnouncementModal('${id}')" class="${btn} border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800"><i class="fa-solid fa-pen"></i>Edit</button>
+          <button onclick="openAnnEmail('${id}')" class="${btn} border-slate-200 dark:border-slate-700 text-brand-600 dark:text-brand-400 hover:bg-brand-50 dark:hover:bg-slate-800"><i class="fa-solid fa-envelope"></i>Email</button>
           <button onclick="toggleAnnouncement('${id}', ${a.isActive ? 'false' : 'true'})" class="${btn} border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800"><i class="fa-solid ${a.isActive ? 'fa-eye-slash' : 'fa-eye'}"></i>${a.isActive ? 'Hide' : 'Show'}</button>
           <button onclick="deleteAnnouncement('${id}')" class="${btn} border-red-200 dark:border-red-900 text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/30"><i class="fa-solid fa-trash"></i>Delete</button>
         </div>
@@ -4537,6 +4652,265 @@
         await loadAnnouncements();
       } catch (e) { toast(e.message, 'error'); }
     });
+  }
+
+  // ══════════════════════════════════════════════════════════════
+  // EMAIL AN ANNOUNCEMENT — audience checklist → review → progress
+  // API: /api/admin/announcements/email/* and /:id/email (routes/announcements.js)
+  // Recipients are always read from the LIVE database (even in Archive view).
+  // ══════════════════════════════════════════════════════════════
+  const _annMail = { id: null, opts: null, total: 0, token: 0, debounce: null, jobId: null, poll: null, sending: false };
+
+  function annMailStep(step) {
+    ['compose', 'confirm', 'progress'].forEach(s =>
+      document.getElementById('ann-mail-step-' + s).classList.toggle('hidden', s !== step));
+  }
+  function annMailCounts() {
+    document.getElementById('ann-mail-subject-count').textContent = `${document.getElementById('ann-mail-subject').value.length}/150`;
+    document.getElementById('ann-mail-message-count').textContent = `${document.getElementById('ann-mail-message').value.length}/5000`;
+  }
+  const annMailGroupBoxes = () => [...document.querySelectorAll('#ann-mail-modal [data-ann-grp]')];
+  const annMailRoomBoxes  = () => [...document.querySelectorAll('#ann-mail-rooms input[type=checkbox]')];
+
+  /** What the checklist currently says: { groups: [...], rooms: [ids] } */
+  function annMailAudience() {
+    const groups = annMailGroupBoxes().filter(b => b.checked).map(b => b.dataset.annGrp);
+    const roomsOn = document.getElementById('ann-mail-rooms-on').checked;
+    const rooms = roomsOn ? annMailRoomBoxes().filter(b => b.checked).map(b => Number(b.value)) : [];
+    return { groups, rooms };
+  }
+  function annMailAudienceLabel() {
+    const a = annMailAudience();
+    const names = { assigned: 'residents with a bed', unassigned: 'approved residents without a bed', pending: 'pending applicants' };
+    const parts = a.groups.length === 3 ? ['everyone (all approved and pending)'] : a.groups.map(g => names[g]);
+    if (a.rooms.length) parts.push(`residents of ${a.rooms.length} selected room${a.rooms.length === 1 ? '' : 's'}`);
+    return parts.join(', ');
+  }
+
+  function annMailSyncAll() {
+    const boxes = annMailGroupBoxes();
+    const n = boxes.filter(b => b.checked).length;
+    const all = document.getElementById('ann-mail-all');
+    all.checked = n === boxes.length;
+    all.indeterminate = n > 0 && n < boxes.length;
+  }
+  function annMailToggleAll(on) {
+    annMailGroupBoxes().forEach(b => { b.checked = on; });
+    document.getElementById('ann-mail-all').indeterminate = false;
+    annMailChanged();
+  }
+  function annMailToggleRooms(on) {
+    document.getElementById('ann-mail-rooms-box').classList.toggle('hidden', !on);
+    annMailChanged();
+  }
+  function annMailPickRooms(kind) {
+    const rooms = (_annMail.opts?.rooms) || [];
+    const byId = new Map(rooms.map(r => [String(r.id), r]));
+    annMailRoomBoxes().forEach(b => {
+      const r = byId.get(b.value);
+      b.checked = kind === 'none' ? false : !!r && r.gender === kind;
+    });
+    annMailChanged();
+  }
+  function annMailChanged() {
+    annMailSyncAll();
+    clearTimeout(_annMail.debounce);
+    _annMail.debounce = setTimeout(annMailRefresh, 250);
+    const none = !annMailAudience().groups.length && !annMailAudience().rooms.length;
+    document.getElementById('ann-mail-review-btn').disabled = true; // re-enabled once the count is back
+    if (none) annMailShowCount(0, null, 'Pick who should receive this.');
+  }
+
+  function annMailShowCount(count, d, text) {
+    _annMail.total = count;
+    document.getElementById('ann-mail-count').textContent = text;
+    const sample = document.getElementById('ann-mail-sample');
+    const parts = [];
+    if (d?.sample?.length) parts.push('e.g. ' + d.sample.map(s => s.name).join(', ') + (d.count > d.sample.length ? '…' : ''));
+    if (d?.skipped?.noEmail) parts.push(`${d.skipped.noEmail} skipped (no valid email)`);
+    if (d?.skipped?.duplicate) parts.push(`${d.skipped.duplicate} skipped (same email as someone else)`);
+    sample.textContent = parts.join(' · ');
+    document.getElementById('ann-mail-review-btn').disabled = !(count > 0 && !(d && d.overLimit));
+  }
+
+  async function annMailRefresh() {
+    const aud = annMailAudience();
+    const token = ++_annMail.token;
+    if (!aud.groups.length && !aud.rooms.length) { annMailShowCount(0, null, 'Pick who should receive this.'); return; }
+    document.getElementById('ann-mail-count').textContent = 'Counting…';
+    try {
+      const d = await annRequest('/api/admin/announcements/email/preview', annJson('POST', aud));
+      if (token !== _annMail.token) return; // a newer tick already replaced this answer
+      if (d.overLimit) annMailShowCount(d.count, d, `${d.count} people — over the limit of ${d.maxRecipients} per send. Narrow the recipients.`);
+      else annMailShowCount(d.count, d, d.count ? `${d.count} ${d.count === 1 ? 'person' : 'people'} will receive this email.` : 'No one matches — nobody would receive this.');
+    } catch (e) {
+      if (token !== _annMail.token) return;
+      annMailShowCount(0, null, 'Could not count recipients: ' + e.message);
+    }
+  }
+
+  function annMailRender() {
+    const o = _annMail.opts;
+    const c = o.counts;
+    document.getElementById('ann-mail-n-all').textContent = `(${c.assigned + c.unassigned + c.pending})`;
+    ['assigned', 'unassigned', 'pending'].forEach(k => { document.getElementById('ann-mail-n-' + k).textContent = `(${c[k]})`; });
+    annMailGroupBoxes().forEach(b => { b.checked = false; });
+    document.getElementById('ann-mail-all').checked = false;
+    document.getElementById('ann-mail-all').indeterminate = false;
+    document.getElementById('ann-mail-rooms-on').checked = false;
+    document.getElementById('ann-mail-rooms-box').classList.add('hidden');
+    document.getElementById('ann-mail-rooms').innerHTML = o.rooms.length
+      ? o.rooms.map(r => `<label class="flex items-center gap-2 min-h-[44px] px-3 rounded-xl border border-slate-200 dark:border-slate-700 cursor-pointer text-sm text-slate-700 dark:text-slate-300">
+          <input type="checkbox" value="${Number(r.id)}" onchange="annMailChanged()" class="w-5 h-5 flex-shrink-0 accent-brand-600"/>
+          <span>Room ${Number(r.roomNumber)} <span class="text-xs text-slate-400">${r.gender === 'female' ? '♀' : '♂'} · ${Number(r.residents)}</span></span></label>`).join('')
+      : '<p class="text-xs text-slate-400 col-span-full">No rooms are set up yet.</p>';
+
+    const prev = document.getElementById('ann-mail-prev');
+    const last = (o.previousSends || [])[0];
+    if (last) {
+      prev.classList.remove('hidden');
+      prev.textContent = `This announcement was already emailed on ${annStamp(last.createdAt.replace(' ', 'T') + 'Z')} to ${last.sent} of ${last.total} people. Sending again will email them again.`;
+    } else prev.classList.add('hidden');
+  }
+
+  async function openAnnEmail(id) {
+    const a = _annList.find(x => x.id === id);
+    if (!a) { toast('Announcement not found — the list was refreshed.', 'error'); loadAnnouncements(); return; }
+    _annMail.id = id;
+    document.getElementById('ann-mail-subject').value = a.title || '';
+    document.getElementById('ann-mail-message').value = a.body || '';
+    annMailCounts();
+    annMailShowCount(0, null, 'Loading recipients…');
+    annMailStep('compose');
+    document.getElementById('ann-mail-modal').classList.remove('hidden');
+    document.body.style.overflow = 'hidden';
+    try {
+      _annMail.opts = await annRequest('/api/admin/announcements/email/options?announcementId=' + encodeURIComponent(id));
+      if (_annMail.opts.activeJob && _annMail.opts.activeJob.status === 'running') {
+        annMailTrack(_annMail.opts.activeJob); // a send is already under way — show it instead of a fresh form
+        return;
+      }
+      annMailRender();
+      annMailShowCount(0, null, 'Pick who should receive this.');
+    } catch (e) {
+      toast('Could not load recipients: ' + e.message, 'error');
+      closeAnnEmail();
+    }
+  }
+  function closeAnnEmail() {
+    document.getElementById('ann-mail-modal').classList.add('hidden');
+    document.body.style.overflow = '';
+    // A running send keeps being tracked in the background (annMailTrack) and reports with a toast.
+  }
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape' && !document.getElementById('ann-mail-modal')?.classList.contains('hidden')) closeAnnEmail();
+  });
+
+  function annMailForm() {
+    return {
+      subject: document.getElementById('ann-mail-subject').value.trim(),
+      message: document.getElementById('ann-mail-message').value.trim(),
+    };
+  }
+  function annMailValidate() {
+    const f = annMailForm();
+    if (!f.subject) { toast('Please enter a subject.', 'error'); document.getElementById('ann-mail-subject').focus(); return null; }
+    if (!f.message) { toast('Please enter a message.', 'error'); document.getElementById('ann-mail-message').focus(); return null; }
+    return f;
+  }
+
+  async function annMailTest() {
+    const f = annMailValidate(); if (!f) return;
+    const btn = document.getElementById('ann-mail-test-btn');
+    const label = btn.innerHTML;
+    btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner animate-spin"></i>Sending…';
+    try {
+      const d = await annRequest(`/api/admin/announcements/${encodeURIComponent(_annMail.id)}/email/test`, annJson('POST', f));
+      toast(`Test email sent to ${d.to} — check your inbox (and spam).`);
+    } catch (e) { toast(e.message, 'error'); }
+    finally { btn.disabled = false; btn.innerHTML = label; }
+  }
+
+  function annMailReview() {
+    const f = annMailValidate(); if (!f) return;
+    if (!_annMail.total) return;
+    const n = _annMail.total;
+    document.getElementById('ann-mail-confirm-title').textContent = `Send to ${n} ${n === 1 ? 'person' : 'people'}?`;
+    document.getElementById('ann-mail-confirm-who').textContent = 'Recipients: ' + annMailAudienceLabel() + '.';
+    document.getElementById('ann-mail-confirm-subject').textContent = f.subject;
+    document.getElementById('ann-mail-confirm-body').textContent = f.message;
+    annMailStep('confirm');
+  }
+  function annMailBack() { annMailStep('compose'); annMailRefresh(); }
+
+  async function annMailSend() {
+    if (_annMail.sending) return;
+    const f = annMailValidate(); if (!f) return;
+    const btn = document.getElementById('ann-mail-send-btn');
+    const label = btn.innerHTML;
+    _annMail.sending = true;
+    btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner animate-spin"></i>Starting…';
+    try {
+      const d = await annRequest(`/api/admin/announcements/${encodeURIComponent(_annMail.id)}/email`,
+        annJson('POST', { ...annMailAudience(), ...f, confirmCount: _annMail.total }));
+      annMailTrack(d.job);
+    } catch (e) {
+      toast(e.message, 'error');
+      annMailStep('compose'); annMailRefresh(); // e.g. the list changed — show the new count and confirm again
+    } finally {
+      _annMail.sending = false;
+      btn.disabled = false; btn.innerHTML = label;
+    }
+  }
+
+  // ── Progress ──
+  function annMailPaint(job) {
+    const done = job.sent + job.failed;
+    const pct = job.total ? Math.round((done / job.total) * 100) : 0;
+    document.getElementById('ann-mail-bar').style.width = pct + '%';
+    document.getElementById('ann-mail-bar-wrap').setAttribute('aria-valuenow', String(pct));
+    document.getElementById('ann-mail-prog-text').textContent =
+      `${done} of ${job.total} processed · ✔ ${job.sent} sent` + (job.failed ? ` · ✖ ${job.failed} failed` : '');
+    const title = document.getElementById('ann-mail-prog-title');
+    const note = document.getElementById('ann-mail-prog-note');
+    const fail = document.getElementById('ann-mail-prog-fail');
+    if (job.status === 'running') {
+      title.textContent = 'Sending…';
+      note.classList.remove('hidden');
+    } else {
+      note.classList.add('hidden');
+      title.textContent = job.status === 'done' ? (job.failed ? 'Finished with some failures' : 'All sent ✔') : 'Sending stopped';
+    }
+    const lines = [];
+    if (job.abortReason) lines.push(job.abortReason);
+    if (job.failures?.length) lines.push('Failed: ' + job.failures.map(f => f.email).join(', ') + (job.failed > job.failures.length ? '…' : ''));
+    fail.classList.toggle('hidden', !lines.length);
+    fail.textContent = lines.join('\n');
+    fail.style.whiteSpace = 'pre-line';
+  }
+  function annMailTrack(job) {
+    _annMail.jobId = job.id;
+    annMailStep('progress');
+    annMailPaint(job);
+    clearInterval(_annMail.poll);
+    _annMail.poll = setInterval(async () => {
+      try {
+        const d = await annRequest('/api/admin/announcements/email/jobs/' + encodeURIComponent(_annMail.jobId));
+        annMailPaint(d.job);
+        if (d.job.status !== 'running') {
+          clearInterval(_annMail.poll); _annMail.poll = null;
+          const ok = d.job.status === 'done' && !d.job.failed;
+          toast(ok ? `Announcement emailed to ${d.job.sent} ${d.job.sent === 1 ? 'person' : 'people'}.`
+                   : `Email send ${d.job.status}: ${d.job.sent} sent, ${d.job.failed} failed.`, ok ? 'success' : 'error');
+        }
+      } catch (e) {
+        // A dropped phone connection must not kill tracking — keep trying; only a 404 (job gone) stops it.
+        if (/no longer tracked/i.test(e.message)) {
+          clearInterval(_annMail.poll); _annMail.poll = null;
+          toast(e.message, 'error');
+        }
+      }
+    }, 2000);
   }
 
   // ── BACKUP & RESTORE ─────────────────────────────────

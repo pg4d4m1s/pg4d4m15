@@ -1053,6 +1053,58 @@ async function sendBedUnassignedEmail(toEmail, firstName, roomNumber, bedNumber)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Announcement broadcast (admin → Announcements → "Email")
+// One message per recipient (never a shared To/CC list, so nobody sees anyone else's address).
+// ─────────────────────────────────────────────────────────────────────────────
+const _ANNOUNCEMENT_THEMES = {
+  info:    { grad: 'linear-gradient(135deg,#1e3a8a,#2563eb)', emoji: '&#128226;',          btn: '#1d4ed8' },
+  success: { grad: 'linear-gradient(135deg,#14532d,#16a34a)', emoji: '&#127881;',          btn: '#16a34a' },
+  warning: { grad: 'linear-gradient(135deg,#78350f,#d97706)', emoji: '&#9888;&#65039;',    btn: '#d97706' },
+  urgent:  { grad: 'linear-gradient(135deg,#7f1d1d,#dc2626)', emoji: '&#128680;',          btn: '#dc2626' },
+};
+
+/** Admin-typed text must never become markup in someone's inbox. */
+function _escHtml(s = '') {
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+/**
+ * @param {string} toEmail
+ * @param {string} firstName
+ * @param {{title:string, message:string, type?:string, subject?:string}} content
+ * @returns {Promise<{success:boolean, error?:string}>}  same result shape as every other sender
+ */
+async function sendAnnouncementEmail(toEmail, firstName, { title, message, type = 'info', subject = '' }) {
+  const appName = APP_NAME();
+  const appUrl  = APP_URL();
+  const theme   = _ANNOUNCEMENT_THEMES[type] || _ANNOUNCEMENT_THEMES.info;
+  const safeSubject = String(subject || title || 'Announcement').replace(/[\r\n]+/g, ' ').trim().slice(0, 150);
+
+  // Blank line = new paragraph, single line break = <br>. Plain text in, safe HTML out.
+  const paragraphs = String(message || '').split(/\n{2,}/).map(p => p.trim()).filter(Boolean)
+    .map(p => `<p style="color:#475569;font-size:15px;line-height:1.7;margin:0 0 16px;">${_escHtml(p).replace(/\n/g, '<br/>')}</p>`)
+    .join('');
+
+  const body = emailWrapper(
+    theme.grad, theme.emoji, _escHtml(title || safeSubject), appName,
+    greeting(_escHtml(firstName || 'there')) +
+    paragraphs +
+    `<div style="text-align:center;margin:8px 0 4px;">${btn(appUrl, `Open ${_escHtml(appName)}`, theme.btn)}</div>` +
+    `<p style="color:#94a3b8;font-size:12px;line-height:1.6;margin:24px 0 0;">You are receiving this because you have an application or account with ${_escHtml(appName)}.</p>`
+  );
+  const text = `${title || safeSubject} — ${appName}\n\nHi ${firstName || 'there'},\n\n${message || ''}\n\nOpen ${appName}: ${appUrl}`;
+
+  try {
+    const result = await _send({ to: toEmail, subject: `[${appName}] ${safeSubject}`, html: body, text, kind: 'announcement' });
+    if (result.driver !== 'console') console.log(`  📢 Announcement email sent [${result.driver}] → ${toEmail}`);
+    return result;
+  } catch (err) {
+    console.error(`❌ [emailService] sendAnnouncementEmail → ${toEmail} | driver=${DRIVER} | ${err.message}`);
+    return { success: false, error: err.message };
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Exports
 // ─────────────────────────────────────────────────────────────────────────────
 module.exports = {
@@ -1067,6 +1119,7 @@ module.exports = {
   sendDormReminderEmail,
   sendBedAssignedEmail,
   sendBedUnassignedEmail,
+  sendAnnouncementEmail,
   /** Returns the primary driver name ('gmailapi' | 'sendgrid' | 'smtp' | 'console') — used by server.js startup log */
   getDriver: () => (DRIVER.startsWith('sendgrid') ? 'sendgrid' : DRIVER),
   /** Per-driver health snapshot (no secrets) — safe to expose on an admin route */

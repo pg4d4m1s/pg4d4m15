@@ -147,6 +147,12 @@ function getAnnouncement(id) {
   return db.prepare('SELECT * FROM announcements WHERE id = ?').get(id);
 }
 
+/** One announcement in the admin shape, or null. Used by the e-mail broadcast (routes/announcements.js). */
+function findAnnouncement(id) {
+  const row = getAnnouncement(id);
+  return row ? toAdminShape(row) : null;
+}
+
 /** Everything, newest first — for the admin tab. */
 function listAnnouncements() {
   return db.prepare('SELECT * FROM announcements ORDER BY created_at DESC, rowid DESC').all().map(toAdminShape);
@@ -254,7 +260,7 @@ function createSemesterAnnouncement({ semester, schoolYear, adminId = '' }) {
 module.exports = {
   TYPES, TITLE_MAX, BODY_MAX,
   validateInput, buildSemesterTemplate,
-  listAnnouncements, listPublicAnnouncements,
+  findAnnouncement, listAnnouncements, listPublicAnnouncements,
   createAnnouncement, updateAnnouncement, setAnnouncementActive, deleteAnnouncement,
   createSemesterAnnouncement,
 };
