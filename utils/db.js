@@ -21,6 +21,7 @@ const Database = require('better-sqlite3');
 const path     = require('path');
 const { randomUUID } = require('crypto');
 const log      = require('./logger');
+const { decorateFlags, parseFlags } = require('./applicationRevision');
 
 const { AsyncLocalStorage } = require('async_hooks');
 
@@ -558,6 +559,19 @@ function genId() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 }
 
+// ── Return-for-correction (rejected applicants can fix + resubmit) ──────
+// users.form_snapshot   : the wizard's answers exactly as the applicant entered them (restores address dropdowns)
+// users.resubmit_count  : how many times this application was returned and resubmitted
+// users.prev_rejection  : JSON {reason, flags, at} of the last rejection — shown to the admin reviewing the resubmission
+migrate(`ALTER TABLE users ADD COLUMN form_snapshot  TEXT DEFAULT ''`);
+migrate(`ALTER TABLE users ADD COLUMN resubmit_count INTEGER DEFAULT 0`);
+migrate(`ALTER TABLE users ADD COLUMN prev_rejection TEXT DEFAULT ''`);
+migrate(`ALTER TABLE rejected_registrations ADD COLUMN rejection_flags TEXT DEFAULT ''`);
+migrate(`ALTER TABLE rejected_registrations ADD COLUMN form_snapshot   TEXT DEFAULT ''`);
+migrate(`ALTER TABLE rejected_registrations ADD COLUMN room_preference INTEGER DEFAULT NULL`);
+migrate(`ALTER TABLE rejected_registrations ADD COLUMN roommate_note   TEXT DEFAULT ''`);
+migrate(`ALTER TABLE rejected_registrations ADD COLUMN resubmit_count  INTEGER DEFAULT 0`);
+
 // ── OTP CLEANUP (every 5 minutes) ─────────────────────
 setInterval(() => {
   db.prepare(`DELETE FROM otp_store WHERE expires_at < datetime('now')`).run();
@@ -713,6 +727,10 @@ function dbRowToUser(row) {
     specialization:   row.specialization    || '',
     roomPreference:   row.room_preference   ?? null,   // dorm_rooms.room_number, or null = no preference
     roommateNote:     row.roommate_note     || '',
+    // ── Return-for-correction ──
+    formSnapshot:     row.form_snapshot     || '',
+    resubmitCount:    row.resubmit_count    || 0,
+    prevRejection:    row.prev_rejection    || '',
   };
 }
 
@@ -1172,51 +1190,83 @@ function searchUsers(query, viewerId = null, limit = 20) {
 }
 
 // ── Rejected Registrations Archive ───────────────────
-function archiveRejectedRegistration({ user, idDocs, reason, rejectedBy }) {
+// A rejected application is kept in full (answers, documents, password hash, wizard snapshot) so that
+//   1. the applicant can log back in, see the admin's comment + checklist, fix ONLY what was flagged and resubmit
+//      (routes/auth.js: GET /api/auth/revision + complete-registration), and
+//   2. an admin can still review / restore it from the Rejected tab.
+// `flags` = [{ key, note }] from utils/applicationRevision.js (which items the applicant must correct).
+function archiveRejectedRegistration({ user, idDocs, reason, flags, rejectedBy }) {
   const id = genId();
-  db.prepare(`
-    INSERT INTO rejected_registrations
-      (id, user_id, first_name, middle_name, last_name, suffix, username, email, phone,
-       birthday, sex, bio, location, avatar, auth_provider,
-       civil_status, present_address, permanent_address,
-       school_name, school_address, year_level, course, specialization,
-       father_info, mother_info, guardian_info, monthly_income,
-       id_front_url, id_back_url, selfie_url, id_type,
-       cert_residency_url, cert_low_income_url, cert_enrollment_url, cert_grades_url,
-       rejection_reason, rejected_by, original_created_at, password_hash,
-       avatar_face_x, avatar_face_y, google_id, cert_medical_url)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-  `).run(
-    id, user.id, user.firstName, user.middleName||'', user.lastName, user.suffix||'',
-    user.username, user.email, user.phone||'', user.birthday||'', user.sex||'',
-    user.bio||'', user.location||'', user.avatar||'', user.authProvider||'local',
+  // Named columns (not 40+ positional "?") so a column can never be paired with the wrong value.
+  const row = {
+    id, user_id: user.id,
+    first_name: user.firstName, middle_name: user.middleName || '', last_name: user.lastName, suffix: user.suffix || '',
+    username: user.username, email: user.email, phone: user.phone || '', birthday: user.birthday || '', sex: user.sex || '',
+    bio: user.bio || '', location: user.location || '', avatar: user.avatar || '', auth_provider: user.authProvider || 'local',
     // ── Full registration fields ──
-    user.civilStatus||'', user.presentAddress||'', user.permanentAddress||'',
-    user.schoolName||'', user.schoolAddress||'', user.yearLevel||'', user.course||'', user.specialization||'',
-    user.fatherInfo||'', user.motherInfo||'', user.guardianInfo||'', user.monthlyIncome||'',
+    civil_status: user.civilStatus || '', present_address: user.presentAddress || '', permanent_address: user.permanentAddress || '',
+    school_name: user.schoolName || '', school_address: user.schoolAddress || '', year_level: user.yearLevel || '',
+    course: user.course || '', specialization: user.specialization || '',
+    father_info: user.fatherInfo || '', mother_info: user.motherInfo || '', guardian_info: user.guardianInfo || '',
+    monthly_income: user.monthlyIncome || '',
     // ── Documents ──
-    idDocs?.id_front_url||'', idDocs?.id_back_url||'', idDocs?.selfie_url||'', idDocs?.id_type||'',
-    idDocs?.cert_residency_url||'', idDocs?.cert_low_income_url||'', idDocs?.cert_enrollment_url||'', idDocs?.cert_grades_url||'',
-    reason||'', rejectedBy, user.createdAt||'',
-    user.password||null,
-    user.avatarFaceX ?? 50, user.avatarFaceY ?? 50,
-    user.googleId || null,
-    getUserMedicalCertificate(user.id)
-  );
+    id_front_url: idDocs?.id_front_url || '', id_back_url: idDocs?.id_back_url || '',
+    selfie_url: idDocs?.selfie_url || '', id_type: idDocs?.id_type || '',
+    cert_residency_url: idDocs?.cert_residency_url || '', cert_low_income_url: idDocs?.cert_low_income_url || '',
+    cert_enrollment_url: idDocs?.cert_enrollment_url || '', cert_grades_url: idDocs?.cert_grades_url || '',
+    // ── Decision ──
+    rejection_reason: reason || '', rejected_by: rejectedBy, original_created_at: user.createdAt || '',
+    password_hash: user.password || null,
+    avatar_face_x: user.avatarFaceX ?? 50, avatar_face_y: user.avatarFaceY ?? 50,
+    google_id: user.googleId || null,
+    cert_medical_url: getUserMedicalCertificate(user.id),
+    // ── Return-for-correction data ──
+    rejection_flags: JSON.stringify(Array.isArray(flags) ? flags : []),
+    form_snapshot: user.formSnapshot || '',
+    room_preference: Number.isInteger(user.roomPreference) ? user.roomPreference : null,
+    roommate_note: user.roommateNote || '',
+    resubmit_count: user.resubmitCount || 0,
+  };
+  const cols = Object.keys(row);
+  db.prepare(`INSERT INTO rejected_registrations (${cols.join(', ')}) VALUES (${cols.map(c => '@' + c).join(', ')})`).run(row);
   return id;
 }
 
 function getRejectedRegistrations() {
-  return db.prepare(`
+  const rows = db.prepare(`
     SELECT r.*, a.username as admin_username
     FROM rejected_registrations r
     LEFT JOIN users a ON r.rejected_by = a.id
     ORDER BY r.rejected_at DESC
   `).all();
+  // The browser gets what the admin screen needs — never the password hash or the raw wizard snapshot.
+  return rows.map(({ password_hash, form_snapshot, ...rest }) => ({
+    ...rest,
+    has_password: !!password_hash,
+    has_snapshot: !!form_snapshot,
+    rejection_flags: decorateFlags(parseFlags(rest.rejection_flags)),
+  }));
+}
+
+function getRejectedRegistrationById(id) {
+  return db.prepare('SELECT * FROM rejected_registrations WHERE id = ?').get(id) || null;
+}
+
+/** Newest rejected application for an e-mail (case-insensitive), or null. */
+function findRejectedRegistrationByEmail(email) {
+  const e = String(email || '').trim();
+  if (!e) return null;
+  return db.prepare(`SELECT * FROM rejected_registrations WHERE lower(email) = lower(?) ORDER BY rejected_at DESC, rowid DESC LIMIT 1`).get(e) || null;
 }
 
 function deleteRejectedRegistration(id) {
   db.prepare('DELETE FROM rejected_registrations WHERE id = ?').run(id);
+}
+
+/** Wizard snapshot + resubmission bookkeeping for a (re)submitted application. */
+function setUserApplicationMeta(userId, { formSnapshot = '', resubmitCount = 0, prevRejection = '' } = {}) {
+  db.prepare(`UPDATE users SET form_snapshot = ?, resubmit_count = ?, prev_rejection = ?, updated_at = datetime('now') WHERE id = ?`)
+    .run(formSnapshot || '', resubmitCount || 0, prevRejection || '', userId);
 }
 
 // ── Full user profile for admin review ────────────────
@@ -1725,6 +1775,7 @@ function getPendingAccounts() {
            u.created_at, u.auth_provider,
            u.avatar_face_x, u.avatar_face_y,
            u.room_preference, u.roommate_note,
+           u.resubmit_count, u.prev_rejection,
            ivr.id as verif_id, ivr.id_front_url, ivr.id_back_url, ivr.selfie_url, ivr.id_type,
            ivr.cert_residency_url, ivr.cert_low_income_url, ivr.cert_enrollment_url, ivr.cert_grades_url,
            u.cert_medical_url
@@ -2639,6 +2690,7 @@ module.exports = {
   // Account Approval
   getPendingAccounts, approveAccount, rejectAccount,
   archiveRejectedRegistration, getRejectedRegistrations, deleteRejectedRegistration,
+  getRejectedRegistrationById, findRejectedRegistrationByEmail, setUserApplicationMeta,
   getFullUserProfile,
   // Dormitory Management
   getDormRooms, assignBed, unassignBed, getRoomHistory,

@@ -27,7 +27,9 @@ const {
   saveOTP, verifyOTP, issueOTP, isCurrentOTP, saveResetOTP, verifyResetOTP, consumeResetOTP,
   recordFailedLogin, checkLoginLock, clearLoginAttempts,
   getRoomAvailability, resolveRoomPreference,
+  findRejectedRegistrationByEmail, getRejectedRegistrationById, deleteRejectedRegistration, setUserApplicationMeta,
 } = require('../utils/db');
+const { REVISION_ITEMS, parseFlags, decorateFlags, sanitizeSnapshot } = require('../utils/applicationRevision');
 
 
 // ─── Live-selfie gate (runs BEFORE any file is sent to Cloudinary) ───────────────────────────
@@ -44,6 +46,11 @@ async function requireLiveSelfie(req, res, next) {
   };
   try {
     const avatar = req.files && req.files.avatar && req.files.avatar[0];
+    // Returned application: the applicant may KEEP the photo that was already accepted. Only a flagged selfie must be retaken.
+    if (!avatar && req.revision && !req.revision.flagged.has('selfie')) {
+      log.info(`[SELFIE] keeping the saved photo (returned application, selfie not flagged) ref=${ref}`);
+      return next();
+    }
     if (!avatar)
       return fail(400, 'SELFIE_REQUIRED', 'A live selfie is required. Please go back to the Profile step and take your selfie with the camera.');
 
@@ -194,13 +201,103 @@ router.post('/api/auth/verify-otp', async (req, res) => {
     if (!pending || pending.email !== email.trim())
       return res.status(400).json({ error: 'Session expired. Please register again.' });
     pending.emailVerified = true;
+    // An admin may have returned this e-mail's earlier application for correction → the wizard reopens with the saved answers.
+    const returned = findRejectedRegistrationByEmail(email.trim());
+    if (returned) pending.revisionId = returned.id; else delete pending.revisionId;
     req.session.pendingRegistration = pending;
-    log.info(`[REG] email verified: ${pending.email} (${pending.isGoogleSignup ? 'google' : 'password'}) ip=${clientIp(req)}`);
-    return res.json({ success: true, message: 'Email verified! Continue to fill in your profile.' });
+    log.info(`[REG] email verified: ${pending.email} (${pending.isGoogleSignup ? 'google' : 'password'})${returned ? ' — RETURNED application found, reopening it' : ''} ip=${clientIp(req)}`);
+    return res.json({ success: true, revision: !!returned, message: 'Email verified! Continue to fill in your profile.' });
   } catch (err) {
     return res.status(500).json({ error: 'Server error. Please try again.' });
   }
 });
+
+// ════════════════════════════════════════════════════
+// RETURNED APPLICATIONS (admin "Reject" = send back for correction)
+// The applicant's saved application is in rejected_registrations. After they prove who they are (password login,
+// Google, or the e-mail OTP) the session carries pendingRegistration.revisionId and the wizard reopens with:
+//   - every saved answer + document, - the admin's comment, - the checklist of items to correct.
+// ════════════════════════════════════════════════════
+function revisionRecordFor(pending) {
+  if (!pending || !pending.revisionId || !pending.emailVerified) return null;
+  const rec = getRejectedRegistrationById(pending.revisionId);
+  if (!rec || String(rec.email).toLowerCase() !== String(pending.email).toLowerCase()) return null;
+  return rec;
+}
+
+// What the browser needs to reopen the wizard. Session-gated: only the person who just proved ownership of the e-mail gets it.
+router.get('/api/auth/revision', (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  const pending = req.session.pendingRegistration;
+  const rec = revisionRecordFor(pending);
+  if (!rec) {
+    if (pending && pending.revisionId) {   // the record was removed (e.g. an admin deleted it) — stop pointing at it
+      delete pending.revisionId; req.session.pendingRegistration = pending;
+      log.warn(`[REVISION] saved application ${pending.revisionId || '?'} no longer exists — continuing as a new application (${pending.email})`);
+    }
+    return res.json({ revision: null });
+  }
+  let snapshot = null;
+  try { snapshot = rec.form_snapshot ? JSON.parse(rec.form_snapshot) : null; } catch (_) { snapshot = null; }
+  const docs = {};
+  for (const item of Object.values(REVISION_ITEMS)) if (item.docKey) docs[item.docKey] = rec[item.urlCol] || '';
+  log.info(`[REVISION] ${rec.email} reopened returned application ${rec.id} (snapshot=${snapshot ? 'yes' : 'no — legacy record'}) ip=${clientIp(req)}`);
+  return res.json({
+    revision: {
+      id: rec.id, email: rec.email, isGoogle: (rec.auth_provider || 'local') === 'google',
+      reason: rec.rejection_reason || '', rejectedAt: rec.rejected_at || '', resubmitCount: rec.resubmit_count || 0,
+      flags: decorateFlags(parseFlags(rec.rejection_flags)),
+      snapshot, docs,
+      avatarUrl: rec.avatar || rec.selfie_url || '',
+      idType: rec.id_type || 'school_id',
+      // Records rejected BEFORE wizard snapshots existed: restore the plain fields from the columns instead.
+      fields: snapshot ? null : {
+        firstName: rec.first_name, middleName: rec.middle_name, lastName: rec.last_name, suffix: rec.suffix,
+        birthday: rec.birthday, sex: rec.sex, civilStatus: rec.civil_status, phone: rec.phone, bio: rec.bio,
+        monthlyIncome: rec.monthly_income, fatherInfo: rec.father_info, motherInfo: rec.mother_info, guardianInfo: rec.guardian_info,
+        roomPreference: Number.isInteger(rec.room_preference) ? rec.room_preference : null, roommateNote: rec.roommate_note || '',
+      },
+    },
+  });
+});
+
+// Runs after multer (so req.files / req.body exist) and BEFORE anything is sent to Cloudinary.
+// Enforces the admin's checklist on the server too — the browser cannot be trusted to have done it.
+function loadRevisionContext(req, res, next) {
+  const pending = req.session.pendingRegistration;
+  if (!pending || !pending.revisionId) return next();
+  const ref = req._id;
+  const rec = revisionRecordFor(pending);
+  if (!rec) {
+    log.warn(`[REG-FAIL] REVISION_GONE (HTTP 409) — saved application ${pending.revisionId} is gone | ref=${ref} email=${pending.email}`);
+    delete pending.revisionId; req.session.pendingRegistration = pending;
+    return res.status(409).json({
+      error: 'Your saved application is no longer available (an administrator may have removed it). Please reload this page — you will need to enter your details and upload your documents again.',
+      code: 'REVISION_GONE', ref,
+    });
+  }
+  const flags = parseFlags(rec.rejection_flags);
+  req.revision = { rec, flags, flagged: new Set(flags.map(f => f.key)) };
+
+  for (const f of flags) {
+    const item = REVISION_ITEMS[f.key];
+    if (item.group === 'doc' && !(req.files && req.files[item.field] && req.files[item.field][0])) {
+      log.warn(`[REG-FAIL] REVISION_DOC_REQUIRED (HTTP 400) — ${f.key} was flagged but not replaced | ref=${ref} email=${pending.email}`);
+      return res.status(400).json({ error: `The admin asked you to replace: ${item.label}. Please upload a new file for it.`, code: 'REVISION_DOC_REQUIRED', field: item.field, ref });
+    }
+  }
+  let ack = [];
+  try { ack = JSON.parse((req.body && req.body.revisionAck) || '[]'); } catch (_) { ack = []; }
+  const missing = flags.filter(f => REVISION_ITEMS[f.key].group === 'info' && !(Array.isArray(ack) && ack.includes(f.key)));
+  if (missing.length) {
+    log.warn(`[REG-FAIL] REVISION_ACK_REQUIRED (HTTP 400) — not confirmed: ${missing.map(m => m.key).join(',')} | ref=${ref} email=${pending.email}`);
+    return res.status(400).json({
+      error: `Please review and correct: ${missing.map(m => REVISION_ITEMS[m.key].label).join('; ')}, then tick “I have corrected this” for each.`,
+      code: 'REVISION_ACK_REQUIRED', ref,
+    });
+  }
+  next();
+}
 
 // Early session guard for complete-registration.
 // Runs AFTER multer has parsed the body (so the browser finishes its upload and can read our
@@ -239,7 +336,7 @@ function requireVerifiedRegistration(req, res, next) {
 // (uploadIdDocs = [multer.fields(...), processIdDocument] — see middleware/upload.js)
 // ════════════════════════════════════════════════════
 router.post('/api/auth/complete-registration',
-  trackUpload('complete-registration'), uploadIdDocs[0], requireVerifiedRegistration, requireLiveSelfie, uploadIdDocs[1],
+  trackUpload('complete-registration'), uploadIdDocs[0], requireVerifiedRegistration, loadRevisionContext, requireLiveSelfie, uploadIdDocs[1],
   async (req, res) => {
   const ref = req._id;
   // One structured WARN line for the log + a specific {error, code, field, ref} for the resident.
@@ -309,7 +406,26 @@ router.post('/api/auth/complete-registration',
       .slice(0, 300);
 
     const pg             = req.session.pendingGoogle;
-    const hashedPassword = pending.password ? await bcrypt.hash(pending.password, 12) : null;
+    // pending.passwordHash = applicant logged in with their old password (returned application) — keep it as is.
+    const hashedPassword = pending.passwordHash || (pending.password ? await bcrypt.hash(pending.password, 12) : null);
+
+    // ── Returned application: new uploads win; everything NOT replaced is carried over from the saved record ──
+    // (URLs come from OUR database, never from the browser.)
+    const rev    = req.revision ? req.revision.rec : null;
+    const idUrls = Object.assign({}, req.idDocUrls || {});
+    let keptAvatar = false;
+    if (rev) {
+      for (const item of Object.values(REVISION_ITEMS)) {
+        if (item.group === 'doc' && !idUrls[item.field] && rev[item.urlCol]) idUrls[item.field] = rev[item.urlCol];
+      }
+      if (!idUrls.id_back && rev.id_back_url) idUrls.id_back = rev.id_back_url;
+      if (!idUrls.avatar) {            // selfie not retaken → keep the accepted photo and its crop position
+        keptAvatar = true;
+        idUrls.avatar = rev.avatar || '';
+        idUrls.selfie = rev.selfie_url || rev.avatar || '';
+      }
+      log.info(`[REVISION] resubmission of ${pending.email}: replaced=[${Object.keys(req.idDocUrls || {}).join(',') || 'nothing'}] keptAvatar=${keptAvatar} flagged=[${[...req.revision.flagged].join(',') || 'none'}] ref=${ref}`);
+    }
 
     const newUser = createUser({
       googleId:         pg?.googleId || null,
@@ -319,7 +435,7 @@ router.post('/api/auth/complete-registration',
       middleName:       middleName?.trim() || '',
       lastName:         lastName.trim(),
       suffix:           suffix || '',
-      username:         (username?.trim() || (firstName.trim().toLowerCase().replace(/[^a-z0-9]/g,'') + Math.floor(Math.random()*9000+1000))),
+      username:         (username?.trim() || (rev && rev.username && !findUserByUsername(rev.username) ? rev.username : (firstName.trim().toLowerCase().replace(/[^a-z0-9]/g,'') + Math.floor(Math.random()*9000+1000)))),
       birthday,
       sex,
       civilStatus:      civilStatus?.trim()      || '',
@@ -337,9 +453,9 @@ router.post('/api/auth/complete-registration',
       motherInfo:       motherInfo              || '',
       guardianInfo:     guardianInfo            || '',
       monthlyIncome:    monthlyIncome?.trim()    || '',
-      avatar:           req.idDocUrls?.avatar    || pg?.avatar || '',
-      avatarFaceX:      parseInt(avatarFaceX, 10) || 50,
-      avatarFaceY:      parseInt(avatarFaceY, 10) || 50,
+      avatar:           idUrls.avatar            || pg?.avatar || '',
+      avatarFaceX:      keptAvatar ? (rev.avatar_face_x ?? 50) : (parseInt(avatarFaceX, 10) || 50),
+      avatarFaceY:      keptAvatar ? (rev.avatar_face_y ?? 50) : (parseInt(avatarFaceY, 10) || 50),
       emailVerified:    true,
       idVerified:       false,
       authProvider:     pg ? 'google' : 'local',
@@ -371,7 +487,7 @@ router.post('/api/auth/complete-registration',
     });
 
     // ── Submit ID verification if files were uploaded ──
-    const idUrls = req.idDocUrls || {};
+    // (idUrls was built above: new uploads + anything kept from a returned application)
     log.dump('Uploaded files', {
       avatar:           idUrls.avatar           ? `✔ ${String(idUrls.avatar).slice(0, 55)}…`           : '✖ missing',
       id_front:         idUrls.id_front         ? `✔ ${String(idUrls.id_front).slice(0, 55)}…`         : '✖ missing',
@@ -388,7 +504,7 @@ router.post('/api/auth/complete-registration',
           idFrontUrl:         idUrls.id_front        || '',
           idBackUrl:          idUrls.id_back          || '',
           selfieUrl:          idUrls.selfie           || idUrls.avatar || '',
-          idType:             ID_TYPES.has(idType) ? idType : 'school_id',
+          idType:             ID_TYPES.has(idType) ? idType : (rev && ID_TYPES.has(rev.id_type) ? rev.id_type : 'school_id'),
           certResidencyUrl:   idUrls.cert_residency   || '',
           certLowIncomeUrl:   idUrls.cert_low_income  || '',
           certEnrollmentUrl:  idUrls.cert_enrollment  || '',
@@ -400,6 +516,21 @@ router.post('/api/auth/complete-registration',
       }
     } else {
       log.warn(`No documents received for @${newUser.username} — account saved without files. Check frontend FormData.`);
+    }
+
+    // ── Keep the wizard's exact answers (so a future return-for-correction restores every dropdown) + resubmission bookkeeping ──
+    try {
+      setUserApplicationMeta(newUser.id, {
+        formSnapshot:  sanitizeSnapshot(req.body.formSnapshot),
+        resubmitCount: rev ? (rev.resubmit_count || 0) + 1 : 0,
+        prevRejection: rev ? JSON.stringify({ reason: rev.rejection_reason || '', flags: parseFlags(rev.rejection_flags), at: rev.rejected_at || '' }) : '',
+      });
+      if (rev) {
+        deleteRejectedRegistration(rev.id);   // the application is live again — it leaves the Rejected tab
+        log.success(`[REVISION] @${newUser.username} (${newUser.email}) resubmitted — resubmission #${(rev.resubmit_count || 0) + 1}, rejected record ${rev.id} removed ref=${ref}`);
+      }
+    } catch (metaErr) {
+      log.error(`Application snapshot/bookkeeping failed (non-fatal): ${metaErr.message}`);
     }
 
     delete req.session.pendingRegistration;
@@ -423,12 +554,14 @@ router.post('/api/auth/complete-registration',
         lastName:  newUser.lastName,
         email:     newUser.email,
         createdAt: new Date().toISOString(),
+        resubmission: !!rev,
       });
     }
 
     return res.json({
       success: true,
       pending: true,
+      resubmitted: !!rev,
       message: 'Registration submitted! An admin will review and approve your account shortly.',
     });
   } catch (err) {
@@ -491,6 +624,31 @@ router.post('/api/auth/login', async (req, res) => {
 
     const user = findUserByEmail(email.trim());
     if (!user) {
+      // No account — but maybe an admin RETURNED this applicant's application for correction. A correct password
+      // reopens the registration wizard with all saved answers (no new OTP: the e-mail was verified when they applied).
+      const returned = findRejectedRegistrationByEmail(email.trim());
+      if (returned) {
+        if ((returned.auth_provider || 'local') === 'google') {
+          log.warn(`Login [returned application, google]: ${email.trim()} — must use Google Sign-In`);
+          return res.status(400).json({ error: 'Your application was returned for correction. It was made with Google Sign-In — tap “Continue with Google” to fix it.', code: 'RETURNED_GOOGLE' });
+        }
+        if (!returned.password_hash) {
+          log.warn(`Login [returned application]: ${email.trim()} — no password saved with the record; asking for the e-mail OTP route`);
+          return res.status(401).json({ error: 'Your application was returned for correction, but no password was saved with it. Tap “Create account”, enter this email and the 6-digit code we send — your saved answers will be restored.', code: 'RETURNED_NO_PASSWORD' });
+        }
+        if (await bcrypt.compare(password, returned.password_hash)) {
+          clearLoginAttempts(email.trim());
+          req.session.pendingRegistration = {
+            email: returned.email, password: null, passwordHash: returned.password_hash,
+            isGoogleSignup: false, emailVerified: true, revisionId: returned.id,
+          };
+          delete req.session.pendingGoogle;
+          delete req.session.registrationSubmitted;
+          log.auth(`Login OK [returned application]: ${returned.email} — reopening record ${returned.id}`);
+          return res.json({ success: true, applicationReturned: true, message: 'Your application needs a few corrections. Opening it now…' });
+        }
+        // wrong password → fall through to the normal "Invalid email or password" + lockout counting below
+      }
       recordFailedLogin(email.trim());
       const remaining = checkLoginLock(email.trim());
       const hint = (!remaining.locked && remaining.attemptsLeft <= 3) ? ` (${remaining.attemptsLeft} attempt${remaining.attemptsLeft !== 1 ? 's' : ''} left)` : '';
@@ -929,6 +1087,7 @@ router.get('/api/auth/registration-status', (req, res) => {
       emailVerified: !!p.emailVerified,
       isGoogleSignup: !!p.isGoogleSignup,
       firstName: (req.session.pendingGoogle || {}).firstName || null,
+      revision: !!p.revisionId,
     });
   }
   const done = req.session.registrationSubmitted;

@@ -11,7 +11,7 @@
 
 const passport       = require('passport');
 const GoogleStrategy = require('passport-google-oauth20').Strategy;
-const { findUserByEmail, findUserById } = require('./db');
+const { findUserByEmail, findUserById, findRejectedRegistrationByEmail } = require('./db');
 const log            = require('./logger');
 
 passport.serializeUser((user, done) => done(null, user.id));
@@ -72,6 +72,17 @@ passport.use(new GoogleStrategy(
         // Email exists but registered locally (or linked to a different Google id) → block
         log.warn(`Google login BLOCKED [email_taken]: ${email} provider=${byEmail.authProvider} hasGoogleId=${!!byEmail.googleId}`);
         return done(null, false, { message: `email_taken:${email}` });
+      }
+
+      // Application returned for correction? Google just proved this e-mail is theirs, so (like the e-mail OTP step)
+      // the wizard can reopen with their saved answers. routes/auth.js GET /api/auth/revision serves the data.
+      const returned = email && String(profile.emails?.[0]?.verified) !== 'false' ? findRejectedRegistrationByEmail(email) : null;
+      if (returned) {
+        req.session.pendingRegistration = {
+          email, password: null, passwordHash: null,
+          isGoogleSignup: true, emailVerified: true, revisionId: returned.id,
+        };
+        log.auth(`Google sign-in by applicant with a returned application: ${email} (record ${returned.id})`);
       }
 
       // Brand-new user → store in session, do NOT create account yet

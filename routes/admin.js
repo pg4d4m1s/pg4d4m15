@@ -15,7 +15,7 @@ const {
   banUser, unbanUser,
   getPendingAccounts, approveAccount, rejectAccount,
   archiveRejectedRegistration, getRejectedRegistrations, deleteRejectedRegistration,
-  getFullUserProfile, setUserMedicalCertificate,
+  getFullUserProfile, setUserMedicalCertificate, setUserApplicationMeta,
   findUserByEmail, findUserByUsername, findUserByPhone,
   createUser,
   createNotification,
@@ -33,6 +33,7 @@ const {
   createDbArchive, getDbArchives, getDbArchiveById, deleteDbArchiveById,
 } = require('../utils/db');
 const { sendAccountApprovedEmail, sendAccountRejectedEmail } = require('../utils/emailService');
+const { sanitizeFlags, decorateFlags, cleanReason } = require('../utils/applicationRevision');
 const { sendApplicationFormPdf, withBedAssignment } = require('../utils/applicationForm');
 const { createSemesterAnnouncement } = require('../utils/announcements');
 const { getViewingArchive, getArchiveHandle, closeArchiveHandle } = require('../utils/archiveView');
@@ -784,26 +785,41 @@ router.put('/api/admin/accounts/:id/approve', requireAdmin, async (req, res) => 
   res.json({ success: true });
 });
 
+// ── Return an application for correction ("Reject") ────────────────────────────────
+// The applicant is NOT deleted for good: everything is archived in rejected_registrations (answers, documents,
+// password hash, wizard snapshot) and they can log back in, see this comment + checklist inside the registration
+// wizard, fix ONLY the flagged items and resubmit (routes/auth.js → GET /api/auth/revision).
+// Body: { reason?: string, flags?: [{ key, note }] }  — keys are defined in utils/applicationRevision.js.
 router.put('/api/admin/accounts/:id/reject', requireAdmin, async (req, res) => {
-  const { reason = '' } = req.body;
+  const reason = cleanReason(req.body?.reason);
+  const flags  = sanitizeFlags(req.body?.flags);
   const user = findUserById(req.params.id);
   if (!user) return res.status(404).json({ error: 'User not found.' });
   if (user.accountStatus !== 'pending')
     return res.status(400).json({ error: 'Account is not pending.' });
+  if (!reason && !flags.length)
+    return res.status(400).json({ error: 'Write a comment and/or tick at least one item the applicant must correct — otherwise they will not know what to fix.' });
 
+  const flagKeys = flags.map(f => f.key).join(', ') || 'none';
   // Log BEFORE deleting so we have the user info in the audit trail
-  logAdminAction(req.user.id, 'account_rejected', 'user', req.params.id, `Rejected registration for @${user.username}: ${reason}`);
-  log.admin(`✖ REJECTED account @${user.username} (${user.email}) — reason: "${reason || 'none'}" — by @${req.user.username}`);
+  logAdminAction(req.user.id, 'account_rejected', 'user', req.params.id, `Returned application of @${user.username}: ${reason || '(no comment)'} | flagged: ${flagKeys}`);
+  log.admin(`✖ REJECTED (returned for correction) @${user.username} (${user.email}) — comment: "${reason || 'none'}" — flagged: [${flagKeys}] — by @${req.user.username}`);
 
-  // Send rejection email BEFORE deleting (we still need user.email / user.firstName)
-  sendAccountRejectedEmail(user.email, user.firstName, reason).catch(e => log.error(`Rejection email failed: ${e.message}`));
+  // ── Archive + remove in ONE transaction: a failure can never leave the applicant deleted but not archived ──
+  try {
+    const idDocs = db.prepare('SELECT * FROM id_verification_requests WHERE user_id = ? ORDER BY created_at DESC LIMIT 1').get(req.params.id);
+    db.transaction(() => {
+      archiveRejectedRegistration({ user, idDocs, reason, flags, rejectedBy: req.user.id });
+      // Hard-delete: removes from users + cascades id_verification_requests etc.
+      db.prepare('DELETE FROM users WHERE id = ?').run(req.params.id);
+    })();
+  } catch (e) {
+    log.error(`Reject failed for @${user.username} — nothing was changed: ${e.message}`);
+    return send500(res, e, 'reject-account');
+  }
 
-  // ── Archive to rejected_registrations so admin can review/restore later ──
-  const idDocs = db.prepare('SELECT * FROM id_verification_requests WHERE user_id = ? ORDER BY created_at DESC LIMIT 1').get(req.params.id);
-  archiveRejectedRegistration({ user, idDocs, reason, rejectedBy: req.user.id });
-
-  // ── Hard-delete: removes from users + cascades id_verification_requests etc.
-  db.prepare('DELETE FROM users WHERE id = ?').run(req.params.id);
+  // Email only after the archive is safe (the applicant's e-mail must never promise "your answers are saved" if they are not)
+  sendAccountRejectedEmail(user.email, user.firstName, reason, decorateFlags(flags)).catch(e => log.error(`Rejection email failed: ${e.message}`));
 
   const io = req.app.get('io');
   if (io) io.to('admins').emit('account-rejected', { userId: req.params.id });
@@ -870,7 +886,12 @@ router.post('/api/admin/accounts/rejected/:id/restore', requireAdmin, (req, res)
     avatarFaceY:      rec.avatar_face_y ?? 50,
     // Google accounts log in by google_id — losing it = "google_email_taken" on every sign-in.
     googleId:         rec.google_id || null,
+    roomPreference:   Number.isInteger(rec.room_preference) ? rec.room_preference : null,
+    roommateNote:     rec.roommate_note || '',
   });
+  try {
+    setUserApplicationMeta(restored.id, { formSnapshot: rec.form_snapshot || '', resubmitCount: rec.resubmit_count || 0 });
+  } catch (e) { log.error(`Application snapshot re-attach failed (non-fatal): ${e.message}`); }
 
   let loginWarning = null;
   if ((rec.auth_provider || 'local') === 'local' && !rec.password_hash) {

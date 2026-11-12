@@ -132,6 +132,10 @@ const COMPAT_COLUMNS = [
   { table: 'users',                     column: 'cert_medical_url', ddl: "TEXT DEFAULT ''" },
   { table: 'rejected_registrations',    column: 'cert_medical_url', ddl: "TEXT DEFAULT ''" },
   { table: 'deleted_users',             column: 'cert_medical_url', ddl: "TEXT DEFAULT ''" },
+  // Return-for-correction: getPendingAccounts() selects these two, so a snapshot taken before they existed needs them added
+  // to the throw-away copy too (otherwise the Registrations tab fails with "no such column: u.resubmit_count").
+  { table: 'users',                     column: 'resubmit_count',   ddl: "INTEGER DEFAULT 0" },
+  { table: 'users',                     column: 'prev_rejection',   ddl: "TEXT DEFAULT ''" },
 ];
 function ensureCompatible(file, archiveId) {
   try {

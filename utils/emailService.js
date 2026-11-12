@@ -874,30 +874,52 @@ async function sendAccountApprovedEmail(toEmail, firstName) {
   }
 }
 
-async function sendAccountRejectedEmail(toEmail, firstName, reason = '') {
+// Minimal HTML escaping for admin-typed text that is placed inside an e-mail (reason, checklist notes).
+function _escMail(v) {
+  return String(v == null ? '' : v).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+/**
+ * Sent when an admin returns an application. `flags` = [{ label, note }] (decorated by utils/applicationRevision.js):
+ * the items the applicant has to correct. The applicant logs in as usual and their saved answers are waiting.
+ */
+async function sendAccountRejectedEmail(toEmail, firstName, reason = '', flags = []) {
   const appName = APP_NAME();
   const appUrl  = APP_URL();
+  const items   = (Array.isArray(flags) ? flags : []).filter(f => f && f.label);
   const reasonBlock = reason
     ? `<div style="background:#fef2f2;border-left:4px solid #ef4444;border-radius:8px;padding:12px 16px;margin:16px 0;">
-         <p style="color:#991b1b;font-size:13px;margin:0;"><strong>Reason:</strong> ${reason}</p>
+         <p style="color:#991b1b;font-size:13px;margin:0;white-space:pre-wrap;"><strong>Admin comment:</strong> ${_escMail(reason)}</p>
+       </div>`
+    : '';
+  const listBlock = items.length
+    ? `<div style="background:#fffbeb;border:1px solid #fcd34d;border-radius:8px;padding:12px 16px;margin:16px 0;">
+         <p style="color:#92400e;font-size:13px;font-weight:700;margin:0 0 8px;">Please correct or replace:</p>
+         <ul style="color:#78350f;font-size:13px;line-height:1.6;margin:0;padding-left:18px;">
+           ${items.map(f => `<li><strong>${_escMail(f.label)}</strong>${f.note ? ` &mdash; ${_escMail(f.note)}` : ''}</li>`).join('')}
+         </ul>
        </div>`
     : '';
   const body = emailWrapper(
-    'linear-gradient(135deg,#7f1d1d,#dc2626)', '&#10060;', 'Account Not Approved', appName,
+    'linear-gradient(135deg,#7f1d1d,#dc2626)', '&#9888;&#65039;', 'Action needed on your application', appName,
     greeting(firstName) +
     `<p style="color:#475569;font-size:15px;line-height:1.7;margin:0 0 8px;">
-      Unfortunately, your <strong>${appName}</strong> account application was not approved at this time.
+      Your <strong>${appName}</strong> dormitory application was <strong>not approved yet</strong>. It was returned to you so you can fix it.
     </p>` +
-    reasonBlock +
+    reasonBlock + listBlock +
     `<p style="color:#475569;font-size:14px;line-height:1.7;margin:8px 0 16px;">
-      You may re-apply with the correct documents. If you believe this is an error, please contact the dormitory office.
+      <strong>Nothing you entered was lost.</strong> Log in with your email and password (or Google) &mdash; your saved answers and documents will be waiting.
+      Correct only the items above, then submit again.
     </p>` +
-    btn(appUrl, 'Contact Admin', '#dc2626')
+    btn(appUrl, 'Fix my application', '#dc2626')
   );
-  const text = `Account Not Approved — ${appName}\n\nHi ${firstName},\n\nYour account application was not approved.${reason ? `\n\nReason: ${reason}` : ''}\n\nContact the dormitory office for assistance.`;
+  const text = `Action needed on your application — ${appName}\n\nHi ${firstName},\n\nYour dormitory application was not approved yet and has been returned to you so you can fix it.` +
+    (reason ? `\n\nAdmin comment: ${reason}` : '') +
+    (items.length ? `\n\nPlease correct or replace:\n${items.map(f => `- ${f.label}${f.note ? ' — ' + f.note : ''}`).join('\n')}` : '') +
+    `\n\nNothing you entered was lost. Log in at ${appUrl} with your email and password (or Google) — your saved answers and documents are waiting. Correct the items above, then submit again.`;
   try {
-    const result = await _send({ to: toEmail, subject: `[${appName}] Account application update`, html: body, text });
-    if (result.driver !== 'console') console.log(`  ❌ Account rejected email sent [${result.driver}] → ${toEmail}`);
+    const result = await _send({ to: toEmail, subject: `[${appName}] Action needed on your application`, html: body, text });
+    if (result.driver !== 'console') console.log(`  ↩️ Application returned email sent [${result.driver}] → ${toEmail}`);
     return result;
   } catch (err) {
     console.error(`❌ [emailService] sendAccountRejectedEmail → ${toEmail} | driver=${DRIVER} | ${err.message}`);
