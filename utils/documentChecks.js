@@ -9,7 +9,13 @@
  *     2. image too small to read                                           → REJECT   (DOC_TOO_SMALL)
  *     3. image blank / almost entirely one colour                          → REJECT   (DOC_BLANK)
  *     4. image the server cannot open at all                               → REJECT   (DOC_UNREADABLE)
- *     5. file already used by a DIFFERENT applicant (other e-mail)         → FLAG only (shown to the admin)
+ *     5. photo too blurry to read, or too dark to read                     → REJECT   (DOC_BLURRY / DOC_TOO_DARK)
+ *        so an unreadable document is refused at submit and never reaches the admin's queue.
+ *        Blur = variance of the Laplacian (edge strength) on a <=640px greyscale copy. Calibrated on real phone
+ *        photos of certificates/IDs: legible ones scored 119-1950; the same photos with a light blur (sigma 1.5,
+ *        text already hard to read) scored 5-37. Default limit 20 sits in that gap (kept low on purpose: a wrongly refused applicant costs more than a blurry one the admin can return); a small ID card on a big plain
+ *        background is the lowest legitimate case seen (119). Darkness = mean brightness below 40 of 255.
+ *     6. file already used by a DIFFERENT applicant (other e-mail)         → FLAG only (shown to the admin)
  *   Flag, not reject, for #5: siblings legitimately share a Certificate of Low Income, and a returning resident
  *   can reuse an old certificate. The admin decides.
  *
@@ -32,6 +38,8 @@
  * ENV
  *   DOC_CHECK=off          switch the upload-time checks off completely
  *   DOC_MIN_SIDE=300       shortest allowed image side in pixels
+ *   DOC_MIN_SHARPNESS=20   Laplacian-variance limit below which a photo counts as blurry (0 = switch the blur check off)
+ *   DOC_MIN_BRIGHTNESS=40  mean brightness (0-255) below which a photo counts as too dark (0 = off)
  *   DOC_DUP_SIMILARITY=0.985  thumbnail correlation (0-1) at or above which two images count as "the same picture"
  */
 
@@ -55,6 +63,8 @@ const FLAG_BY_SLOT = { id_front: 'doc_school_id', cert_residency: 'doc_residency
 
 const MIN_SIDE    = Math.max(100, parseInt(process.env.DOC_MIN_SIDE, 10) || 300);
 const DUP_SIMILARITY = Math.min(0.9999, Math.max(0.8, parseFloat(process.env.DOC_DUP_SIMILARITY) || 0.985));
+const MIN_SHARPNESS  = Math.max(0, Number.isFinite(parseFloat(process.env.DOC_MIN_SHARPNESS)) ? parseFloat(process.env.DOC_MIN_SHARPNESS) : 20);
+const MIN_BRIGHTNESS = Math.max(0, Number.isFinite(parseFloat(process.env.DOC_MIN_BRIGHTNESS)) ? parseFloat(process.env.DOC_MIN_BRIGHTNESS) : 40);
 const BLANK_STDEV = 5;           // grayscale standard deviation (0-255) below which an image counts as blank
 const MIN_FILE_BYTES = 1024;     // anything smaller than 1 KB cannot be a real document
 
@@ -128,7 +138,16 @@ async function inspectImage(buffer) {
   let sq = 0; for (let i = 0; i < small.length; i++) sq += (small[i] - mean) * (small[i] - mean);
   const stdev = Math.sqrt(sq / small.length);
 
-  return { width, height, stdev, thumb: small.toString('base64') };
+  // Readability: edge strength (blur) + brightness, on a copy no bigger than 640px so a 12 MP photo and a 1 MP photo are judged alike
+  const g = sharp(buffer, { failOn: 'none' }).rotate().greyscale().resize(640, 640, { fit: 'inside', withoutEnlargement: true });
+  const lap = await g.clone().convolve({ width: 3, height: 3, kernel: [0, 1, 0, 1, -4, 1, 0, 1, 0] }).raw().toBuffer();
+  let ls = 0, lq = 0; for (let i = 0; i < lap.length; i++) { ls += lap[i]; lq += lap[i] * lap[i]; }
+  const sharpness = lq / lap.length - (ls / lap.length) * (ls / lap.length);
+  const px = await g.clone().raw().toBuffer();
+  let ps = 0; for (let i = 0; i < px.length; i++) ps += px[i];
+  const brightness = ps / px.length;
+
+  return { width, height, stdev, sharpness, brightness, thumb: small.toString('base64') };
 }
 
 const isImageMime = (m) => /^image\//.test(m || '');
@@ -157,12 +176,16 @@ async function inspectFiles(files) {
 
     try {
       const r = await inspectImage(buf);
-      info[slot] = { width: r.width, height: r.height, stdev: Math.round(r.stdev * 10) / 10 };
+      info[slot] = { width: r.width, height: r.height, stdev: Math.round(r.stdev * 10) / 10, sharp: Math.round(r.sharpness), bright: Math.round(r.brightness) };
       prints[slot].thumb = r.thumb;
       if (Math.min(r.width, r.height) < MIN_SIDE) {
         problems.push({ slot, code: 'DOC_TOO_SMALL', message: `The photo for "${label}" is too small to read (${r.width}×${r.height} px). Take it again closer to the paper, or use a scan/PDF.` });
       } else if (r.stdev < BLANK_STDEV) {
         problems.push({ slot, code: 'DOC_BLANK', message: `The photo for "${label}" looks blank or almost one colour. Make sure the whole document is visible, well lit and in focus.` });
+      } else if (MIN_BRIGHTNESS && r.brightness < MIN_BRIGHTNESS) {
+        problems.push({ slot, code: 'DOC_TOO_DARK', message: `The photo for "${label}" is too dark to read. Retake it in good light (near a window or with a lamp) without covering the paper with your shadow.` });
+      } else if (MIN_SHARPNESS && r.sharpness < MIN_SHARPNESS) {
+        problems.push({ slot, code: 'DOC_BLURRY', message: `The photo for "${label}" is blurry and the text cannot be read. Hold the phone steady, tap the document on the screen to focus, and retake it (or upload a scan / PDF).` });
       }
     } catch (e) {
       log.warn(`[DOC-CHECK] could not decode image for ${slot} (${f.originalname}, ${f.mimetype}): ${e.message}`);
@@ -280,7 +303,7 @@ async function requireDistinctDocuments(req, res, next) {
       } catch (e) { log.error(`[DOC-CHECK] could not load kept documents' fingerprints (continuing): ${e.message}`); }
     }
     problems.push(...findInternalDuplicates(all));
-    log.info(`[DOC-CHECK] ref=${req._id} ${Object.keys(files).map((s) => `${s}:${info[s] ? `${info[s].width}x${info[s].height} sd=${info[s].stdev}` : 'non-image'}`).join(' ')} → ${problems.length ? `${problems.length} problem(s)` : 'ok'}`);
+    log.info(`[DOC-CHECK] ref=${req._id} ${Object.keys(files).map((s) => `${s}:${info[s] ? `${info[s].width}x${info[s].height} sd=${info[s].stdev} sharp=${info[s].sharp} bright=${info[s].bright}` : 'non-image'}`).join(' ')} → ${problems.length ? `${problems.length} problem(s)` : 'ok'}`);
     if (problems.length) return refusal(req, res, problems);
 
     req.docPrints = Object.assign({}, prints, req.docKeptPrints || {});
