@@ -20,6 +20,7 @@ const {
   createUser,
   createNotification,
   getDormRooms, assignBed, unassignBed, getRoomHistory,
+  saveRoomSnapshot, getRoomSnapshots, deleteRoomSnapshot, restoreRoomSnapshot, removeRoomAssignments, switchRoomGenders,
   getDormBilling, generateMonthlyBills, generateBillForUser, markBillPaid, markBillUnpaid, waiveBill, setBillComment,
   clearBillReceipt,
   getSetting, setSetting,
@@ -1347,6 +1348,69 @@ router.put('/api/admin/dormitory/billing/rate', requireAdmin, (req, res) => {
   setSetting('dorm_rate', String(parsed));
   log.billing(`💱 Dorm rate updated → ₱${parsed}/month — by @${req.user?.username}`);
   res.json({ success: true, rate: parsed });
+});
+
+// ─── Room tools: save / restore a layout, bulk remove, swap male ⇄ female ───────────────────────
+// Every destructive action saves an automatic snapshot first (see utils/db.js "Room layout tools"), so each one can be
+// undone with /snapshots/:id/restore. Writes are refused while an admin views an Archive DB (utils/archiveView.js).
+function roomToolError(res, err, label) {
+  if (err && err.status && err.status < 500) return res.status(err.status).json({ error: err.message });
+  return send500(res, err, label);
+}
+const adminName = (req) => `@${req.user?.username || req.user?.id || 'admin'}`;
+
+router.get('/api/admin/dormitory/snapshots', requireAdmin, (req, res) => {
+  try { res.json({ snapshots: getRoomSnapshots() }); }
+  catch (err) { roomToolError(res, err, 'room_snapshots_list'); }
+});
+
+router.post('/api/admin/dormitory/snapshots', requireAdmin, (req, res) => {
+  try {
+    const snap = saveRoomSnapshot({ name: req.body && req.body.name, kind: 'manual', createdBy: req.user?.id });
+    logAdminAction(req.user?.id, 'room_layout_saved', 'room_snapshot', snap.id, `Saved room layout "${snap.name}" (${snap.assignedCount} residents, ${snap.roomCount} rooms)`);
+    log.dorm(`💾 Room layout saved "${snap.name}" — ${snap.assignedCount} residents / ${snap.roomCount} rooms — by ${adminName(req)}`);
+    res.json({ success: true, snapshot: snap });
+  } catch (err) { roomToolError(res, err, 'room_layout_save'); }
+});
+
+router.delete('/api/admin/dormitory/snapshots/:id', requireAdmin, (req, res) => {
+  try {
+    const snap = deleteRoomSnapshot(req.params.id);
+    logAdminAction(req.user?.id, 'room_layout_deleted', 'room_snapshot', snap.id, `Deleted saved room layout "${snap.name}"`);
+    res.json({ success: true });
+  } catch (err) { roomToolError(res, err, 'room_layout_delete'); }
+});
+
+router.post('/api/admin/dormitory/snapshots/:id/restore', requireAdmin, (req, res) => {
+  try {
+    const r = restoreRoomSnapshot(req.params.id, req.user?.id);
+    logAdminAction(req.user?.id, 'room_layout_restored', 'room_snapshot', req.params.id,
+      `Restored "${r.name}": ${r.restored} placed, ${r.kept} unchanged, ${r.removed} moved out, ${r.skipped.length} skipped; rooms +${r.roomsCreated} ~${r.roomsUpdated}`);
+    log.dorm(`♻️ Room layout restored "${r.name}" — placed=${r.restored} kept=${r.kept} removed=${r.removed} skipped=${r.skipped.length} roomsCreated=${r.roomsCreated} roomsUpdated=${r.roomsUpdated} — by ${adminName(req)}`);
+    if (r.skipped.length) log.warn(`Room restore skipped: ${r.skipped.map(s => `${s.name} (${s.reason})`).join('; ')}`);
+    res.json({ success: true, ...r });
+  } catch (err) { roomToolError(res, err, 'room_layout_restore'); }
+});
+
+router.post('/api/admin/dormitory/assignments/remove', requireAdmin, (req, res) => {
+  try {
+    const scope = req.body && req.body.scope;
+    const r = removeRoomAssignments(scope, req.user?.id);
+    if (r.removed) {
+      logAdminAction(req.user?.id, 'room_assignments_removed', 'room', null, `Removed ${r.removed} resident(s) from ${scope === 'all' ? 'all' : scope} rooms (safety copy "${r.snapshot.name}")`);
+      log.dorm(`🧹 Bulk bed removal (${scope}): ${r.removed} resident(s) — by ${adminName(req)}`);
+    }
+    res.json({ success: true, removed: r.removed, snapshot: r.snapshot });
+  } catch (err) { roomToolError(res, err, 'room_assignments_remove'); }
+});
+
+router.post('/api/admin/dormitory/rooms/switch-gender', requireAdmin, (req, res) => {
+  try {
+    const r = switchRoomGenders(req.user?.id);
+    logAdminAction(req.user?.id, 'rooms_gender_swapped', 'room', null, `Swapped room genders: ${r.toFemale} male→female, ${r.toMale} female→male; ${r.removed} resident(s) removed`);
+    log.dorm(`🔁 Rooms swapped male⇄female: ${r.toFemale} became female, ${r.toMale} became male, ${r.removed} resident(s) removed — by ${adminName(req)}`);
+    res.json({ success: true, ...r });
+  } catch (err) { roomToolError(res, err, 'rooms_gender_swap'); }
 });
 
 // ─── Room CRUD ──────────────────────────────────────────────────────────────

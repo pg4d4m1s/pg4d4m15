@@ -574,6 +574,20 @@
         <button onclick="exportRooms('excel')" class="flex items-center gap-2 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-green-700 dark:text-green-400 text-sm font-medium px-4 py-2 rounded-xl hover:bg-green-50 transition-colors"><i class="fa-solid fa-file-excel text-xs"></i>Excel</button>
         <button onclick="exportRooms('pdf')" class="flex items-center gap-2 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-red-600 dark:text-red-400 text-sm font-medium px-4 py-2 rounded-xl hover:bg-red-50 transition-colors"><i class="fa-solid fa-file-pdf text-xs"></i>PDF</button>
         <button onclick="openAddRoomModal()" class="flex items-center gap-2 bg-brand-600 hover:bg-brand-700 text-white text-sm font-medium px-4 py-2 rounded-xl transition-colors"><i class="fa-solid fa-plus text-xs"></i>Add Room</button>
+        <div class="relative room-menu-wrap">
+          <button onclick="event.stopPropagation();toggleRoomMenu('tools')" aria-haspopup="true" class="flex items-center gap-2 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 text-sm font-medium px-4 py-2 rounded-xl hover:bg-slate-50 transition-colors"><i class="fa-solid fa-sliders text-xs"></i>Room Tools<i class="fa-solid fa-chevron-down text-[10px]"></i></button>
+          <div id="room-dropdown-tools" class="hidden absolute right-0 top-full mt-2 z-50 w-72 max-w-[calc(100vw-2rem)] bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl shadow-lg py-1">
+            <button onclick="openSaveRoomsModal()" class="w-full flex items-center gap-3 px-4 min-h-[44px] text-left text-sm font-medium text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors"><i class="fa-solid fa-floppy-disk text-slate-400 w-4 text-center"></i>Save current assignments</button>
+            <button onclick="openRestoreRoomsModal()" class="w-full flex items-center gap-3 px-4 min-h-[44px] text-left text-sm font-medium text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors"><i class="fa-solid fa-clock-rotate-left text-slate-400 w-4 text-center"></i>Restore saved assignments</button>
+            <div class="my-1 border-t border-slate-100 dark:border-slate-700"></div>
+            <button onclick="confirmSwapRoomGenders()" class="w-full flex items-center gap-3 px-4 min-h-[44px] text-left text-sm font-medium text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors"><i class="fa-solid fa-right-left text-slate-400 w-4 text-center"></i>Swap Male ⇄ Female rooms</button>
+            <div class="my-1 border-t border-slate-100 dark:border-slate-700"></div>
+            <p class="px-4 pt-1 pb-0.5 text-[10px] font-bold uppercase tracking-wider text-slate-400">Remove assignments</p>
+            <button onclick="confirmRemoveAssignments('all')" class="w-full flex items-center gap-3 px-4 min-h-[44px] text-left text-sm font-medium text-red-500 hover:bg-red-50 dark:hover:bg-red-950/30 transition-colors"><i class="fa-solid fa-user-minus w-4 text-center"></i>All rooms</button>
+            <button onclick="confirmRemoveAssignments('male')" class="w-full flex items-center gap-3 px-4 min-h-[44px] text-left text-sm font-medium text-red-500 hover:bg-red-50 dark:hover:bg-red-950/30 transition-colors"><i class="fa-solid fa-user-minus w-4 text-center"></i>Male rooms only</button>
+            <button onclick="confirmRemoveAssignments('female')" class="w-full flex items-center gap-3 px-4 min-h-[44px] text-left text-sm font-medium text-red-500 hover:bg-red-50 dark:hover:bg-red-950/30 transition-colors"><i class="fa-solid fa-user-minus w-4 text-center"></i>Female rooms only</button>
+          </div>
+        </div>
         <button onclick="loadDormRooms()" class="flex items-center gap-2 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 text-sm font-medium px-4 py-2 rounded-xl hover:bg-slate-50 transition-colors"><i class="fa-solid fa-rotate text-xs"></i>Refresh</button>
       </div>
     </div>
@@ -597,7 +611,10 @@
       <div class="bg-white dark:bg-slate-900 rounded-2xl border border-slate-100 dark:border-slate-800 p-4">
         <p class="text-xs font-bold text-slate-400 uppercase tracking-wider mb-1">Available Beds</p>
         <p id="dorm-avail-count" class="text-3xl font-extrabold text-green-600">—</p>
-        <p class="text-xs text-slate-400 mt-1">Open slots</p>
+        <p class="text-xs mt-1 flex flex-wrap gap-x-3 gap-y-0.5">
+          <span class="text-blue-600 dark:text-blue-400 font-semibold">🚹 <span id="dorm-avail-male">—</span> Male</span>
+          <span class="text-pink-600 dark:text-pink-400 font-semibold">🚺 <span id="dorm-avail-female">—</span> Female</span>
+        </p>
       </div>
     </div>
     <!-- Filter tabs -->
@@ -698,6 +715,35 @@
           <button onclick="document.getElementById('add-room-modal').classList.add('hidden')" class="flex-1 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 text-sm font-semibold hover:bg-slate-50 transition-colors">Cancel</button>
           <button onclick="confirmAddRoom()" id="add-room-confirm-btn" class="flex-1 py-2.5 rounded-xl bg-brand-600 hover:bg-brand-700 text-white text-sm font-semibold transition-colors"><i class="fa-solid fa-plus mr-1"></i>Add Room</button>
         </div>
+      </div>
+    </div>
+
+    <!-- ── Save current assignments modal ── -->
+    <div id="save-rooms-modal" class="hidden fixed inset-0 z-[200] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
+      <div class="bg-white dark:bg-slate-900 rounded-2xl shadow-2xl w-full max-w-sm p-6 max-h-[90dvh] overflow-y-auto">
+        <div class="flex items-center justify-between mb-3">
+          <h3 class="font-display font-bold text-slate-800 dark:text-slate-100">Save current assignments</h3>
+          <button onclick="closeSaveRoomsModal()" aria-label="Close" class="w-10 h-10 flex items-center justify-center text-slate-400 hover:text-slate-600"><i class="fa-solid fa-xmark"></i></button>
+        </div>
+        <p id="save-rooms-summary" class="text-sm text-slate-500 mb-4"></p>
+        <label for="save-rooms-name" class="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-1.5">Name <span class="text-slate-400 normal-case font-normal">(optional)</span></label>
+        <input id="save-rooms-name" type="text" maxlength="80" autocomplete="off" placeholder="e.g. 1st Sem 2026–2027, before swap" class="w-full bg-slate-50 dark:bg-slate-800 rounded-xl px-4 py-3 text-base text-slate-800 dark:text-slate-100 outline-none border border-transparent focus:border-brand-400 transition-all placeholder-slate-400"/>
+        <div class="flex gap-2 mt-6">
+          <button onclick="closeSaveRoomsModal()" class="flex-1 min-h-[44px] rounded-xl border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 text-sm font-semibold hover:bg-slate-50 transition-colors">Cancel</button>
+          <button onclick="saveRoomsSnapshot()" id="save-rooms-btn" class="flex-1 min-h-[44px] rounded-xl bg-brand-600 hover:bg-brand-700 text-white text-sm font-semibold transition-colors"><i class="fa-solid fa-floppy-disk mr-1"></i>Save</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Restore saved assignments modal ── -->
+    <div id="restore-rooms-modal" class="hidden fixed inset-0 z-[200] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
+      <div class="bg-white dark:bg-slate-900 rounded-2xl shadow-2xl w-full max-w-lg p-6 max-h-[90dvh] flex flex-col">
+        <div class="flex items-center justify-between mb-1 flex-shrink-0">
+          <h3 class="font-display font-bold text-slate-800 dark:text-slate-100">Restore saved assignments</h3>
+          <button onclick="closeRestoreRoomsModal()" aria-label="Close" class="w-10 h-10 flex items-center justify-center text-slate-400 hover:text-slate-600"><i class="fa-solid fa-xmark"></i></button>
+        </div>
+        <p class="text-xs text-slate-400 mb-3 flex-shrink-0">Rooms (gender, beds) and who sits where are put back exactly as saved. “Auto” copies are made for you before every restore, swap or bulk removal, so each of those can be undone here.</p>
+        <div id="restore-rooms-list" class="flex-1 overflow-y-auto space-y-2 pr-1"></div>
       </div>
     </div>
 
@@ -1742,7 +1788,7 @@
 </div>
 
 <!-- CONFIRM MODAL -->
-<div id="confirm-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm">
+<div id="confirm-modal" class="hidden fixed inset-0 z-[250] flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm">
   <div class="bg-white dark:bg-slate-900 rounded-2xl shadow-2xl w-full max-w-sm p-6">
     <div class="w-12 h-12 rounded-full bg-red-100 dark:bg-red-950 flex items-center justify-center mx-auto mb-4"><i class="fa-solid fa-triangle-exclamation text-red-500"></i></div>
     <h3 id="confirm-title" class="font-display font-bold text-slate-900 dark:text-slate-100 text-center text-lg mb-2">Confirm Action</h3>
@@ -6417,11 +6463,13 @@
   function updateDormStats() {
     let occupied = 0, totalCap = 0;
     let femaleCount = 0, maleCount = 0;
+    let availMale = 0, availFemale = 0;     // free beds by the ROOM's gender
     _dormRooms.forEach(r => {
+      const used = r.beds.filter(b => b.student).length;
       totalCap += r.capacity;
-      r.beds.forEach(b => { if (b.student) occupied++; });
-      if (r.gender === 'female') femaleCount++;
-      else maleCount++;
+      occupied += used;
+      if (r.gender === 'female') { femaleCount++; availFemale += r.capacity - used; }
+      else { maleCount++; availMale += r.capacity - used; }
     });
     const avail = totalCap - occupied;
     // Total residents = all approved non-admin users (incl. those not yet assigned a bed)
@@ -6439,6 +6487,9 @@
       ? `${occupied} assigned · ${unassigned} unassigned`
       : `${occupied} assigned to beds`;
     if (elAvail) elAvail.textContent = avail;
+    const elAvailM = document.getElementById('dorm-avail-male'), elAvailF = document.getElementById('dorm-avail-female');
+    if (elAvailM) elAvailM.textContent = availMale;
+    if (elAvailF) elAvailF.textContent = availFemale;
     if (elTotal) elTotal.textContent = _dormRooms.length;
     if (elCap) elCap.textContent = totalCap;
     if (elSplit) elSplit.textContent = `${femaleCount} Female · ${maleCount} Male`;
@@ -6785,6 +6836,139 @@
         }
       }
     );
+  }
+
+  // ── Room Tools: save / restore a layout, bulk remove, swap male ⇄ female ──────────────────
+  // Server side: routes/admin.js "Room tools". Every destructive action there saves an automatic snapshot first, so
+  // each one can be undone from "Restore saved assignments".
+  let _roomSnapshots = [], _roomToolBusy = false;
+
+  async function roomToolRequest(method, url, body) {
+    const r = await fetch(url, { method, headers: body ? { 'Content-Type': 'application/json' } : undefined, body: body ? JSON.stringify(body) : undefined });
+    let d = {};
+    try { d = await r.json(); } catch (_) { /* non-JSON error page */ }
+    if (!r.ok || d.error) throw new Error(d.error || ('Request failed (HTTP ' + r.status + ')'));
+    return d;
+  }
+  // One bulk action at a time (a double tap on a phone must not fire it twice)
+  async function runRoomTool(fn) {
+    if (_roomToolBusy) return;
+    _roomToolBusy = true;
+    try { await fn(); }
+    catch (e) { toast(e.message || 'Something went wrong', 'error'); console.error('[RoomTools]', e); }
+    finally { _roomToolBusy = false; }
+  }
+  const dormAssignedIn = (gender) => _dormRooms.filter(r => !gender || r.gender === gender).reduce((n, r) => n + r.beds.filter(b => b.student).length, 0);
+  const plural = (n, w) => n + ' ' + w + (n === 1 ? '' : 's');
+
+  // Save
+  function openSaveRoomsModal() {
+    closeAllRoomMenus();
+    document.getElementById('save-rooms-summary').textContent =
+      'Saves all ' + plural(_dormRooms.length, 'room') + ' (gender and beds) and the ' + plural(dormAssignedIn(), 'resident') + ' currently assigned to beds, so you can restore it later.';
+    document.getElementById('save-rooms-name').value = '';
+    document.getElementById('save-rooms-modal').classList.remove('hidden');
+  }
+  function closeSaveRoomsModal() { document.getElementById('save-rooms-modal').classList.add('hidden'); }
+  async function saveRoomsSnapshot() {
+    const btn = document.getElementById('save-rooms-btn');
+    await runRoomTool(async () => {
+      btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner animate-spin mr-1"></i>Saving…';
+      try {
+        const d = await roomToolRequest('POST', '/api/admin/dormitory/snapshots', { name: document.getElementById('save-rooms-name').value });
+        closeSaveRoomsModal();
+        toast('Saved “' + d.snapshot.name + '” (' + plural(d.snapshot.assignedCount, 'resident') + ').', 'success');
+      } finally { btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-floppy-disk mr-1"></i>Save'; }
+    });
+  }
+
+  // Restore
+  async function openRestoreRoomsModal() {
+    closeAllRoomMenus();
+    const list = document.getElementById('restore-rooms-list');
+    list.innerHTML = '<div class="text-xs text-slate-400 text-center py-8"><i class="fa-solid fa-spinner fa-spin mr-2"></i>Loading…</div>';
+    document.getElementById('restore-rooms-modal').classList.remove('hidden');
+    try {
+      const d = await roomToolRequest('GET', '/api/admin/dormitory/snapshots');
+      _roomSnapshots = d.snapshots || [];
+      renderRoomSnapshots();
+    } catch (e) { list.innerHTML = '<p class="text-sm text-red-500 text-center py-8">' + escHtml(e.message || 'Could not load saved layouts') + '</p>'; }
+  }
+  function closeRestoreRoomsModal() { document.getElementById('restore-rooms-modal').classList.add('hidden'); }
+  function renderRoomSnapshots() {
+    const list = document.getElementById('restore-rooms-list');
+    if (!_roomSnapshots.length) { list.innerHTML = '<p class="text-sm text-slate-400 text-center py-8">Nothing saved yet. Use “Save current assignments” first.</p>'; return; }
+    list.innerHTML = _roomSnapshots.map(s => {
+      const when = new Date(String(s.created_at).replace(' ', 'T') + 'Z').toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+      const by = [s.first_name, s.last_name].filter(Boolean).join(' ');
+      const auto = s.kind === 'auto';
+      return '<div class="rounded-xl border border-slate-100 dark:border-slate-800 p-3">' +
+        '<div class="flex items-start justify-between gap-2"><div class="min-w-0">' +
+          '<p class="text-sm font-semibold text-slate-800 dark:text-slate-100 break-words">' + escHtml(s.name) + '</p>' +
+          '<p class="text-xs text-slate-400 mt-0.5">' + escHtml(when) + ' · ' + plural(s.assigned_count, 'resident') + ' · ' + plural(s.room_count, 'room') + (by ? ' · ' + escHtml(by) : '') + '</p>' +
+        '</div><span class="flex-shrink-0 text-[10px] font-bold px-2 py-0.5 rounded-full ' + (auto ? 'bg-slate-100 dark:bg-slate-800 text-slate-500' : 'bg-brand-50 dark:bg-brand-950/30 text-brand-600') + '">' + (auto ? 'Auto' : 'Saved') + '</span></div>' +
+        '<div class="flex gap-2 mt-3">' +
+          '<button onclick="restoreRoomsSnapshot(\'' + s.id + '\')" class="flex-1 min-h-[44px] rounded-xl bg-brand-600 hover:bg-brand-700 text-white text-sm font-semibold transition-colors"><i class="fa-solid fa-clock-rotate-left mr-1"></i>Restore</button>' +
+          '<button onclick="deleteRoomsSnapshot(\'' + s.id + '\')" aria-label="Delete this saved layout" title="Delete" class="w-11 min-h-[44px] rounded-xl border border-slate-200 dark:border-slate-700 text-red-500 hover:bg-red-50 dark:hover:bg-red-950/30 transition-colors"><i class="fa-solid fa-trash text-xs"></i></button>' +
+        '</div></div>';
+    }).join('');
+  }
+  function restoreRoomsSnapshot(id) {
+    const s = _roomSnapshots.find(x => x.id === id);
+    if (!s) return;
+    showConfirm('Restore “' + s.name + '”?',
+      'Rooms and beds go back to this saved layout (' + plural(s.assigned_count, 'resident') + ', ' + plural(s.room_count, 'room') + '). Anyone currently in a different bed is moved out first. A safety copy of the current layout is saved automatically, so you can undo this.',
+      () => runRoomTool(async () => {
+        const d = await roomToolRequest('POST', '/api/admin/dormitory/snapshots/' + id + '/restore');
+        closeRestoreRoomsModal();
+        toast('Restored “' + d.name + '”: ' + d.restored + ' placed, ' + d.kept + ' unchanged.', 'success');
+        if (d.skipped && d.skipped.length) {
+          toast(d.skipped.length + ' not restored: ' + d.skipped.slice(0, 3).map(x => x.name + ' (' + x.reason + ')').join('; ') + (d.skipped.length > 3 ? ' …' : ''), 'warning');
+        }
+        await loadDormRooms();
+      }));
+  }
+  function deleteRoomsSnapshot(id) {
+    const s = _roomSnapshots.find(x => x.id === id);
+    if (!s) return;
+    showConfirm('Delete “' + s.name + '”?', 'This saved layout is removed for good. Your current rooms and assignments are not changed.', () => runRoomTool(async () => {
+      await roomToolRequest('DELETE', '/api/admin/dormitory/snapshots/' + id);
+      _roomSnapshots = _roomSnapshots.filter(x => x.id !== id);
+      renderRoomSnapshots();
+      toast('Saved layout deleted.', 'info');
+    }));
+  }
+
+  // Remove assignments (all / male rooms / female rooms)
+  function confirmRemoveAssignments(scope) {
+    closeAllRoomMenus();
+    const label = scope === 'all' ? 'all rooms' : scope + ' rooms';
+    const n = dormAssignedIn(scope === 'all' ? null : scope);
+    if (!n) { toast('No residents are assigned to ' + label + '.', 'info'); return; }
+    showConfirm('Remove residents from ' + label + '?',
+      plural(n, 'resident') + ' will lose their bed. Their accounts are not affected and the removal is kept in each resident\'s room history. They are not e-mailed. A safety copy is saved first, so you can undo this with “Restore saved assignments”.',
+      () => runRoomTool(async () => {
+        const d = await roomToolRequest('POST', '/api/admin/dormitory/assignments/remove', { scope });
+        toast('Removed ' + plural(d.removed, 'resident') + ' from ' + label + '.', 'info');
+        await loadDormRooms();
+      }));
+  }
+
+  // Swap every room's gender
+  function confirmSwapRoomGenders() {
+    closeAllRoomMenus();
+    const male = _dormRooms.filter(r => r.gender === 'male').length, female = _dormRooms.filter(r => r.gender === 'female').length;
+    if (!_dormRooms.length) { toast('There are no rooms to switch.', 'info'); return; }
+    const n = dormAssignedIn();
+    showConfirm('Swap Male ⇄ Female rooms?',
+      plural(male, 'male room') + (male === 1 ? ' becomes' : ' become') + ' female and ' + plural(female, 'female room') + (female === 1 ? ' becomes' : ' become') + ' male.' +
+      (n ? ' ' + plural(n, 'resident') + ' currently in a bed will be removed (a room cannot keep residents of the other gender), without e-mail.' : '') +
+      ' A safety copy is saved first, so you can undo this with “Restore saved assignments”.',
+      () => runRoomTool(async () => {
+        const d = await roomToolRequest('POST', '/api/admin/dormitory/rooms/switch-gender');
+        toast('Rooms swapped: ' + d.toFemale + ' now female, ' + d.toMale + ' now male' + (d.removed ? ', ' + plural(d.removed, 'resident') + ' removed' : '') + '.', 'success');
+        await loadDormRooms();
+      }));
   }
 
   // ── Room History (per-resident) ──────────────────────────────────────

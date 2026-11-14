@@ -478,6 +478,20 @@ db.prepare(`CREATE TABLE IF NOT EXISTS room_history (
 )`).run();
 db.prepare(`CREATE INDEX IF NOT EXISTS idx_room_history_user ON room_history(user_id)`).run();
 
+// Saved room layouts (Room Management → Room Tools → Save / Restore). `data` = JSON { rooms:[{room_number,gender,capacity}],
+// assignments:[{room_number,bed_number,userId,name}] }. Rooms are matched by room_number (unique), not by id, so a layout
+// can still be restored after a room was deleted and re-created. See "Room layout tools" below.
+db.prepare(`CREATE TABLE IF NOT EXISTS room_snapshots (
+  id             TEXT PRIMARY KEY,
+  name           TEXT NOT NULL,
+  kind           TEXT NOT NULL DEFAULT 'manual',   -- manual (admin saved) | auto (safety copy before a bulk change)
+  created_at     TEXT DEFAULT (datetime('now')),
+  created_by     TEXT,
+  room_count     INTEGER DEFAULT 0,
+  assigned_count INTEGER DEFAULT 0,
+  data           TEXT NOT NULL
+)`).run();
+
 db.prepare(`CREATE TABLE IF NOT EXISTS dorm_billing (
   id          TEXT PRIMARY KEY,
   user_id     TEXT NOT NULL REFERENCES users(id),
@@ -1979,6 +1993,161 @@ function unassignBed(userId, removedBy, notes) {
   return tx();
 }
 
+// ── Room layout tools: Save / Restore / bulk Remove / Swap male⇄female ────────────────
+// A "snapshot" is a copy of the room layout (every room's number, gender, capacity) plus who sits in which bed.
+// Manual snapshots are kept until an admin deletes them. Every destructive bulk action below first saves an AUTO
+// snapshot of the current state, so it can always be undone from "Restore". Only the newest AUTO_SNAPSHOTS_KEPT
+// auto snapshots are kept (older ones are pruned); manual ones are never pruned.
+// Residents who lose a bed here are logged in room_history (via unassignBed) but are NOT e-mailed / notified: a
+// semester-wide reset would otherwise send one "your bed was removed" e-mail per resident.
+const AUTO_SNAPSHOTS_KEPT = 20;
+const roomToolError = (status, message) => Object.assign(new Error(message), { status });
+const cleanSnapshotName = (s) => String(s == null ? '' : s).replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 80);
+
+/** Current layout + assignments as plain data (what a snapshot stores). Rooms are keyed by room_number (unique, stable). */
+function buildRoomSnapshotData() {
+  const rooms = db.prepare('SELECT room_number, gender, capacity FROM dorm_rooms ORDER BY room_number').all();
+  const assignments = db.prepare(`
+    SELECT dr.room_number, ba.bed_number, ba.user_id AS userId,
+           TRIM(COALESCE(u.first_name,'') || ' ' || COALESCE(u.last_name,'')) AS name
+      FROM bed_assignments ba
+      JOIN dorm_rooms dr ON dr.id = ba.room_id
+      LEFT JOIN users u ON u.id = ba.user_id
+     ORDER BY dr.room_number, ba.bed_number
+  `).all();
+  return { v: 1, rooms, assignments };
+}
+
+/** Save the current layout. kind: 'manual' (admin pressed Save) | 'auto' (safety copy before a bulk change). */
+function saveRoomSnapshot({ name, kind = 'manual', createdBy = null } = {}) {
+  const data = buildRoomSnapshotData();
+  const id = randomUUID();
+  const label = cleanSnapshotName(name) || 'Saved layout';
+  const k = kind === 'auto' ? 'auto' : 'manual';
+  db.prepare(`INSERT INTO room_snapshots (id, name, kind, created_by, room_count, assigned_count, data) VALUES (?,?,?,?,?,?,?)`)
+    .run(id, label, k, createdBy, data.rooms.length, data.assignments.length, JSON.stringify(data));
+  if (k === 'auto') {
+    db.prepare(`DELETE FROM room_snapshots WHERE kind='auto' AND id NOT IN
+                (SELECT id FROM room_snapshots WHERE kind='auto' ORDER BY created_at DESC, rowid DESC LIMIT ?)`).run(AUTO_SNAPSHOTS_KEPT);
+  }
+  return { id, name: label, kind: k, roomCount: data.rooms.length, assignedCount: data.assignments.length };
+}
+
+/** Saved layouts, newest first (without the bulky data). Returns [] when viewing an Archive DB that predates this table. */
+function getRoomSnapshots() {
+  try {
+    return db.prepare(`
+      SELECT s.id, s.name, s.kind, s.created_at, s.room_count, s.assigned_count, u.first_name, u.last_name
+        FROM room_snapshots s LEFT JOIN users u ON u.id = s.created_by
+       ORDER BY s.created_at DESC, s.rowid DESC
+    `).all();
+  } catch (e) {
+    if (/no such table/i.test(e.message)) return [];
+    throw e;
+  }
+}
+
+function deleteRoomSnapshot(id) {
+  const snap = db.prepare('SELECT id, name FROM room_snapshots WHERE id = ?').get(id);
+  if (!snap) throw roomToolError(404, 'Saved layout not found');
+  db.prepare('DELETE FROM room_snapshots WHERE id = ?').run(id);
+  return snap;
+}
+
+/**
+ * Remove residents from their beds. scope: 'all' | 'male' | 'female' (= by the ROOM's gender).
+ * One transaction: auto-snapshot first, then every resident is unassigned (room_history is written by unassignBed).
+ * @returns {{ removed:number, snapshot:object|null }}   removed 0 → nothing to do, nothing saved
+ */
+function removeRoomAssignments(scope, removedBy) {
+  if (!['all', 'male', 'female'].includes(scope)) throw roomToolError(400, 'scope must be all, male or female');
+  const rows = db.prepare(`
+    SELECT ba.user_id AS userId FROM bed_assignments ba JOIN dorm_rooms dr ON dr.id = ba.room_id
+     ${scope === 'all' ? '' : 'WHERE dr.gender = ?'}`).all(...(scope === 'all' ? [] : [scope]));
+  if (!rows.length) return { removed: 0, snapshot: null };
+  const label = scope === 'all' ? 'all rooms' : `${scope} rooms`;
+  return db.transaction(() => {
+    const snapshot = saveRoomSnapshot({ name: `Before removing residents from ${label}`, kind: 'auto', createdBy: removedBy });
+    for (const r of rows) unassignBed(r.userId, removedBy, `Bulk removal (${label})`);
+    return { removed: rows.length, snapshot };
+  })();
+}
+
+/**
+ * Swap the gender of EVERY room (male rooms become female and the other way round). A resident cannot stay in a room
+ * of the other gender, so everyone currently in a bed is removed first. One transaction, auto-snapshot first.
+ * @returns {{ toFemale:number, toMale:number, removed:number, snapshot:object }}
+ */
+function switchRoomGenders(adminId) {
+  const rooms = db.prepare('SELECT gender, COUNT(*) AS n FROM dorm_rooms GROUP BY gender').all();
+  const toFemale = (rooms.find((r) => r.gender === 'male') || {}).n || 0;
+  const toMale   = (rooms.find((r) => r.gender === 'female') || {}).n || 0;
+  if (!toFemale && !toMale) throw roomToolError(409, 'There are no rooms to switch');
+  const occupants = db.prepare('SELECT user_id AS userId FROM bed_assignments').all();
+  return db.transaction(() => {
+    const snapshot = saveRoomSnapshot({ name: 'Before swapping male ⇄ female rooms', kind: 'auto', createdBy: adminId });
+    for (const o of occupants) unassignBed(o.userId, adminId, 'Rooms swapped male ⇄ female');
+    db.prepare(`UPDATE dorm_rooms SET gender = CASE gender WHEN 'male' THEN 'female' ELSE 'male' END`).run();
+    return { toFemale, toMale, removed: occupants.length, snapshot };
+  })();
+}
+
+/**
+ * Put the layout of a saved snapshot back. One transaction:
+ *   1. auto-snapshot of the current state (so the restore itself can be undone)
+ *   2. residents whose bed differs from the snapshot lose it; identical assignments are left alone (no history noise)
+ *   3. rooms are matched by room number: missing rooms are re-created, gender / capacity are set to the saved values
+ *   4. saved assignments are placed again. Skipped (and reported, never fatal): the account no longer exists / is not an
+ *      approved active resident, the room or bed no longer exists, or the bed is taken.
+ * @returns {{ restored, kept, removed, roomsCreated, roomsUpdated, skipped:{name,reason}[], snapshot, name }}
+ */
+function restoreRoomSnapshot(id, adminId) {
+  const snap = db.prepare('SELECT id, name, data FROM room_snapshots WHERE id = ?').get(id);
+  if (!snap) throw roomToolError(404, 'Saved layout not found');
+  let data;
+  try { data = JSON.parse(snap.data); } catch (_) { data = null; }
+  if (!data || !Array.isArray(data.rooms) || !Array.isArray(data.assignments)) throw roomToolError(422, 'This saved layout is damaged and cannot be restored');
+
+  return db.transaction(() => {
+    const result = { restored: 0, kept: 0, removed: 0, roomsCreated: 0, roomsUpdated: 0, skipped: [], name: snap.name };
+    result.snapshot = saveRoomSnapshot({ name: `Before restoring “${snap.name}”`, kind: 'auto', createdBy: adminId });
+
+    // 2) remove what differs
+    const wanted = new Map(data.assignments.map((a) => [a.userId, a]));
+    const current = db.prepare(`SELECT ba.user_id AS userId, dr.room_number, ba.bed_number
+                                  FROM bed_assignments ba JOIN dorm_rooms dr ON dr.id = ba.room_id`).all();
+    const keptUsers = new Set();
+    for (const c of current) {
+      const w = wanted.get(c.userId);
+      if (w && w.room_number === c.room_number && w.bed_number === c.bed_number) { keptUsers.add(c.userId); result.kept++; }
+      else { unassignBed(c.userId, adminId, `Layout restored from “${snap.name}”`); result.removed++; }
+    }
+
+    // 3) rooms
+    for (const r of data.rooms) {
+      const ex = db.prepare('SELECT id, gender, capacity FROM dorm_rooms WHERE room_number = ?').get(r.room_number);
+      if (!ex) { db.prepare('INSERT INTO dorm_rooms (room_number, gender, capacity) VALUES (?,?,?)').run(r.room_number, r.gender, r.capacity); result.roomsCreated++; }
+      else if (ex.gender !== r.gender || ex.capacity !== r.capacity) { db.prepare('UPDATE dorm_rooms SET gender=?, capacity=? WHERE id=?').run(r.gender, r.capacity, ex.id); result.roomsUpdated++; }
+    }
+
+    // 4) assignments
+    for (const a of data.assignments) {
+      if (keptUsers.has(a.userId)) continue;
+      const skip = (reason) => result.skipped.push({ name: a.name || 'Resident', reason });
+      const user = db.prepare('SELECT id, account_status, is_active FROM users WHERE id = ?').get(a.userId);
+      if (!user) { skip('account no longer exists'); continue; }
+      if (user.account_status !== 'approved' || !user.is_active) { skip('account is no longer an active resident'); continue; }
+      const room = db.prepare('SELECT id, capacity FROM dorm_rooms WHERE room_number = ?').get(a.room_number);
+      if (!room || a.bed_number < 1 || a.bed_number > room.capacity) { skip(`Room ${a.room_number} / Bed ${a.bed_number} no longer exists`); continue; }
+      if (db.prepare('SELECT 1 FROM bed_assignments WHERE room_id = ? AND bed_number = ?').get(room.id, a.bed_number)) { skip(`Room ${a.room_number} / Bed ${a.bed_number} is taken`); continue; }
+      if (db.prepare('SELECT 1 FROM bed_assignments WHERE user_id = ?').get(a.userId)) { skip('already has another bed'); continue; }
+      assignBed(room.id, a.bed_number, a.userId, adminId, `Restored from “${snap.name}”`);
+      result.restored++;
+    }
+    return result;
+  })();
+}
+
 /** Room history for one resident — most recent stay first. */
 function getRoomHistory(userId) {
   return db.prepare(
@@ -2694,6 +2863,7 @@ module.exports = {
   getFullUserProfile,
   // Dormitory Management
   getDormRooms, assignBed, unassignBed, getRoomHistory,
+  saveRoomSnapshot, getRoomSnapshots, deleteRoomSnapshot, restoreRoomSnapshot, removeRoomAssignments, switchRoomGenders,
   getRoomAvailability, resolveRoomPreference,
   getDormBilling, generateMonthlyBills, generateBillForUser, markBillPaid, markBillUnpaid, waiveBill, setBillComment,
   // Reputation
