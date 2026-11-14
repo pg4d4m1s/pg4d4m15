@@ -2343,6 +2343,8 @@
       refreshUsers();
     });
     socket.on('account-rejected',()=>{ loadPendingAccounts(); updateRegBadge(-1); });
+    // AI badge finished -> patch the badges (and rotated thumbnails) in place; does not disturb a half-typed comment
+    socket.on('document-checks-ready',()=>{ if(document.getElementById('tab-registrations')?.classList.contains('active')) refreshDocCheckFooters(); });
     socket.on('new-incident',(data)=>{
       loadIncidentStats();
       toast(`⚠️ New incident report: ${data.title||'Untitled'}`, 'error');
@@ -2889,6 +2891,7 @@
     const d=await r.json();
     _regAccounts = d.accounts || [];
     await ensureRevisionItems();   // the Reject form's checklist + the "resubmitted" notice need the labels
+    await loadDocChecks();         // AI / duplicate badges for the document thumbnails (never blocks the list if it fails)
     if(!_regAccounts.length){
       el.innerHTML='<div class="bg-white dark:bg-slate-900 rounded-2xl border border-slate-100 dark:border-slate-800 p-12 text-center"><i class="fa-solid fa-user-check text-4xl text-green-400 mb-3 block"></i><p class="font-display font-semibold text-slate-700 dark:text-slate-300">No pending registrations!</p><p class="text-sm text-slate-400 mt-1">All accounts have been reviewed.</p></div>';
       const countEl = document.getElementById('reg-count');
@@ -3140,7 +3143,7 @@
     }
 
     // ── Clickable doc row ───────────────────────────────────
-    function docRow(icon, color, label, url) {
+    function docRow(icon, color, label, url, slot) {
       if (!url && label === 'Medical Certificate') {
         // Required, but only submitted AFTER approval -- so "not yet", not "Missing" (and never alarming red).
         return '<div class="flex flex-col items-center gap-2 p-3 rounded-xl border border-dashed border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/20 text-center">'
@@ -3182,7 +3185,7 @@
               + '<span class="text-xs font-bold text-amber-600 text-center px-2">PDF (re-upload<br>to preview)</span></div>'
             : '<div class="w-full aspect-[4/3] flex items-center justify-center bg-slate-50 dark:bg-slate-700 rounded-lg">'
               + '<i class="fa-solid ' + icon + ' ' + color + ' text-3xl"></i></div>';
-      return '<div class="rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 overflow-hidden'
+      var cardHtml = '<div class="rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 overflow-hidden'
         + ' cursor-pointer hover:border-blue-400 hover:shadow-md transition-all group"'
         + ' data-lightbox-url="' + safeUrl + '" data-lightbox-title="' + safeTitle + '">'
         + thumbHtml
@@ -3192,6 +3195,8 @@
         + '<p class="text-xs font-semibold text-slate-600 dark:text-slate-300 truncate">' + escHtml(label) + '</p></div>'
         + '<i class="fa-solid fa-expand text-xs text-blue-400 group-hover:text-blue-600 flex-shrink-0"></i>'
         + '</div></div>';
+      // Badge + "Request new copy" sit OUTSIDE the clickable card so tapping them never opens the lightbox.
+      return slot ? ('<div class="flex flex-col gap-1.5 min-w-0">' + cardHtml + docCheckFooter(a.id, slot) + '</div>') : cardHtml;
     }
 
     // ── Parse family objects ────────────────────────────────
@@ -3394,13 +3399,14 @@
         <!-- DOCUMENT REQUIREMENTS -->
         <div>
           ${sec('fa-file-lines', 'Document Requirements')}
-          <div class="flex flex-wrap gap-2"><a href="/api/admin/users/${a.id}/application-form" target="_blank" rel="noopener" class="inline-flex items-center justify-center gap-2 min-h-[44px] px-4 py-2 mb-3 rounded-xl text-sm font-bold text-white bg-blue-600 hover:bg-blue-700 transition-colors"><i class="fa-solid fa-file-pdf"></i> Application Form (PDF)</a></div>
+          <div class="flex flex-wrap gap-2"><a href="/api/admin/users/${a.id}/application-form" target="_blank" rel="noopener" class="inline-flex items-center justify-center gap-2 min-h-[44px] px-4 py-2 mb-3 rounded-xl text-sm font-bold text-white bg-blue-600 hover:bg-blue-700 transition-colors"><i class="fa-solid fa-file-pdf"></i> Application Form (PDF)</a><button type="button" onclick="recheckDocs('${a.id}', this)" class="inline-flex items-center justify-center gap-2 min-h-[44px] px-4 py-2 mb-3 rounded-xl text-sm font-bold text-slate-600 dark:text-slate-300 border-2 border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors" title="Ask the AI again what kind of document each file is (uses 1 Gemini request)"><i class="fa-solid fa-wand-magic-sparkles"></i> Re-run AI check</button></div>
+          <p class="text-xs text-slate-400 mb-3">The badges under each document are hints from an automatic check. You still decide: approve, request a new copy of one document, or reject.</p>
           <div class="grid grid-cols-2 sm:grid-cols-3 gap-3">
-            ${docRow('fa-id-card',            'text-blue-500',   damisIdLabel(a.id_type),     a.id_front_url)}
-            ${docRow('fa-house',              'text-green-500',  'Certificate of Residency',   a.cert_residency_url)}
-            ${docRow('fa-hand-holding-heart', 'text-amber-500',  'Certificate of Low Income',  a.cert_low_income_url)}
-            ${docRow('fa-graduation-cap',     'text-indigo-500', 'Certificate of Registration/Enrollment',  a.cert_enrollment_url)}
-            ${docRow('fa-clipboard-list',     'text-rose-500',   'Report Card / Certificate of Grades',  a.cert_grades_url)}
+            ${docRow('fa-id-card',            'text-blue-500',   damisIdLabel(a.id_type),     a.id_front_url, 'id_front')}
+            ${docRow('fa-house',              'text-green-500',  'Certificate of Residency',   a.cert_residency_url, 'cert_residency')}
+            ${docRow('fa-hand-holding-heart', 'text-amber-500',  'Certificate of Low Income',  a.cert_low_income_url, 'cert_low_income')}
+            ${docRow('fa-graduation-cap',     'text-indigo-500', 'Certificate of Registration/Enrollment',  a.cert_enrollment_url, 'cert_enrollment')}
+            ${docRow('fa-clipboard-list',     'text-rose-500',   'Report Card / Certificate of Grades',  a.cert_grades_url, 'cert_grades')}
             ${docRow('fa-notes-medical',      'text-teal-500',   'Medical Certificate',  a.cert_medical_url)}
           </div>
           ${!hasAnyDoc ? `
@@ -3446,6 +3452,125 @@
       </div>
     </div>`;
   }
+
+  // ── Document badges, "Request new copy" and Rotate (pending registrations) ─────────────
+  // Data: GET /api/admin/accounts/pending/document-checks (routes/documents.js). Badges are HINTS from an automatic check;
+  // the admin still decides. Colour is never the only signal (every badge has an icon + words).
+  let _docChecks = {};
+  const DOC_SLOT_LABELS = {
+    id_front:'School ID / Government ID', cert_residency:'Certificate of Residency', cert_low_income:'Certificate of Low Income',
+    cert_enrollment:'Certificate of Registration/Enrollment', cert_grades:'Report Card / Certificate of Grades'
+  };
+  // slot -> item key of the "Return application for correction" checklist (utils/applicationRevision.js)
+  const DOC_FLAG_KEYS = { id_front:'doc_school_id', cert_residency:'doc_residency', cert_low_income:'doc_low_income', cert_enrollment:'doc_enrollment', cert_grades:'doc_grades' };
+  const _cldImg = /^https:\/\/res\.cloudinary\.com\/[^/]+\/image\/upload\/.+/i;
+  const _canRotate = u => !!u && _cldImg.test(u) && !/\.pdf($|\?)/i.test(u);
+  async function loadDocChecks(){
+    try{
+      const r=await fetch('/api/admin/accounts/pending/document-checks');
+      const d=await r.json();
+      _docChecks = d.checks || {};
+    }catch(e){ console.warn('[doc-checks] could not load badges:', e); _docChecks = {}; }
+  }
+  function docChip(cls, icon, text, title){
+    return '<span class="inline-flex items-start gap-1 text-[11px] font-bold leading-snug px-2 py-1 rounded-lg '+cls+'"'+(title?' title="'+escHtml(title)+'"':'')+'>'
+      +'<span aria-hidden="true">'+icon+'</span><span class="min-w-0 break-words">'+escHtml(text)+'</span></span>';
+  }
+  const _AMBER='bg-amber-50 dark:bg-amber-950/40 text-amber-800 dark:text-amber-300', _GREY='bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400';
+  function docCheckInner(uid, slot){
+    const c=((_docChecks[uid]||{})[slot])||{};
+    const out=[];
+    const st=c.aiStatus;
+    if(st==='done'){
+      if(c.verdict==='match')           out.push(docChip('bg-green-50 dark:bg-green-950/40 text-green-700 dark:text-green-300','✓','Matches'));
+      else if(c.verdict==='mismatch')   out.push(docChip(_AMBER,'⚠','Looks like '+(c.detected||'a different document')));
+      else if(c.verdict==='unreadable') out.push(docChip('bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300','✗','Unreadable'));
+      else                              out.push(docChip(_AMBER,'⚠','Could not confirm'));
+      if(c.note) out.push('<span class="text-[10px] text-slate-400 leading-snug">'+escHtml(c.note)+'</span>');
+    } else if(st==='pending'||st==='running'){
+      out.push(docChip(_GREY,'…','Checking…'));
+    } else {
+      out.push(docChip(_GREY,'–','Not checked',c.note||'The automatic check did not run for this document.'));
+    }
+    if(c.sameAs) out.push(docChip(_AMBER,'⚠','Looks like the same document as “'+(DOC_SLOT_LABELS[c.sameAs]||c.sameAs)+'”'));
+    if(c.dupNote) out.push(docChip(_AMBER,'⚠',c.dupNote));
+    if(c.rotation) out.push('<span class="text-[10px] text-slate-400 leading-snug">↻ Turned upright automatically</span>');
+    out.push('<div class="flex gap-1.5">'
+      +'<button type="button" onclick="requestNewCopy(\''+uid+'\',\''+slot+'\')" '
+      +'class="flex-1 min-h-[44px] text-xs font-bold text-amber-700 dark:text-amber-300 border-2 border-amber-200 dark:border-amber-800 hover:bg-amber-50 dark:hover:bg-amber-950/40 rounded-xl px-2 py-2 transition-colors">'
+      +'<i class="fa-solid fa-rotate-right mr-1"></i>Request new copy</button>'
+      +(_canRotate(c.url)?'<button type="button" onclick="rotateDoc(\''+uid+'\',\''+slot+'\',90,this)" aria-label="Rotate this document 90 degrees clockwise" title="Rotate 90° clockwise" '
+      +'class="min-h-[44px] min-w-[44px] text-sm font-bold text-slate-600 dark:text-slate-300 border-2 border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800 rounded-xl px-3 transition-colors"><i class="fa-solid fa-rotate-right"></i></button>':'')
+      +'</div>');
+    return out.join('');
+  }
+  function docCheckFooter(uid, slot){
+    return '<div id="docchk-'+uid+'-'+slot+'" class="flex flex-col items-stretch gap-1.5">'+docCheckInner(uid,slot)+'</div>';
+  }
+  // Swap the thumbnail + lightbox link of one document when its stored URL changed (rotation).
+  function _syncDocThumb(el, url){
+    const card=el.parentElement&&el.parentElement.firstElementChild;
+    if(!card||!url||card.getAttribute('data-lightbox-url')===url) return;
+    if(!card.hasAttribute('data-lightbox-url')) return;
+    card.setAttribute('data-lightbox-url', url);
+    const img=card.querySelector('img'); if(img){ img.style.display=''; img.src=url; }
+  }
+  async function refreshDocCheckFooters(){
+    await loadDocChecks();
+    document.querySelectorAll('[id^="docchk-"]').forEach(el=>{
+      const m=/^docchk-(.+)-(id_front|cert_\w+)$/.exec(el.id);
+      if(!m) return;
+      el.innerHTML=docCheckInner(m[1],m[2]);
+      const c=((_docChecks[m[1]]||{})[m[2]])||{};
+      if(_canRotate(c.url)) _syncDocThumb(el, c.url);
+    });
+  }
+  // One tap: opens the card's existing "Return application for correction" form with THIS document already ticked and
+  // a note pre-filled from the badge. The admin adds a comment if wanted and presses "Send back for correction".
+  // Nothing is sent until then; the applicant keeps every other answer and document.
+  function requestNewCopy(uid, slot){
+    const form=document.getElementById('reg-reject-form-'+uid);
+    if(!form){ toast('Open the application card first.','error'); return; }
+    const label=DOC_SLOT_LABELS[slot]||slot;
+    const c=((_docChecks[uid]||{})[slot])||{};
+    let note='';
+    if(c.sameAs) note='Looks like the same document as your '+(DOC_SLOT_LABELS[c.sameAs]||'other document')+'. Please send the correct one.';
+    else if(c.aiStatus==='done' && c.verdict==='mismatch') note='This looks like '+(c.detected||'a different document')+'. Please send the correct '+label+'.';
+    else if(c.aiStatus==='done' && c.verdict==='unreadable') note='Not readable. Please send a clearer photo or scan with the whole page visible.';
+    form.classList.remove('hidden');
+    const cb=form.querySelector('[data-flag-key="'+DOC_FLAG_KEYS[slot]+'"]');
+    if(cb){
+      cb.checked=true; regFlagToggle(cb);
+      const n=form.querySelector('[data-flag-note="'+DOC_FLAG_KEYS[slot]+'"]');
+      if(n && !n.value) n.value=note.slice(0,200);
+    }
+    form.scrollIntoView({behavior:'smooth',block:'center'});
+    toast('“'+label+'” is ticked in the form below. Add a comment if you like, then press “Send back for correction”.','info');
+  }
+  async function rotateDoc(uid, slot, degrees, btn){
+    if(btn) btn.disabled=true;
+    try{
+      const r=await fetch('/api/admin/accounts/'+uid+'/rotate-document',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({slot,degrees})});
+      const d=await r.json().catch(()=>({error:'Unexpected server reply (HTTP '+r.status+').'}));
+      if(!r.ok||d.error){ toast(d.error||'Could not rotate the document.','error'); return; }
+      ((_docChecks[uid]=_docChecks[uid]||{})[slot]=_docChecks[uid][slot]||{}).url=d.url;
+      const el=document.getElementById('docchk-'+uid+'-'+slot); if(el) _syncDocThumb(el, d.url);
+    }catch(e){ console.error('[rotate]',e); toast('Network error — the document was not rotated.','error'); }
+    finally{ if(btn) btn.disabled=false; }
+  }
+  async function recheckDocs(uid, btn){
+    if(btn){ btn.disabled=true; }
+    try{
+      const r=await fetch('/api/admin/accounts/'+uid+'/recheck-documents',{method:'POST'});
+      const d=await r.json();
+      if(!r.ok||d.error){ toast(d.error||'Could not start the check.','error'); return; }
+      toast('AI check started — badges will update in a few seconds.','info');
+      Object.keys(DOC_SLOT_LABELS).forEach(sl=>{ ((_docChecks[uid]=_docChecks[uid]||{})[sl]=_docChecks[uid][sl]||{}).aiStatus='pending'; });
+      document.querySelectorAll('[id^="docchk-'+uid+'-"]').forEach(el=>{ const m=/^docchk-(.+)-(id_front|cert_\w+)$/.exec(el.id); if(m) el.innerHTML=docCheckInner(m[1],m[2]); });
+    }catch(e){ toast('Network error — please try again.','error'); }
+    finally{ if(btn) btn.disabled=false; }
+  }
+
   async function approveAccountAction(id){
     const btn = document.querySelector(`#reg-card-${id} button`);
     if(btn){ btn.disabled=true; btn.innerHTML='<i class="fa-solid fa-spinner animate-spin mr-1"></i>Approving...'; }

@@ -39,6 +39,7 @@ const usersRoutes        = require('./routes/users');
 const notifRoutes        = require('./routes/notifications');
 const messagesRoutes     = require('./routes/messages');
 const adminRoutes        = require('./routes/admin');
+const documentRoutes     = require('./routes/documents');   // document badges, "request a new copy", rotate + the applicant's replace-document link
 const aiRoutes           = require('./routes/ai');
 const researchRoutes     = require('./routes/research');
 const announcementRoutes = require('./routes/announcements');
@@ -478,6 +479,7 @@ app.use('/', usersRoutes);
 app.use('/', notifRoutes);
 app.use('/', messagesRoutes);
 app.use('/', adminRoutes);
+app.use('/', documentRoutes);
 app.use('/', aiRoutes);
 app.use('/', researchRoutes);
 app.use('/', announcementRoutes);
