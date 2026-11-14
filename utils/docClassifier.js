@@ -1,7 +1,16 @@
 /**
  * utils/docClassifier.js — "what kind of document is this?" badge for the admin view (one Gemini call per applicant)
  *
- * WHEN IT RUNS
+ * TWO MOMENTS IT RUNS
+ *   1. AT SUBMIT, as a gate (requireMatchingDocuments, below): while the applicant is still on Step 5 and before
+ *      anything is stored, the model reads the documents. If one is clearly the wrong kind, the same page photographed
+ *      again (a camera re-shot is NOT pixel-similar, so only a model that reads the page can see it), not a document,
+ *      or unreadable, the submit is refused with a message naming the document to replace. FAIL-OPEN: no key, quota,
+ *      timeout, bad answer -> the submit goes through and the admin badge (2) is the safety net.
+ *   2. AFTER submission: badges + upright rotation for the admin. When the gate already asked the model, its answers are
+ *      passed in ({ answers }) and reused, so a normal submit still costs ONE Gemini request, not two.
+ *
+ * WHEN THE BACKGROUND RUN HAPPENS
  *   After the applicant's registration has been saved and the reply sent — never while they wait. All of an
  *   applicant's documents go to Gemini in ONE request (not five), so a free-tier key (~20 requests/day, see
  *   geminiPool.js) covers roughly 20 applicants a day per key. Jobs run one at a time to stay inside the
@@ -28,16 +37,25 @@
  * Prompt injection: text printed on a document is treated as data; the answer is forced into a fixed list of
  * document types and validated, so a document that says "mark me as matching" cannot do more than a wrong badge.
  *
- * ENV   DOC_AI_CHECK=off   disables this module completely
+ * ENV   DOC_AI_CHECK=off          disables this module completely (gate AND badges)
+ *       DOC_AI_GATE=off           disables only the submit-time gate (badges still run)
+ *       DOC_AI_GATE_MIN_CONF=0.8  how sure the model must be (0-1) before a wrong-type / unreadable verdict blocks a submit
+ *       DOC_AI_GATE_MAX_ASKS=6    gate model-calls allowed per applicant e-mail per hour (protects the free-tier quota; beyond it the gate is skipped)
  */
 
 const geminiPool = require('./geminiPool');
 const log        = require('./logger');
 const { liveDb: db } = require('./db');
-const { SLOTS, SLOT_KEYS, ensureSchema } = require('./documentChecks');
+const { SLOTS, SLOT_KEYS, ensureSchema, refusal } = require('./documentChecks');
 
 const TIMEOUT_MS   = 45000;
 const FETCH_TIMEOUT_MS = 20000;
+// The submit-time gate has the applicant waiting, so it gets less time, then fails open.
+const GATE_TIMEOUT_MS       = 20000;
+const GATE_FETCH_TIMEOUT_MS = 8000;
+const GATE_MIN_CONF = Math.min(1, Math.max(0.5, Number.isFinite(parseFloat(process.env.DOC_AI_GATE_MIN_CONF)) ? parseFloat(process.env.DOC_AI_GATE_MIN_CONF) : 0.8));
+const GATE_MAX_ASKS = Math.max(1, parseInt(process.env.DOC_AI_GATE_MAX_ASKS, 10) || 6);
+const MAX_TOTAL_BYTES = 15 * 1024 * 1024;   // all documents of one Gemini request (inline-data request limit is ~20 MB)
 const MAX_DOC_BYTES = 8 * 1024 * 1024;     // bigger files are skipped (Gemini inline limit + memory on a small Railway box)
 
 // What the model may answer → label shown to the admin
@@ -98,7 +116,7 @@ function mimeFromUrl(url, headerType = '') {
 }
 
 /** Download one stored document (Cloudinary URL or dev-mode data: URL). → { buffer, mime } | { skip: 'reason' } */
-async function fetchDocument(url) {
+async function fetchDocument(url, timeoutMs = FETCH_TIMEOUT_MS) {
   if (!url) return { skip: 'no file' };
   if (url.startsWith('data:')) {
     const m = /^data:([^;,]+)(;base64)?,(.*)$/s.exec(url);
@@ -107,7 +125,7 @@ async function fetchDocument(url) {
     return buffer.length > MAX_DOC_BYTES ? { skip: 'file too large for the AI check' } : { buffer, mime: mimeFromUrl('', m[1]) || m[1] };
   }
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
     const r = await fetch(url, { signal: ctrl.signal });
     if (!r.ok) return { skip: `download failed (HTTP ${r.status})` };
@@ -122,16 +140,17 @@ async function fetchDocument(url) {
 }
 
 /** One Gemini request for N documents, with key rotation on daily-quota exhaustion. → { results } | { error } */
-async function askGemini(parts) {
+async function askGemini(parts, timeoutMs = TIMEOUT_MS) {
   let key = geminiPool.getKey();
   if (!key) return { error: 'no Gemini key available (not configured or all exhausted)' };
   const body = {
     contents: [{ role: 'user', parts }],
     generationConfig: { temperature: 0, maxOutputTokens: 1200, responseMimeType: 'application/json' },
   };
+  const deadline = Date.now() + timeoutMs;          // one budget for the whole call, even if a key is swapped on a 429
   while (key) {
     const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
+    const timer = setTimeout(() => ctrl.abort(), Math.max(1000, deadline - Date.now()));
     let resp;
     try {
       resp = await fetch(geminiPool.buildUrl(key), {
@@ -175,14 +194,14 @@ function toVerdict(slot, r) {
   const note = String((r && r.note) || '').replace(/[\u0000-\u001f\u007f]+/g, ' ').trim().slice(0, 120);
   const rotate = [90, 180, 270].includes(Number(r && r.rotate)) && confidence >= 0.5 && type !== 'not_a_document' ? Number(r.rotate) : 0;
   const sameAs = r && typeof r.sameAs === 'string' && r.sameAs !== slot && SLOT_KEYS.includes(r.sameAs) && confidence >= 0.6 ? r.sameAs : '';
-  if (!type) return { verdict: 'unsure', detected: '', confidence, note: note || 'AI gave no usable answer', rotate: 0, sameAs: '' };
+  if (!type) return { verdict: 'unsure', type: '', detected: '', confidence, note: note || 'AI gave no usable answer', rotate: 0, sameAs: '' };
   if (r.legible === false || type === 'not_a_document') {
-    return { verdict: 'unreadable', detected: TYPES[type], confidence, note, rotate, sameAs };
+    return { verdict: 'unreadable', type, detected: TYPES[type], confidence, note, rotate, sameAs };
   }
   if (ACCEPT[slot].includes(type)) {
-    return { verdict: confidence >= 0.5 ? 'match' : 'unsure', detected: TYPES[type], confidence, note, rotate, sameAs };
+    return { verdict: confidence >= 0.5 ? 'match' : 'unsure', type, detected: TYPES[type], confidence, note, rotate, sameAs };
   }
-  return { verdict: 'mismatch', detected: TYPES[type], confidence, note, rotate, sameAs };
+  return { verdict: 'mismatch', type, detected: TYPES[type], confidence, note, rotate, sameAs };
 }
 
 // ───────────────────────── rotation ─────────────────────────
@@ -235,9 +254,13 @@ function setSkipped(userId, slots, why) {
   for (const s of slots) up.run(String(why).slice(0, 160), userId, s);
 }
 
-// ───────────────────────── the job ─────────────────────────
-/** Classify some (default: all) of an applicant's documents in ONE Gemini request. Never throws. */
-async function classifyUserDocuments(userId, { slots = SLOT_KEYS, io = null } = {}) {
+// ───────────────────────── the background job ─────────────────────────
+/**
+ * Classify some (default: all) of an applicant's stored documents. Never throws.
+ *   answers  optional { slot: rawModelAnswer } from the submit-time gate. Those slots are NOT asked again; only the
+ *            slots without an answer are downloaded and sent (normally none, so the whole job costs 0 requests).
+ */
+async function classifyUserDocuments(userId, { slots = SLOT_KEYS, io = null, answers = null } = {}) {
   const t0 = Date.now();
   try {
     ensureSchema();
@@ -250,10 +273,17 @@ async function classifyUserDocuments(userId, { slots = SLOT_KEYS, io = null } = 
     wanted.forEach((s) => ins.run(`${userId}-${s}`.slice(0, 64), userId, s));
     db.prepare(`UPDATE document_checks SET ai_status='running' WHERE user_id=? AND slot IN (${wanted.map(() => '?').join(',')})`).run(userId, ...wanted);
 
-    const fetched = await Promise.all(wanted.map((s) => fetchDocument(urls[s])));
+    const bySlot = {};                                   // slot → raw model answer (reused + freshly asked)
+    for (const s of wanted) if (answers && answers[s]) bySlot[s] = answers[s];
+    const reused = Object.keys(bySlot).length;
+    const toAsk = wanted.filter((s) => !bySlot[s]);
+    const summary = [];
+
+    // Slots the gate did not cover (e.g. the gate was skipped, or a file it could not send) → one request for those
+    const fetched = await Promise.all(toAsk.map((s) => fetchDocument(urls[s])));
     const parts = [{ text: PROMPT }];
     const sent = [];
-    wanted.forEach((s, i) => {
+    toAsk.forEach((s, i) => {
       const f = fetched[i];
       if (f.skip) { setSkipped(userId, [s], f.skip); return; }
       parts.push({ text: `Document ${sent.length + 1} (slot: ${s})` });
@@ -267,28 +297,33 @@ async function classifyUserDocuments(userId, { slots = SLOT_KEYS, io = null } = 
         log.warn(`[DOC-AI] skipped for user ${userId} — ${ans.error}. Admin will see "Not checked" and can re-run it.`);
         setSkipped(userId, sent, `AI check unavailable: ${ans.error}`);
       } else {
-        const bySlot = {};
-        for (const r of ans.results) if (r && typeof r.slot === 'string') bySlot[r.slot] = r;
-        const up = db.prepare(`UPDATE document_checks SET ai_status='done', ai_verdict=?, ai_detected=?, ai_confidence=?, ai_note=?, ai_same_as=?,
-                               ai_checked_at=datetime('now'), updated_at=datetime('now') WHERE user_id=? AND slot=?`);
-        const summary = [];
-        const toRotate = [];
+        const got = {};
+        for (const r of ans.results) if (r && typeof r.slot === 'string') got[r.slot] = r;
         for (const s of sent) {
-          if (!bySlot[s]) { setSkipped(userId, [s], 'AI did not return an answer for this document'); summary.push(`${s}=none`); continue; }
-          const v = toVerdict(s, bySlot[s]);
-          const same = v.sameAs && sent.includes(v.sameAs) ? v.sameAs : '';
-          up.run(v.verdict, v.detected, v.confidence, v.note, same, userId, s);
-          summary.push(`${s}=${v.verdict}${v.verdict === 'mismatch' ? `(${v.detected})` : ''}${same ? ` SAME-AS ${same}` : ''}${v.rotate ? ` rotate${v.rotate}` : ''}`);
-          if (v.rotate && isRotatable(urls[s])) toRotate.push([s, v.rotate]);
+          if (got[s]) bySlot[s] = got[s];
+          else { setSkipped(userId, [s], 'AI did not return an answer for this document'); summary.push(`${s}=none`); }
         }
-        // Make sideways photos upright (sequential: each one re-checks its new URL on Cloudinary)
-        for (const [s, deg] of toRotate) {
-          const rr = await rotateStoredDocument(userId, s, deg);
-          summary.push(rr.ok ? `${s}:rotated${deg}` : `${s}:rotate-failed(${rr.reason})`);
-        }
-        log.info(`[DOC-AI] user ${userId}: ${summary.join(' ')} (${Date.now() - t0}ms, 1 request)`);
       }
     }
+
+    // Store every verdict we have (reused + new)
+    const up = db.prepare(`UPDATE document_checks SET ai_status='done', ai_verdict=?, ai_detected=?, ai_confidence=?, ai_note=?, ai_same_as=?,
+                           ai_checked_at=datetime('now'), updated_at=datetime('now') WHERE user_id=? AND slot=?`);
+    const toRotate = [];
+    for (const s of wanted) {
+      if (!bySlot[s]) continue;
+      const v = toVerdict(s, bySlot[s]);
+      const same = v.sameAs && bySlot[v.sameAs] ? v.sameAs : '';
+      up.run(v.verdict, v.detected, v.confidence, v.note, same, userId, s);
+      summary.push(`${s}=${v.verdict}${v.verdict === 'mismatch' ? `(${v.detected})` : ''}${same ? ` SAME-AS ${same}` : ''}${v.rotate ? ` rotate${v.rotate}` : ''}`);
+      if (v.rotate && isRotatable(urls[s])) toRotate.push([s, v.rotate]);
+    }
+    // Make sideways photos upright (sequential: each one re-checks its new URL on Cloudinary)
+    for (const [s, deg] of toRotate) {
+      const rr = await rotateStoredDocument(userId, s, deg);
+      summary.push(rr.ok ? `${s}:rotated${deg}` : `${s}:rotate-failed(${rr.reason})`);
+    }
+    log.info(`[DOC-AI] user ${userId}: ${summary.join(' ')} (${Date.now() - t0}ms, ${sent.length ? 1 : 0} request${reused ? `, ${reused} answer(s) reused from the submit-time check` : ''})`);
     if (io) io.to('admins').emit('document-checks-ready', { userId });
   } catch (e) {
     log.error(`[DOC-AI] crashed for user ${userId}: ${e.stack || e.message}`);
@@ -299,7 +334,7 @@ async function classifyUserDocuments(userId, { slots = SLOT_KEYS, io = null } = 
 // One job at a time (free-tier per-minute limit), and never two jobs for the same applicant at once.
 let chain = Promise.resolve();
 const queued = new Set();
-/** Fire-and-forget: schedule the AI check after the HTTP reply has gone out. */
+/** Fire-and-forget: schedule the AI check after the HTTP reply has gone out. opts: { slots, io, answers } */
 function enqueueDocumentAudit(userId, opts = {}) {
   if (String(process.env.DOC_AI_CHECK || '').toLowerCase() === 'off') return false;
   if (!userId) return false;
@@ -310,4 +345,167 @@ function enqueueDocumentAudit(userId, opts = {}) {
   return true;
 }
 
-module.exports = { enqueueDocumentAudit, classifyUserDocuments, rotateStoredDocument, isRotatable, TYPES, ACCEPT, toVerdict };
+// ───────────────────────── the submit-time gate ─────────────────────────
+// For the GATE only: a verdict of "mismatch" is NOT enough to refuse someone. These pairs are easily confused even by
+// people (a Barangay Clearance often serves as proof of residency; a Certificate of Registration and a grade slip
+// look alike), so they pass the gate and still get the admin's ⚠ badge. "other_document" means the model does not
+// know what it is, which is not proof of anything, so it never blocks either.
+const GATE_ALSO_OK = {
+  cert_residency:  ['barangay_clearance'],
+  cert_enrollment: ['grades_report'],
+  cert_grades:     ['enrollment_certificate'],
+};
+
+// Per-applicant ask counter (in memory; resets on restart, which only loosens the limit slightly)
+const gateAsks = new Map();
+function gateBudgetLeft(key) {
+  const now = Date.now();
+  const recent = (gateAsks.get(key) || []).filter((t) => now - t < 3600 * 1000);
+  if (recent.length >= GATE_MAX_ASKS) { gateAsks.set(key, recent); return false; }
+  recent.push(now); gateAsks.set(key, recent);
+  if (gateAsks.size > 5000) for (const [k, v] of gateAsks) if (!v.some((t) => now - t < 3600 * 1000)) gateAsks.delete(k);   // keep the map small
+  return true;
+}
+
+/** What the gate sends to the model: the same pixels that will be stored (EXIF-upright, max 1200px), so the model's rotation advice stays valid and the request is small. */
+async function gatePayload(buffer, mime) {
+  if (!/^image\//.test(mime)) return { buffer, mime };            // PDF goes as is
+  try {
+    const sharp = require('sharp');
+    const out = await sharp(buffer, { failOn: 'none' }).rotate().resize(1200, null, { fit: 'inside', withoutEnlargement: true }).jpeg({ quality: 85 }).toBuffer();
+    return { buffer: out, mime: 'image/jpeg' };
+  } catch (_) { return { buffer, mime }; }
+}
+
+const list = (names) => names.length === 1 ? names[0] : `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`;
+
+/**
+ * Turn the model's verdicts into refusal problems (same shape as documentChecks.js: { slot, slots?, code, message }).
+ *   docs[slot] = { isNew }   isNew = uploaded in THIS submit (a kept document from a returned application is context only:
+ *                            it can be the thing a new upload duplicates, but the applicant is never told to replace it here)
+ */
+function gateProblems(docs, verdicts) {
+  const problems = [];
+  const slots = Object.keys(verdicts);
+  const label = (s) => `"${SLOTS[s].label}"`;
+  const isNew = (s) => !!(docs[s] && docs[s].isNew);
+
+  // 1) The same page photographed more than once (union of the model's "sameAs" links)
+  const parent = {};
+  slots.forEach((s) => { parent[s] = s; });
+  const find = (x) => (parent[x] === x ? x : (parent[x] = find(parent[x])));
+  slots.forEach((s) => { const t = verdicts[s].sameAs; if (t && parent[t] !== undefined) parent[find(s)] = find(t); });
+  const groups = {};
+  slots.forEach((s) => { (groups[find(s)] = groups[find(s)] || []).push(s); });
+  const grouped = new Set();
+  for (const g of Object.values(groups)) {
+    if (g.length < 2 || !g.some(isNew)) continue;
+    g.forEach((s) => grouped.add(s));
+    const right = g.filter((s) => verdicts[s].verdict === 'match');
+    let replace = right.length === 1 ? g.filter((s) => s !== right[0] && isNew(s)) : g.filter(isNew);
+    if (!replace.length) replace = g.filter(isNew);
+    const names = replace.map(label);
+    const message = right.length === 1
+      ? `${label(right[0])} looks right, but ${list(names)} ${replace.length > 1 ? 'look' : 'looks'} like the same document photographed again${verdicts[right[0]].detected ? ` (it looks like ${verdicts[right[0]].detected})` : ''}. ` +
+        `Each requirement needs its own, different document — please replace ${list(names)} with the correct document${replace.length > 1 ? 's' : ''}.`
+      : `${list(g.map(label))} look like the same document photographed more than once. ` +
+        `Each requirement needs its own, different document — please check each one and replace the ones that are not the right document.`;
+    problems.push({ slot: replace[0], slots: replace, code: 'DOC_SAME_DOCUMENT', message });
+  }
+
+  // 2) Wrong kind of document / not a document / unreadable (only for files uploaded now, only when the model is sure)
+  for (const s of slots) {
+    if (!isNew(s) || grouped.has(s)) continue;
+    const v = verdicts[s];
+    if (v.confidence < GATE_MIN_CONF) continue;
+    if (v.verdict === 'mismatch' && v.type !== 'other_document' && !(GATE_ALSO_OK[s] || []).includes(v.type)) {
+      const need = ACCEPT[s].map((t, i) => (i === 0 ? TYPES[t] : TYPES[t].replace(/^an? /, ''))).join(' or ');
+      problems.push({ slot: s, code: 'DOC_WRONG_TYPE',
+        message: `The file for ${label(s)} looks like ${v.detected}, but this requirement needs ${need}. Please upload the correct document.` });
+    } else if (v.verdict === 'unreadable') {
+      problems.push({ slot: s, code: v.type === 'not_a_document' ? 'DOC_NOT_A_DOCUMENT' : 'DOC_AI_UNREADABLE',
+        message: v.type === 'not_a_document'
+          ? `The file for ${label(s)} does not look like a paper document or card. Place the document flat, fill the frame, and photograph the document itself.`
+          : `The text in ${label(s)} cannot be read (blurry, too dark or cut off). Retake it flat, in good light, with all four corners visible, or upload a scan / PDF.` });
+    }
+  }
+  return problems;
+}
+
+/**
+ * Express middleware for POST /api/auth/complete-registration, placed AFTER requireDistinctDocuments and BEFORE
+ * processIdDocument (so a refused applicant costs no Cloudinary uploads and nothing is saved).
+ * Asks the model about the documents uploaded now (plus, for a returned application, the ones kept from before, as
+ * context) in ONE request and refuses the submit (HTTP 422, same shape as the free checks) when a document is clearly
+ * wrong. On success it leaves the model's answers in req.docAiAnswers so the background job does not ask again.
+ * FAIL-OPEN on every infrastructure problem: a Gemini outage must never stop a real applicant from applying.
+ */
+async function requireMatchingDocuments(req, res, next) {
+  const off = (v) => String(v || '').toLowerCase() === 'off';
+  if (off(process.env.DOC_AI_CHECK) || off(process.env.DOC_AI_GATE)) return next();
+  const t0 = Date.now();
+  try {
+    // 1) Collect what can be sent: new uploads (images / PDF; Word files cannot be read by the model)
+    const docs = {};
+    let total = 0;
+    for (const slot of SLOT_KEYS) {
+      const f = req.files && req.files[slot] && req.files[slot][0];
+      if (!f) continue;
+      const mime = mimeFromUrl('', f.mimetype);
+      if (!mime || f.buffer.length > MAX_DOC_BYTES) continue;
+      const p = await gatePayload(f.buffer, mime);
+      docs[slot] = { ...p, isNew: true };
+      total += p.buffer.length;
+    }
+    if (!Object.keys(docs).length) return next();
+    if (total > MAX_TOTAL_BYTES) { log.warn(`[DOC-GATE] ref=${req._id} documents too large for one AI request (${Math.round(total / 1024)} KB) — gate skipped`); return next(); }
+
+    // 2) Returned application: the documents kept from before are context, so "new file = copy of the kept ID" is caught too
+    const rec = req.revision && req.revision.rec;
+    if (rec) {
+      const kept = SLOT_KEYS.filter((s) => !docs[s] && !(req.files && req.files[s] && req.files[s][0]) && rec[SLOTS[s].column]);
+      const got = await Promise.all(kept.map((s) => fetchDocument(rec[SLOTS[s].column], GATE_FETCH_TIMEOUT_MS)));
+      kept.forEach((s, i) => {
+        if (got[i].skip || total + got[i].buffer.length > MAX_TOTAL_BYTES) return;
+        docs[s] = { buffer: got[i].buffer, mime: got[i].mime, isNew: false };
+        total += got[i].buffer.length;
+      });
+    }
+
+    // 3) Quota protection: a limited number of model calls per applicant per hour
+    const who = (((req.session && req.session.pendingRegistration) || {}).email || req.ip || 'unknown').toLowerCase();
+    if (!gateBudgetLeft(who)) { log.warn(`[DOC-GATE] ref=${req._id} ${who} used all ${GATE_MAX_ASKS} AI checks this hour — gate skipped (admin badge still runs)`); return next(); }
+
+    // 4) One request for everything
+    const order = Object.keys(docs);
+    const parts = [{ text: PROMPT }];
+    order.forEach((s, i) => {
+      parts.push({ text: `Document ${i + 1} (slot: ${s})` });
+      parts.push({ inline_data: { mime_type: docs[s].mime, data: docs[s].buffer.toString('base64') } });
+    });
+    const ans = await askGemini(parts, GATE_TIMEOUT_MS);
+    if (ans.error) { log.warn(`[DOC-GATE] ref=${req._id} AI unavailable (${ans.error}) — letting the submit through, admin badge will retry`); return next(); }
+
+    const answers = {};
+    for (const r of ans.results) if (r && typeof r.slot === 'string' && docs[r.slot]) answers[r.slot] = r;
+    const verdicts = {};
+    for (const s of Object.keys(answers)) {
+      const v = toVerdict(s, answers[s]);
+      if (v.sameAs && !docs[v.sameAs]) v.sameAs = '';
+      verdicts[s] = v;
+    }
+
+    // 5) Decide
+    const problems = gateProblems(docs, verdicts);
+    log.info(`[DOC-GATE] ref=${req._id} ${order.map((s) => `${s}${docs[s].isNew ? '' : '(kept)'}=${verdicts[s] ? `${verdicts[s].verdict}${verdicts[s].sameAs ? `/same-as-${verdicts[s].sameAs}` : ''}` : 'none'}`).join(' ')} → ${problems.length ? `REFUSED (${problems.map((p) => p.code).join(',')})` : 'ok'} (${Date.now() - t0}ms)`);
+    if (problems.length) return refusal(req, res, problems);
+
+    req.docAiAnswers = answers;      // reused by the background job (enqueueDocumentAudit … { answers })
+    return next();
+  } catch (e) {
+    log.error(`[DOC-GATE] crashed (letting the request through): ${e.stack || e.message} ref=${req._id}`);
+    return next();
+  }
+}
+
+module.exports = { enqueueDocumentAudit, classifyUserDocuments, requireMatchingDocuments, rotateStoredDocument, isRotatable, TYPES, ACCEPT, toVerdict, gateProblems };

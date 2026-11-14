@@ -19,9 +19,10 @@ const { generateOTP, sendOTPEmail, getRecipientMailInfo, sendWelcomeEmail, sendP
 const { rejectDisposableEmail } = require('../utils/disposableEmailCheck');
 const { uploadIdDocs } = require('../middleware/upload');
 const { checkSelfie } = require('../utils/faceCheck');
-// Step-5 document checks: free upload-time checks (utils/documentChecks.js) + the after-submit AI badge (utils/docClassifier.js)
+// Step-5 document checks: free upload-time checks (utils/documentChecks.js), the AI submit-time gate that refuses a wrong / repeated
+// document while the applicant is still on Step 5, and the after-submit AI badge for the admin (both in utils/docClassifier.js)
 const { requireDistinctDocuments, persistDocumentFingerprints } = require('../utils/documentChecks');
-const { enqueueDocumentAudit } = require('../utils/docClassifier');
+const { enqueueDocumentAudit, requireMatchingDocuments } = require('../utils/docClassifier');
 const { trackUpload, uploadSummary, clientReportHandler, clientIp } = require('../middleware/uploadDiagnostics');
 const {
   findUserByEmail, findUserById, findUserByUsername, findUserByPhone,
@@ -343,7 +344,7 @@ function requireVerifiedRegistration(req, res, next) {
 // (uploadIdDocs = [multer.fields(...), processIdDocument] — see middleware/upload.js)
 // ════════════════════════════════════════════════════
 router.post('/api/auth/complete-registration',
-  trackUpload('complete-registration'), uploadIdDocs[0], requireVerifiedRegistration, loadRevisionContext, requireLiveSelfie, requireDistinctDocuments, uploadIdDocs[1],
+  trackUpload('complete-registration'), uploadIdDocs[0], requireVerifiedRegistration, loadRevisionContext, requireLiveSelfie, requireDistinctDocuments, requireMatchingDocuments, uploadIdDocs[1],
   async (req, res) => {
   const ref = req._id;
   // One structured WARN line for the log + a specific {error, code, field, ref} for the resident.
@@ -533,15 +534,16 @@ router.post('/api/auth/complete-registration',
         });
         log.upload(`Documents stored for @${newUser.username}: school_id=${!!idUrls.id_front}, residency=${!!idUrls.cert_residency}, low_income=${!!idUrls.cert_low_income}, enrollment=${!!idUrls.cert_enrollment}, grades=${!!idUrls.cert_grades}, idType=${ID_TYPES.has(idType) ? idType : 'school_id'}`);
         // Save file fingerprints + "already used by another applicant" flags (free checks ran earlier, in
-        // requireDistinctDocuments), then queue the AI check (1 Gemini request per applicant: document type, same-document
-        // detection, upright rotation). It runs AFTER this reply (setImmediate) - the applicant never waits - and fails open.
+        // requireDistinctDocuments), then queue the AI badge job. If the submit-time gate (requireMatchingDocuments) already
+        // asked the model, its answers are reused (req.docAiAnswers) so this costs no second request; otherwise the job asks
+        // once itself. It runs AFTER this reply (setImmediate) - the applicant never waits - and fails open.
         persistDocumentFingerprints({
           userId: newUser.id, email: newUser.email,
           name: `${newUser.firstName} ${newUser.lastName}`.trim(),
           prints: req.docPrints, flags: req.docFlags || {},
         });
         const _ioForChecks = req.app.get('io');
-        setImmediate(() => enqueueDocumentAudit(newUser.id, { io: _ioForChecks }));
+        setImmediate(() => enqueueDocumentAudit(newUser.id, { io: _ioForChecks, answers: req.docAiAnswers || null }));
       } catch (idErr) {
         log.error(`ID verification insert failed (non-fatal): ${idErr.message}`);
       }
