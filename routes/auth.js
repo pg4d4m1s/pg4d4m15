@@ -60,9 +60,9 @@ async function requireLiveSelfie(req, res, next) {
 
     let report = null;
     try { report = JSON.parse(req.body && req.body.selfieCheck); } catch (_) { /* absent or malformed */ }
-    log.info(`[SELFIE] browser scanner report: ${report ? `status=${report.status} method=${report.method} challenges=${(report.challenges || []).join('+')}` : 'NONE (older page or bypassed client)'} ref=${ref}`);
+    log.info(`[SELFIE] browser scanner report: ${report ? `status=${report.status} method=${report.method} challenges=${(report.challenges || []).join('+')} mouthOpenRatio=${Number.isFinite(Number(report.mar)) && report.mar !== null ? Number(report.mar) : 'n/a'}` : 'NONE (older page or bypassed client)'} ref=${ref}`);
 
-    const verdict = await checkSelfie(avatar.buffer, avatar.mimetype);
+    const verdict = await checkSelfie(avatar.buffer, avatar.mimetype, { ref, applicant: (req.session.pendingRegistration || {}).email || '' });
     if (!verdict.ok) return fail(422, verdict.code, verdict.message);
     if (verdict.skipped) log.warn(`[SELFIE-CHECK] not verified server-side for ref=${ref} — review this applicant's photo manually.`);
     next();

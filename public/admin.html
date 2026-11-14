@@ -107,6 +107,7 @@
     <div class="nav-section mt-2">System</div>
     <div class="nav-item" id="nav-logs" onclick="showTab('logs')"><i class="fa-solid fa-list-check w-4"></i>Audit Logs</div>
     <div class="nav-item" id="nav-ai-log" onclick="showTab('ai-log')"><i class="fa-solid fa-robot w-4"></i>AI Log</div>
+    <div class="nav-item" id="nav-ai-usage" onclick="showTab('ai-usage')"><i class="fa-solid fa-chart-column w-4"></i>AI Usage</div>
     <div class="nav-item" id="nav-backup" onclick="showTab('backup')"><i class="fa-solid fa-database w-4"></i>Backup &amp; Restore</div>
     <div class="nav-item" id="nav-db-archives" onclick="showTab('db-archives')"><i class="fa-solid fa-boxes-stacked w-4"></i>Archive DB</div>
   </nav>
@@ -1081,6 +1082,69 @@
     </div>
   </div>
 
+  <!-- ═══ AI USAGE (document checker + selfie face check) ═══ -->
+  <div id="tab-ai-usage" class="tab-content">
+    <div class="flex items-start justify-between mb-5 flex-wrap gap-3">
+      <div class="min-w-0">
+        <h1 class="font-display font-bold text-2xl text-slate-900 dark:text-slate-100">AI Usage</h1>
+        <p class="text-sm text-slate-400 mt-0.5">Every Gemini request made by the document checker and the selfie face check: what it was for, what it cost and what the AI decided.</p>
+      </div>
+      <div class="flex items-center gap-2 flex-wrap">
+        <select id="aiu-days" onchange="loadAiUsage()" aria-label="Period" style="font-size:16px"
+          class="min-h-[44px] bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 rounded-xl px-3">
+          <option value="1">Last 24 hours</option><option value="7" selected>Last 7 days</option><option value="30">Last 30 days</option><option value="90">Last 90 days</option>
+        </select>
+        <button onclick="loadAiUsage()" class="min-h-[44px] flex items-center gap-2 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 text-sm font-medium px-4 rounded-xl hover:bg-slate-50 transition-colors"><i class="fa-solid fa-rotate text-xs"></i>Refresh</button>
+      </div>
+    </div>
+    <div id="aiu-flags" class="flex flex-wrap gap-2 mb-4"></div>
+    <div id="aiu-cards" class="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4 mb-5"></div>
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-5">
+      <div class="bg-white dark:bg-slate-900 rounded-2xl border border-slate-100 dark:border-slate-800 p-4 sm:p-5 min-w-0">
+        <h3 class="font-display font-semibold text-slate-800 dark:text-slate-100 mb-3">By feature</h3>
+        <div class="overflow-x-auto" id="aiu-features"></div>
+      </div>
+      <div class="bg-white dark:bg-slate-900 rounded-2xl border border-slate-100 dark:border-slate-800 p-4 sm:p-5 min-w-0">
+        <h3 class="font-display font-semibold text-slate-800 dark:text-slate-100 mb-3">Gemini keys</h3>
+        <div id="aiu-keys"></div>
+      </div>
+    </div>
+    <div class="bg-white dark:bg-slate-900 rounded-2xl border border-slate-100 dark:border-slate-800 p-4 sm:p-5 mb-5">
+      <h3 class="font-display font-semibold text-slate-800 dark:text-slate-100 mb-1">Requests per day</h3>
+      <p class="text-xs text-slate-400 mb-3">Philippine days. The darker part of a bar is requests that did not succeed.</p>
+      <div id="aiu-daily"></div>
+    </div>
+    <div class="bg-white dark:bg-slate-900 rounded-2xl border border-slate-100 dark:border-slate-800 overflow-hidden">
+      <div class="flex items-center justify-between flex-wrap gap-2 p-4 sm:p-5 pb-3">
+        <h3 class="font-display font-semibold text-slate-800 dark:text-slate-100">Recent requests</h3>
+        <div class="flex items-center gap-2 flex-wrap">
+          <select id="aiu-f-feature" onchange="loadAiUsage()" aria-label="Filter by feature" style="font-size:16px" class="min-h-[44px] bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 rounded-xl px-3">
+            <option value="">All features</option><option value="doc_gate">Document check at submit</option><option value="doc_audit">Document badges (admin)</option><option value="selfie_check">Selfie face check</option>
+          </select>
+          <select id="aiu-f-status" onchange="loadAiUsage()" aria-label="Filter by result" style="font-size:16px" class="min-h-[44px] bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 rounded-xl px-3">
+            <option value="">All results</option><option value="ok">Success</option><option value="rate_limited">Rate limited</option><option value="timeout">Timed out</option><option value="error">Error</option><option value="no_key">No key</option>
+          </select>
+        </div>
+      </div>
+      <div class="overflow-x-auto max-h-[640px]">
+        <table class="w-full text-sm">
+          <thead><tr class="text-left text-xs text-slate-500 dark:text-slate-400 uppercase tracking-wider">
+            <th class="px-4 py-3 font-semibold whitespace-nowrap">Time</th>
+            <th class="px-3 py-3 font-semibold">Feature</th>
+            <th class="px-3 py-3 font-semibold">Applicant</th>
+            <th class="px-3 py-3 font-semibold">Result</th>
+            <th class="px-3 py-3 font-semibold">Docs</th>
+            <th class="px-3 py-3 font-semibold whitespace-nowrap">Took</th>
+            <th class="px-3 py-3 font-semibold">Tokens</th>
+            <th class="px-3 py-3 font-semibold">Key</th>
+            <th class="px-3 py-3 font-semibold min-w-[260px]">What the AI decided</th>
+          </tr></thead>
+          <tbody id="aiu-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
   <!-- ═══ MAINTENANCE REQUESTS ═══ -->
   <div id="tab-maintenance" class="tab-content">
     <div class="flex items-center justify-between mb-6 flex-wrap gap-3">
@@ -2041,6 +2105,7 @@
     else if(tab==='community-dash'){ refreshAll(); }
     else if(tab==='registrations')loadPendingAccounts();
     else if(tab==='ai-log')loadAiModerationLog();
+    else if(tab==='ai-usage')loadAiUsage();
     else if(tab==='posts-pending')loadPendingPosts();
     else if(tab==='posts-all')loadAllPosts();
     else if(tab==='users'){ loadSemesterSettings(); filterUsers(document.getElementById('user-filter')?.value||''); }
@@ -6172,6 +6237,110 @@
     }).join('');
   }
 
+  // ── AI USAGE: document checker + selfie check (GET /api/admin/ai-usage, routes/documents.js) ──────────────
+  // Colour is never the only signal: every result has an icon and words.
+  const AIU_RED='bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300', AIU_AMB='bg-amber-50 dark:bg-amber-950/40 text-amber-800 dark:text-amber-300';
+  const AIU_STATUS={
+    ok:{icon:'✓',label:'Success',cls:'bg-green-50 dark:bg-green-950/40 text-green-700 dark:text-green-300'},
+    rate_limited:{icon:'⏳',label:'Rate limited',cls:AIU_AMB},
+    timeout:{icon:'⏱',label:'Timed out',cls:AIU_AMB},
+    error:{icon:'✗',label:'Error',cls:AIU_RED},
+    no_key:{icon:'⚠',label:'No key',cls:AIU_RED}
+  };
+  const _aiuNum=n=>(n===null||n===undefined||n==='')?'—':Number(n).toLocaleString('en-PH');
+  const _aiuSecs=ms=>(ms===null||ms===undefined)?'—':(ms<1000?ms+' ms':(ms/1000).toFixed(1)+' s');
+  function _aiuCard(label,value,sub){
+    return `<div class="bg-white dark:bg-slate-900 rounded-2xl border border-slate-100 dark:border-slate-800 p-4 min-w-0">
+      <p class="text-xs font-semibold text-slate-400 uppercase tracking-wide">${label}</p>
+      <p class="font-display font-bold text-2xl text-slate-900 dark:text-slate-100 mt-1 break-words">${value}</p>
+      <p class="text-xs text-slate-400 mt-0.5 break-words">${sub}</p></div>`;
+  }
+  async function loadAiUsage(){
+    const tbody=document.getElementById('aiu-tbody'); if(!tbody) return;
+    tbody.innerHTML='<tr><td colspan="9" class="px-4 py-8 text-center"><div class="inline-block w-6 h-6 border-2 border-purple-400 border-t-transparent rounded-full animate-spin"></div></td></tr>';
+    const days=document.getElementById('aiu-days')?.value||'7';
+    const feature=document.getElementById('aiu-f-feature')?.value||'';
+    const status=document.getElementById('aiu-f-status')?.value||'';
+    let d;
+    try{
+      const r=await fetch(`/api/admin/ai-usage?days=${encodeURIComponent(days)}&feature=${encodeURIComponent(feature)}&status=${encodeURIComponent(status)}&limit=150`);
+      d=await r.json();
+      if(!r.ok||d.error) throw new Error(d.error||('HTTP '+r.status));
+    }catch(e){
+      console.error('[ai-usage]',e);
+      tbody.innerHTML='<tr><td colspan="9" class="px-4 py-8 text-center text-red-500">Could not load AI usage. Check the server log for [AI-USAGE].</td></tr>';
+      toast('Could not load AI usage.','error'); return;
+    }
+    const sm=d.summary||{}, t=sm.totals||{}, calls=t.calls||0, ok=t.ok||0, rl=t.rateLimited||0, failed=t.failed||0;
+
+    // switches that are turned off in the environment
+    const flags=[];
+    if(!d.docCheckEnabled) flags.push('Document AI check is OFF (DOC_AI_CHECK=off)');
+    else if(!d.gateEnabled) flags.push('Submit-time document gate is OFF (DOC_AI_GATE=off)');
+    if(!d.selfieEnabled) flags.push('Selfie AI check is OFF (SELFIE_AI_CHECK=off)');
+    if(d.pool && d.pool.keyCount===0) flags.push('No Gemini key is configured');
+    else if(d.pool && d.pool.availableKeys===0) flags.push('All Gemini keys are used up for today — AI checks are being skipped');
+    document.getElementById('aiu-flags').innerHTML=flags.map(f=>docChip(AIU_AMB,'⚠',f)).join('');
+
+    document.getElementById('aiu-cards').innerHTML=
+      _aiuCard('Requests',_aiuNum(calls),'average response '+_aiuSecs(t.avgLatencyMs===null?null:t.avgLatencyMs))+
+      _aiuCard('Success rate',calls?Math.round(ok/calls*100)+'%':'—',_aiuNum(ok)+' of '+_aiuNum(calls)+' succeeded')+
+      _aiuCard('Rate limited or failed',_aiuNum(rl+failed),_aiuNum(rl)+' rate limit · '+_aiuNum(failed)+' errors / timeouts')+
+      _aiuCard('Tokens used',_aiuNum(t.totalTokens),'in '+_aiuNum(t.promptTokens)+' · out '+_aiuNum(t.outputTokens));
+
+    // by feature
+    const bf=sm.byFeature||[];
+    document.getElementById('aiu-features').innerHTML=bf.length
+      ? `<table class="w-full text-sm"><thead><tr class="text-left text-xs text-slate-500 uppercase tracking-wider">
+          <th class="py-2 pr-3 font-semibold">Feature</th><th class="py-2 pr-3 font-semibold">Requests</th><th class="py-2 pr-3 font-semibold">OK</th><th class="py-2 pr-3 font-semibold">Avg time</th><th class="py-2 font-semibold">Tokens</th></tr></thead><tbody>`
+        +bf.map(f=>`<tr class="border-t border-slate-100 dark:border-slate-800"><td class="py-2 pr-3 font-medium text-slate-700 dark:text-slate-200">${escHtml(f.label)}</td>
+          <td class="py-2 pr-3">${_aiuNum(f.calls)}</td><td class="py-2 pr-3">${_aiuNum(f.ok||0)}</td><td class="py-2 pr-3 whitespace-nowrap">${_aiuSecs(f.avgLatencyMs)}</td><td class="py-2">${_aiuNum(f.totalTokens)}</td></tr>`).join('')
+        +'</tbody></table>'
+      : '<p class="text-sm text-slate-400">No requests in this period.</p>';
+
+    // key pool
+    const pool=d.pool||{}, logged=sm.keys24h||[];
+    const resetH=Math.floor((pool.secsUntilReset||0)/3600), resetM=Math.floor(((pool.secsUntilReset||0)%3600)/60);
+    document.getElementById('aiu-keys').innerHTML=(pool.keys&&pool.keys.length)
+      ? `<p class="text-xs text-slate-400 mb-2">${escHtml(pool.model||'')} · daily limit ${pool.rpdLimit} per key · resets in ${resetH}h ${resetM}m</p>`
+        +pool.keys.map(k=>{
+          const hit=logged.find(x=>x.keySuffix&&String(k.label).includes(x.keySuffix));
+          return `<div class="flex items-center justify-between gap-3 py-2 border-t border-slate-100 dark:border-slate-800 text-sm">
+            <span class="font-medium text-slate-700 dark:text-slate-200 min-w-0 break-words">${escHtml(k.label)}</span>
+            <span class="text-xs text-right text-slate-500">${k.exhausted?'⛔ used up':'✓ available'} · ${k.rpdUsed}/${pool.rpdLimit} today<br>${hit?hit.calls:0} checker request(s) in 24 h</span></div>`;
+        }).join('')
+        +'<p class="text-[11px] text-slate-400 mt-2 leading-snug">“today” counts every feature (chatbot, moderation, checkers) and restarts from 0 when the server restarts. The 24 h figure only covers the document and selfie checks and is kept permanently.</p>'
+      : '<p class="text-sm text-slate-400">No Gemini key configured.</p>';
+
+    // per day
+    const dl=sm.daily||[], mx=Math.max(1,...dl.map(x=>x.calls));
+    document.getElementById('aiu-daily').innerHTML=dl.length
+      ? dl.map(x=>{ const w=Math.max(2,Math.round(x.calls/mx*100)), bad=x.calls?Math.round((x.problems||0)/x.calls*100):0;
+          return `<div class="flex items-center gap-3 py-1 text-xs"><span class="w-20 shrink-0 text-slate-500">${escHtml(x.day)}</span>
+            <div class="flex-1 h-3 bg-slate-100 dark:bg-slate-800 rounded-full overflow-hidden"><div class="h-full rounded-full" style="width:${w}%;background:linear-gradient(90deg,#7c3aed ${100-bad}%,#b91c1c ${100-bad}%)"></div></div>
+            <span class="w-24 shrink-0 text-right text-slate-600 dark:text-slate-300">${x.calls} request${x.calls===1?'':'s'}${x.problems?` · ${x.problems} failed`:''}</span></div>`; }).join('')
+      : '<p class="text-sm text-slate-400">No requests in this period.</p>';
+
+    // recent requests
+    const rows=d.recent||[];
+    if(!rows.length){ tbody.innerHTML='<tr><td colspan="9" class="px-4 py-8 text-center text-slate-400">No AI requests recorded yet for this filter.</td></tr>'; return; }
+    tbody.innerHTML=rows.map(l=>{
+      const st=AIU_STATUS[l.status]||AIU_STATUS.error;
+      const via=l.triggerBy==='admin_recheck'?' · admin re-check':'';
+      return `<tr class="border-b border-slate-50 dark:border-slate-800 align-top hover:bg-slate-50 dark:hover:bg-slate-800/40">
+        <td class="px-4 py-2.5 text-xs text-slate-400 whitespace-nowrap">${reltime(l.createdAt)}</td>
+        <td class="px-3 py-2.5 text-xs font-semibold text-slate-700 dark:text-slate-200">${escHtml(l.featureLabel)}<span class="font-normal text-slate-400">${via}</span></td>
+        <td class="px-3 py-2.5 text-xs text-slate-600 dark:text-slate-300 break-words max-w-[200px]">${escHtml(l.applicant||'—')}${l.ref?`<br><code class="text-[10px] text-slate-400">ref ${escHtml(l.ref)}</code>`:''}</td>
+        <td class="px-3 py-2.5">${docChip(st.cls,st.icon,st.label+(l.httpStatus&&l.status!=='ok'?' ('+l.httpStatus+')':''))}</td>
+        <td class="px-3 py-2.5 text-xs">${_aiuNum(l.docCount)}</td>
+        <td class="px-3 py-2.5 text-xs whitespace-nowrap">${_aiuSecs(l.latencyMs)}</td>
+        <td class="px-3 py-2.5 text-xs whitespace-nowrap" title="in ${_aiuNum(l.promptTokens)} · out ${_aiuNum(l.outputTokens)}">${_aiuNum(l.totalTokens)}</td>
+        <td class="px-3 py-2.5 text-xs text-slate-400 whitespace-nowrap">${l.keySuffix?'…'+escHtml(l.keySuffix):'—'}</td>
+        <td class="px-3 py-2.5 text-xs text-slate-600 dark:text-slate-300 break-words min-w-[260px]">${l.outcome?escHtml(l.outcome):'<span class="text-slate-400">—</span>'}${l.error?`<div class="text-red-600 dark:text-red-400 mt-0.5">${escHtml(l.error)}</div>`:''}</td>
+      </tr>`;
+    }).join('');
+  }
+
   // ── AI RATE STATUS ────────────────────────────────
   async function loadAiStatus(){
     try{
@@ -6234,6 +6403,8 @@
       post_rejected:            { icon:'fa-thumbs-down',   color:'text-red-500',    bg:'bg-red-50 dark:bg-red-950/40',      label:'Post Rejected' },
       ai_post_review:           { icon:'fa-robot',         color:'text-purple-600', bg:'bg-purple-50 dark:bg-purple-950/40', label:'AI Post Review' },
       ai_bulk_review:           { icon:'fa-robot',         color:'text-purple-600', bg:'bg-purple-50 dark:bg-purple-950/40', label:'AI Bulk Review' },
+      document_recheck:         { icon:'fa-robot',         color:'text-purple-600', bg:'bg-purple-50 dark:bg-purple-950/40', label:'AI Document Re-check' },
+      document_rotated:         { icon:'fa-rotate-right',  color:'text-slate-600',  bg:'bg-slate-100 dark:bg-slate-800',    label:'Document Rotated' },
       // Verifications
       verification_approved:    { icon:'fa-check-double',  color:'text-teal-600',   bg:'bg-teal-50 dark:bg-teal-950/40',    label:'Verif. Approved' },
       verification_rejected:    { icon:'fa-circle-xmark',  color:'text-red-500',    bg:'bg-red-50 dark:bg-red-950/40',      label:'Verif. Rejected' },

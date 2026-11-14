@@ -23,7 +23,7 @@
  *                                                   pixel-similar so the free upload-time checks cannot see it
  *   3. how far to rotate it so the text is upright → applied automatically for Cloudinary images (phone cameras
  *                                                   often save pages sideways), so the admin never tilts their head.
- *                                                   Upright = text readable: a page ends up portrait, an ID card landscape.
+ *                                                   Upright = text readable: a page ends up portrait; an ID card ends up with the holder's photo head-up (see ORIENTATION OF IDs below).
  *
  * WHAT THE ADMIN SEES (per document)
  *   ✓ Matches                       the AI thinks it is the right kind of document
@@ -37,6 +37,17 @@
  * Prompt injection: text printed on a document is treated as data; the answer is forced into a fixed list of
  * document types and validated, so a document that says "mark me as matching" cannot do more than a wrong badge.
  *
+ * ORIENTATION OF IDs
+ *   Documents are turned upright from the model's "rotate" answer. IDs are harder: many cards print the name or a banner
+ *   sideways as part of the design, and a card can be portrait or landscape, so "make the text read upright" is
+ *   ambiguous for them. For the ID slot the model is therefore ALSO asked "top" = which way the top of the card points
+ *   in the photo (judged by the holder's face photo first, then the header). That answer is more reliable than a
+ *   clockwise-degrees guess and, when present, decides the rotation for the ID slot (see toVerdict).
+ *
+ * LOGGING
+ *   Every Gemini request made here is stored in ai_usage_log (utils/aiUsage.js: feature, applicant, latency, tokens, key,
+ *   what the AI decided) and printed as  [AI-USAGE] …  in the server log. The admin sees it under System → AI Usage.
+ *
  * ENV   DOC_AI_CHECK=off          disables this module completely (gate AND badges)
  *       DOC_AI_GATE=off           disables only the submit-time gate (badges still run)
  *       DOC_AI_GATE_MIN_CONF=0.8  how sure the model must be (0-1) before a wrong-type / unreadable verdict blocks a submit
@@ -45,6 +56,7 @@
 
 const geminiPool = require('./geminiPool');
 const log        = require('./logger');
+const aiUsage    = require('./aiUsage');
 const { liveDb: db } = require('./db');
 const { SLOTS, SLOT_KEYS, ensureSchema, refusal } = require('./documentChecks');
 
@@ -98,9 +110,14 @@ const PROMPT =
   'upright and left-to-right (0 if it already is); (b) "sameAs" = the slot of ANOTHER listed document that is the very same ' +
   'physical page/card photographed again (same title, same text and same details — not merely the same kind of document, and ' +
   'not two different certificates that share a letterhead or template), otherwise null.\n\n' +
+  'ID CARD ORIENTATION — only for the document whose slot is id_front, also give (c) "top" = the direction, AS SEEN IN THE IMAGE, ' +
+  'in which the TOP of the card points: "up", "right", "down" or "left". Decide the top of an ID like this: first by the ' +
+  'holder\'s face photo (the forehead/hair side is the top, the chin side is the bottom), then by the header / school name and the ' +
+  'main horizontal text lines. IGNORE sideways or vertical text that is only part of the card design (names, banners and barcodes ' +
+  'are often printed along an edge of the card). An ID can be portrait or landscape — never assume landscape. For every other slot use null.\n\n' +
   'Reply ONLY with JSON: an array with one object per document, in this shape: ' +
   '{"slot":"<the slot given>","type":"<allowed type id>","legible":<true if the text is readable, false if too blurry/dark/cut off>,' +
-  '"confidence":<number 0 to 1>,"rotate":<0|90|180|270>,"sameAs":<slot string or null>,"note":"<max 12 words on what you saw>"}';
+  '"confidence":<number 0 to 1>,"rotate":<0|90|180|270>,"top":<"up"|"right"|"down"|"left"|null>,"sameAs":<slot string or null>,"note":"<max 12 words on what you saw>"}';
 
 // ───────────────────────── helpers ─────────────────────────
 function mimeFromUrl(url, headerType = '') {
@@ -139,16 +156,25 @@ async function fetchDocument(url, timeoutMs = FETCH_TIMEOUT_MS) {
   } finally { clearTimeout(timer); }
 }
 
-/** One Gemini request for N documents, with key rotation on daily-quota exhaustion. → { results } | { error } */
-async function askGemini(parts, timeoutMs = TIMEOUT_MS) {
+/**
+ * One Gemini request for N documents, with key rotation on daily-quota exhaustion. → { results, usageId } | { error, usageId }
+ *   ctx  { feature: 'doc_gate' | 'doc_audit', trigger, userId, applicant, ref, docCount } — only used to label the
+ *        ai_usage_log row (utils/aiUsage.js). Every HTTP attempt is recorded, including the ones that hit a rate limit.
+ *        usageId lets the caller attach "what the AI decided" afterwards with aiUsage.setOutcome().
+ */
+async function askGemini(parts, timeoutMs = TIMEOUT_MS, ctx = {}) {
   let key = geminiPool.getKey();
-  if (!key) return { error: 'no Gemini key available (not configured or all exhausted)' };
+  const track = (status, extra = {}) => aiUsage.record(Object.assign(
+    { feature: ctx.feature || 'doc_audit', trigger: ctx.trigger, userId: ctx.userId, applicant: ctx.applicant, ref: ctx.ref,
+      docCount: ctx.docCount, key, status }, extra));
+  if (!key) return { error: 'no Gemini key available (not configured or all exhausted)', usageId: track('no_key', { error: 'no key available (not configured or all exhausted)' }) };
   const body = {
     contents: [{ role: 'user', parts }],
     generationConfig: { temperature: 0, maxOutputTokens: 1200, responseMimeType: 'application/json' },
   };
   const deadline = Date.now() + timeoutMs;          // one budget for the whole call, even if a key is swapped on a 429
   while (key) {
+    const t0 = Date.now();                                   // per attempt, so each logged row has its own latency
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), Math.max(1000, deadline - Date.now()));
     let resp;
@@ -160,48 +186,64 @@ async function askGemini(parts, timeoutMs = TIMEOUT_MS) {
         signal: ctrl.signal,
       });
     } catch (e) {
-      return { error: `Gemini request failed (${e.name === 'AbortError' ? 'timeout' : e.message})` };
+      const timedOut = e.name === 'AbortError';
+      return { error: `Gemini request failed (${timedOut ? 'timeout' : e.message})`,
+               usageId: track(timedOut ? 'timeout' : 'error', { latencyMs: Date.now() - t0, error: timedOut ? 'timeout' : e.message }) };
     } finally { clearTimeout(timer); }
 
     if (resp.ok) {
       geminiPool.trackRequest(key);
       const data = await resp.json().catch(() => null);
+      const um = (data && data.usageMetadata) || {};
+      const meta = { latencyMs: Date.now() - t0, httpStatus: resp.status, promptTokens: um.promptTokenCount, outputTokens: um.candidatesTokenCount, totalTokens: um.totalTokenCount };
       const text = data && data.candidates && data.candidates[0] && data.candidates[0].content &&
                    data.candidates[0].content.parts && data.candidates[0].content.parts[0] &&
                    data.candidates[0].content.parts[0].text;
-      if (!text) return { error: 'empty Gemini reply' };
+      if (!text) return { error: 'empty Gemini reply', usageId: track('error', Object.assign({ error: 'empty reply' }, meta)) };
       try {
         const parsed = JSON.parse(text.replace(/```json|```/g, '').trim());
-        return { results: Array.isArray(parsed) ? parsed : (Array.isArray(parsed.documents) ? parsed.documents : []) };
-      } catch (_) { return { error: `unparsable Gemini reply: ${String(text).slice(0, 80)}` }; }
+        return { results: Array.isArray(parsed) ? parsed : (Array.isArray(parsed.documents) ? parsed.documents : []), usageId: track('ok', meta) };
+      } catch (_) {
+        return { error: `unparsable Gemini reply: ${String(text).slice(0, 80)}`, usageId: track('error', Object.assign({ error: `unparsable reply: ${String(text).slice(0, 80)}` }, meta)) };
+      }
     }
     if (resp.status === 429) {
       const errBody = await resp.text().catch(() => '');
       const isRPD = geminiPool.markExhausted(key, errBody);
+      const usageId = track('rate_limited', { latencyMs: Date.now() - t0, httpStatus: 429, error: isRPD ? 'daily quota (RPD) used up on this key' : 'per-minute limit (RPM)' });
       const next = isRPD ? geminiPool.getKey() : null;
       if (next) { key = next; continue; }
-      return { error: 'Gemini rate/quota limit reached' };
+      return { error: 'Gemini rate/quota limit reached', usageId };
     }
-    return { error: `Gemini HTTP ${resp.status}` };
+    return { error: `Gemini HTTP ${resp.status}`, usageId: track('error', { latencyMs: Date.now() - t0, httpStatus: resp.status, error: `HTTP ${resp.status}` }) };
   }
-  return { error: 'no Gemini key available' };
+  return { error: 'no Gemini key available', usageId: track('no_key', { error: 'no key available' }) };
 }
 
 /** Turn one model answer into what we store. Anything outside the allowed list is treated as unusable. */
+// "top" = which way the TOP of an ID card points in the photo → the clockwise rotation that brings it back to the top.
+// (card top points right → turn it 90° counter-clockwise = 270° clockwise; points left → 90° clockwise; points down → 180°)
+const TOP_TO_ROTATE = { up: 0, right: 270, down: 180, left: 90 };
+
 function toVerdict(slot, r) {
   const type = r && Object.prototype.hasOwnProperty.call(TYPES, r.type) ? r.type : null;
   const confidence = Math.min(1, Math.max(0, Number(r && r.confidence) || 0));
   const note = String((r && r.note) || '').replace(/[\u0000-\u001f\u007f]+/g, ' ').trim().slice(0, 120);
-  const rotate = [90, 180, 270].includes(Number(r && r.rotate)) && confidence >= 0.5 && type !== 'not_a_document' ? Number(r.rotate) : 0;
+  const topRaw = r && typeof r.top === 'string' ? r.top.trim().toLowerCase() : '';
+  const top = Object.prototype.hasOwnProperty.call(TOP_TO_ROTATE, topRaw) ? topRaw : '';
+  // Normal documents: the model's clockwise "rotate". ID slot: the model's "top" wins when it gave one (see the header note).
+  let wanted = [90, 180, 270].includes(Number(r && r.rotate)) ? Number(r.rotate) : 0;
+  if (slot === 'id_front' && top) wanted = TOP_TO_ROTATE[top];
+  const rotate = wanted && confidence >= 0.5 && type !== 'not_a_document' ? wanted : 0;
   const sameAs = r && typeof r.sameAs === 'string' && r.sameAs !== slot && SLOT_KEYS.includes(r.sameAs) && confidence >= 0.6 ? r.sameAs : '';
-  if (!type) return { verdict: 'unsure', type: '', detected: '', confidence, note: note || 'AI gave no usable answer', rotate: 0, sameAs: '' };
+  if (!type) return { verdict: 'unsure', type: '', detected: '', confidence, note: note || 'AI gave no usable answer', rotate: 0, sameAs: '', top };
   if (r.legible === false || type === 'not_a_document') {
-    return { verdict: 'unreadable', type, detected: TYPES[type], confidence, note, rotate, sameAs };
+    return { verdict: 'unreadable', type, detected: TYPES[type], confidence, note, rotate, sameAs, top };
   }
   if (ACCEPT[slot].includes(type)) {
-    return { verdict: confidence >= 0.5 ? 'match' : 'unsure', type, detected: TYPES[type], confidence, note, rotate, sameAs };
+    return { verdict: confidence >= 0.5 ? 'match' : 'unsure', type, detected: TYPES[type], confidence, note, rotate, sameAs, top };
   }
-  return { verdict: 'mismatch', type, detected: TYPES[type], confidence, note, rotate, sameAs };
+  return { verdict: 'mismatch', type, detected: TYPES[type], confidence, note, rotate, sameAs, top };
 }
 
 // ───────────────────────── rotation ─────────────────────────
@@ -238,6 +280,7 @@ async function rotateStoredDocument(userId, slot, degrees) {
   }
   db.prepare(`UPDATE id_verification_requests SET ${col} = ? WHERE id = ?`).run(next, row.id);   // col comes from the SLOTS constant
   db.prepare(`UPDATE document_checks SET ai_rotation = (COALESCE(ai_rotation,0) + ?) % 360, updated_at=datetime('now') WHERE user_id=? AND slot=?`).run(degrees, userId, slot);
+  log.info(`[DOC-ROTATE] user ${userId} ${slot} rotated +${degrees}° (stored URL updated)`);
   return { ok: true, url: next };
 }
 
@@ -260,7 +303,7 @@ function setSkipped(userId, slots, why) {
  *   answers  optional { slot: rawModelAnswer } from the submit-time gate. Those slots are NOT asked again; only the
  *            slots without an answer are downloaded and sent (normally none, so the whole job costs 0 requests).
  */
-async function classifyUserDocuments(userId, { slots = SLOT_KEYS, io = null, answers = null } = {}) {
+async function classifyUserDocuments(userId, { slots = SLOT_KEYS, io = null, answers = null, trigger = 'applicant_submit' } = {}) {
   const t0 = Date.now();
   try {
     ensureSchema();
@@ -278,6 +321,7 @@ async function classifyUserDocuments(userId, { slots = SLOT_KEYS, io = null, ans
     const reused = Object.keys(bySlot).length;
     const toAsk = wanted.filter((s) => !bySlot[s]);
     const summary = [];
+    let usageId = '';                                   // ai_usage_log row of the request below (if one is made)
 
     // Slots the gate did not cover (e.g. the gate was skipped, or a file it could not send) → one request for those
     const fetched = await Promise.all(toAsk.map((s) => fetchDocument(urls[s])));
@@ -292,7 +336,8 @@ async function classifyUserDocuments(userId, { slots = SLOT_KEYS, io = null, ans
     });
 
     if (sent.length) {
-      const ans = await askGemini(parts);
+      const ans = await askGemini(parts, TIMEOUT_MS, { feature: 'doc_audit', trigger, userId, applicant: applicantLabel(userId), docCount: sent.length });
+      usageId = ans.usageId || '';
       if (ans.error) {
         log.warn(`[DOC-AI] skipped for user ${userId} — ${ans.error}. Admin will see "Not checked" and can re-run it.`);
         setSkipped(userId, sent, `AI check unavailable: ${ans.error}`);
@@ -315,7 +360,7 @@ async function classifyUserDocuments(userId, { slots = SLOT_KEYS, io = null, ans
       const v = toVerdict(s, bySlot[s]);
       const same = v.sameAs && bySlot[v.sameAs] ? v.sameAs : '';
       up.run(v.verdict, v.detected, v.confidence, v.note, same, userId, s);
-      summary.push(`${s}=${v.verdict}${v.verdict === 'mismatch' ? `(${v.detected})` : ''}${same ? ` SAME-AS ${same}` : ''}${v.rotate ? ` rotate${v.rotate}` : ''}`);
+      summary.push(`${s}=${v.verdict}${v.verdict === 'mismatch' ? `(${v.detected})` : ''}${same ? ` SAME-AS ${same}` : ''}${v.rotate ? ` rotate${v.rotate}` : ''}${v.top ? ` top:${v.top}` : ''}`);
       if (v.rotate && isRotatable(urls[s])) toRotate.push([s, v.rotate]);
     }
     // Make sideways photos upright (sequential: each one re-checks its new URL on Cloudinary)
@@ -324,11 +369,20 @@ async function classifyUserDocuments(userId, { slots = SLOT_KEYS, io = null, ans
       summary.push(rr.ok ? `${s}:rotated${deg}` : `${s}:rotate-failed(${rr.reason})`);
     }
     log.info(`[DOC-AI] user ${userId}: ${summary.join(' ')} (${Date.now() - t0}ms, ${sent.length ? 1 : 0} request${reused ? `, ${reused} answer(s) reused from the submit-time check` : ''})`);
+    aiUsage.setOutcome(usageId, summary.join(' '));
     if (io) io.to('admins').emit('document-checks-ready', { userId });
   } catch (e) {
     log.error(`[DOC-AI] crashed for user ${userId}: ${e.stack || e.message}`);
     try { setSkipped(userId, slots, 'AI check failed (see server log)'); } catch (_) { /* ignore */ }
   }
+}
+
+/** "Name <email>" of an applicant for the AI usage log (from the fingerprint rows written at submit). Never throws. */
+function applicantLabel(userId) {
+  try {
+    const r = db.prepare(`SELECT applicant_name AS name, applicant_email AS email FROM document_checks WHERE user_id = ? AND applicant_email <> '' LIMIT 1`).get(userId);
+    return r ? `${r.name || ''}${r.name ? ' ' : ''}<${r.email}>`.trim() : '';
+  } catch (_) { return ''; }
 }
 
 // One job at a time (free-tier per-minute limit), and never two jobs for the same applicant at once.
@@ -484,8 +538,12 @@ async function requireMatchingDocuments(req, res, next) {
       parts.push({ text: `Document ${i + 1} (slot: ${s})` });
       parts.push({ inline_data: { mime_type: docs[s].mime, data: docs[s].buffer.toString('base64') } });
     });
-    const ans = await askGemini(parts, GATE_TIMEOUT_MS);
-    if (ans.error) { log.warn(`[DOC-GATE] ref=${req._id} AI unavailable (${ans.error}) — letting the submit through, admin badge will retry`); return next(); }
+    const ans = await askGemini(parts, GATE_TIMEOUT_MS, { feature: 'doc_gate', trigger: 'applicant_submit', applicant: who, ref: req._id, docCount: order.length });
+    if (ans.error) {
+      log.warn(`[DOC-GATE] ref=${req._id} AI unavailable (${ans.error}) — letting the submit through, admin badge will retry`);
+      aiUsage.setOutcome(ans.usageId, 'AI unavailable — applicant let through, admin badge job will retry');
+      return next();
+    }
 
     const answers = {};
     for (const r of ans.results) if (r && typeof r.slot === 'string' && docs[r.slot]) answers[r.slot] = r;
@@ -498,7 +556,13 @@ async function requireMatchingDocuments(req, res, next) {
 
     // 5) Decide
     const problems = gateProblems(docs, verdicts);
-    log.info(`[DOC-GATE] ref=${req._id} ${order.map((s) => `${s}${docs[s].isNew ? '' : '(kept)'}=${verdicts[s] ? `${verdicts[s].verdict}${verdicts[s].sameAs ? `/same-as-${verdicts[s].sameAs}` : ''}` : 'none'}`).join(' ')} → ${problems.length ? `REFUSED (${problems.map((p) => p.code).join(',')})` : 'ok'} (${Date.now() - t0}ms)`);
+    const seen = order.map((s) => {
+      const v = verdicts[s];
+      return `${s}${docs[s].isNew ? '' : '(kept)'}=${v ? `${v.verdict}${v.verdict === 'mismatch' ? `(${v.detected})` : ''}${v.sameAs ? `/same-as-${v.sameAs}` : ''}${v.rotate ? ` rotate${v.rotate}` : ''}${v.top ? ` top:${v.top}` : ''}` : 'none'}`;
+    }).join(' ');
+    const decision = problems.length ? `REFUSED (${problems.map((p) => p.code).join(',')})` : 'ok';
+    log.info(`[DOC-GATE] ref=${req._id} ${seen} → ${decision} (${Date.now() - t0}ms)`);
+    aiUsage.setOutcome(ans.usageId, `${seen} → ${decision}`);
     if (problems.length) return refusal(req, res, problems);
 
     req.docAiAnswers = answers;      // reused by the background job (enqueueDocumentAudit … { answers })
