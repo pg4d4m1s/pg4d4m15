@@ -346,15 +346,15 @@ function enqueueDocumentAudit(userId, opts = {}) {
 }
 
 // ───────────────────────── the submit-time gate ─────────────────────────
-// For the GATE only: a verdict of "mismatch" is NOT enough to refuse someone. These pairs are easily confused even by
-// people (a Barangay Clearance often serves as proof of residency; a Certificate of Registration and a grade slip
-// look alike), so they pass the gate and still get the admin's ⚠ badge. "other_document" means the model does not
-// know what it is, which is not proof of anything, so it never blocks either.
+// For the GATE only: a verdict of "mismatch" is not always enough to refuse someone. A Barangay Clearance often serves
+// as proof of residency, so it passes the gate and still gets the admin's ⚠ badge. A Certificate of Registration and
+// a Report Card are different requirements, so swapping them IS refused.
 const GATE_ALSO_OK = {
-  cert_residency:  ['barangay_clearance'],
-  cert_enrollment: ['grades_report'],
-  cert_grades:     ['enrollment_certificate'],
+  cert_residency: ['barangay_clearance'],
 };
+// "other_document" = the model recognised a document, but none of ours (e.g. the applicant's own Application Form in the
+// Grades slot). It blocks only when the model is very sure, because an unusual real certificate can land here too.
+const GATE_OTHER_MIN_CONF = Math.max(GATE_MIN_CONF, 0.9);
 
 // Per-applicant ask counter (in memory; resets on restart, which only loosens the limit slightly)
 const gateAsks = new Map();
@@ -418,7 +418,8 @@ function gateProblems(docs, verdicts) {
     if (!isNew(s) || grouped.has(s)) continue;
     const v = verdicts[s];
     if (v.confidence < GATE_MIN_CONF) continue;
-    if (v.verdict === 'mismatch' && v.type !== 'other_document' && !(GATE_ALSO_OK[s] || []).includes(v.type)) {
+    const sureEnough = v.type === 'other_document' ? v.confidence >= GATE_OTHER_MIN_CONF : true;
+    if (v.verdict === 'mismatch' && sureEnough && !(GATE_ALSO_OK[s] || []).includes(v.type)) {
       const need = ACCEPT[s].map((t, i) => (i === 0 ? TYPES[t] : TYPES[t].replace(/^an? /, ''))).join(' or ');
       problems.push({ slot: s, code: 'DOC_WRONG_TYPE',
         message: `The file for ${label(s)} looks like ${v.detected}, but this requirement needs ${need}. Please upload the correct document.` });
