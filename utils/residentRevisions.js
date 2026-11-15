@@ -594,7 +594,7 @@ function buildSummary(userId, opts = {}) {
   const docRow = (key, label, url, extra = {}) => ({ key, label, url: url || '', kind: docKind(url), onFile: !!url, staged: staged.has(key), ...extra });
   const documents = [
     ...DOC_ITEMS.map((k) => docRow(k, REVISION_ITEMS[k].label, docs[REVISION_ITEMS[k].urlCol])),
-    docRow('doc_medical', 'Medical Certificate', u.cert_medical_url, { note: 'Upload or replace it from the Medical Certificate card.' }),
+    docRow('doc_medical', 'Medical Certificate', u.cert_medical_url),
   ];
 
   const tenOfPhone = tenDigits(u.phone);

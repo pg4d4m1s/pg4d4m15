@@ -280,7 +280,8 @@
   }
 
   function docCard(d) {
-    const canReplace = !!DOC_FIELD[d.key] && approvedKeys().includes(d.key);
+    const isMed = d.key === 'doc_medical';          // uploads straight to its own endpoint, no approval needed
+    const canReplace = isMed || (!!DOC_FIELD[d.key] && approvedKeys().includes(d.key));
     const asked = requestedKeys().includes(d.key);
     const t = d.onFile ? thumbUrl(d.url, d.kind) : '';
     const icon = d.kind === 'pdf' ? 'fa-file-pdf text-red-500' : d.kind === 'docx' ? 'fa-file-word text-blue-500' : 'fa-file-image text-slate-400';
@@ -296,7 +297,7 @@
         <div class="mt-auto flex flex-wrap gap-2">
           ${d.onFile ? `<a href="${h(d.url)}" target="_blank" rel="noopener" class="ma-btn ma-btn-out !min-h-[40px] !px-3 flex-1"><i class="fa-solid fa-eye text-xs"></i> View</a>` : ''}
           ${canReplace ? `<label class="ma-btn ma-btn-grn !min-h-[40px] !px-3 flex-1 cursor-pointer"><i class="fa-solid fa-cloud-arrow-up text-xs"></i> ${d.onFile ? 'Replace' : 'Upload'}
-            <input type="file" class="hidden" accept="image/jpeg,image/png,image/webp,application/pdf,.pdf,.docx" data-doc="${d.key}"></label>` : ''}
+            <input type="file" class="hidden" accept="image/jpeg,image/png,image/webp,application/pdf,.pdf,.docx" ${isMed ? 'data-med="1"' : `data-doc="${d.key}"`}></label>` : ''}
         </div>
         ${d.note ? `<p class="text-[11px] text-slate-400">${h(d.note)}</p>` : ''}
       </div></div>`;
@@ -329,6 +330,7 @@
   }
   function onSheetChange(e) {
     const inp = e.target;
+    if (inp && inp.matches && inp.matches('input[type=file][data-med]') && inp.files && inp.files[0]) { const f = inp.files[0]; inp.value = ''; uploadMedical(f); return; }
     if (inp && inp.matches && inp.matches('input[type=file][data-doc]') && inp.files && inp.files[0]) { const f = inp.files[0]; const k = inp.dataset.doc; inp.value = ''; uploadDoc(k, f); }
   }
 
@@ -349,6 +351,33 @@
     busy = false;
     if (!r.ok) { toast(r.data.error || 'Could not submit. Please try again.', 'error'); return void load(); }
     toast(r.data.submitted ? 'Submitted. The admin will review your changes.' : 'Closed. You had not made any changes.', 'success'); load();
+  }
+
+  // ── Medical Certificate: uploads immediately via its own endpoint (not part of the draft/approval flow) ──
+  function uploadMedical(file) {
+    if (busy) return toast('Please wait for the current upload to finish.', 'error');
+    const isDocx = /\.docx$/i.test(file.name);
+    if (!(OK_MIME.includes(file.type) || isDocx)) return toast('Please choose a JPG, PNG, WebP, PDF or DOCX file.', 'error');
+    if (file.size > MAX_BYTES) return toast(`That file is ${(file.size / 1048576).toFixed(1)} MB. The limit is 15 MB. Try a smaller photo or scan.`, 'error');
+    const prog = $('ma-prog-doc_medical');
+    const show = (t) => { if (prog) { prog.classList.remove('hidden'); prog.textContent = t; } };
+    const fd = new FormData(); fd.append('cert_medical', file, file.name);
+    busy = true; show('Uploading 0%');
+    const x = new XMLHttpRequest();
+    x.open('POST', '/api/users/me/medical-certificate'); x.withCredentials = true; x.timeout = 180000;
+    x.upload.onprogress = (ev) => { if (ev.lengthComputable) { const p = Math.round(ev.loaded / ev.total * 100); show(p >= 100 ? 'Processing\u2026' : `Uploading ${p}%`); } };
+    x.onload = function () {
+      busy = false;
+      let data = {}; try { data = JSON.parse(x.responseText); } catch (_) { /* HTML error page */ }
+      if (x.status >= 200 && x.status < 300 && data.success) {
+        toast(data.replaced ? 'Medical Certificate replaced.' : 'Medical Certificate submitted.', 'success');
+        if (typeof window.loadMedicalCertificate === 'function') window.loadMedicalCertificate();
+        load();
+      } else { toast(data.error || `Upload failed (${x.status}). Please try again.`, 'error'); if (prog) prog.classList.add('hidden'); }
+    };
+    x.onerror = () => { busy = false; toast('Upload failed. Check your connection and try again.', 'error'); if (prog) prog.classList.add('hidden'); };
+    x.ontimeout = () => { busy = false; toast('The upload took too long. Check your connection and try again.', 'error'); if (prog) prog.classList.add('hidden'); };
+    x.send(fd);
   }
 
   // ── document upload (XHR so the resident sees progress on slow mobile data) ───────────────────
