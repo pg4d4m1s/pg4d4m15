@@ -3,7 +3,9 @@
  *
  *   • My Application sheet: the resident's own application at a glance (details + documents + PDF buttons)
  *   • Request a correction: pick what is wrong + why  → the admin must approve it
- *   • After approval: Edit / Replace buttons appear ONLY on the approved items, for a limited time
+ *   • After approval: Edit / Replace buttons appear ONLY on the approved items, for a limited time.
+ *     Edits are saved as DRAFTS; tap "Submit for review" and the admin must approve the changes again before they
+ *     replace anything on the real application.
  *
  * Everything here is a mirror of rules the server enforces (utils/residentRevisions.js); hiding a button is never
  * the protection. Layout: mobile-first bottom sheets (≥44px touch targets, 16px inputs so iOS does not zoom),
@@ -149,10 +151,11 @@
     let txt = '', cls = '';
     if (rev && rev.status === 'pending') { txt = 'Request sent'; cls = 'bg-amber-100 text-amber-700'; }
     else if (rev && rev.status === 'approved') { txt = 'Edit unlocked'; cls = 'bg-green-100 text-green-700'; }
+    else if (rev && rev.status === 'submitted') { txt = 'In review'; cls = 'bg-amber-100 text-amber-700'; }
     else if (last && last.status === 'rejected') { txt = 'Declined'; cls = 'bg-red-100 text-red-700'; }
     badge.className = txt ? `ma-chip ${cls}` : 'hidden';
     badge.textContent = txt;
-    if (sub) sub.textContent = rev && rev.status === 'approved' ? `Edit until ${phDate(rev.expiresAt)}` : rev && rev.status === 'pending' ? 'Waiting for admin approval' : 'Review your details & documents';
+    if (sub) sub.textContent = rev && rev.status === 'approved' ? `Edit until ${phDate(rev.expiresAt)}` : rev && rev.status === 'pending' ? 'Waiting for admin approval' : rev && rev.status === 'submitted' ? 'Your changes are being reviewed' : 'Review your details & documents';
   }
 
   // ── PDF buttons ───────────────────────────────────────────────────────────────────────────────
@@ -211,16 +214,27 @@
     }
     if (rev && rev.status === 'approved') {
       const done = new Set(rev.doneItems);
-      return box('border-green-200 bg-green-50 text-green-900 dark:bg-green-950/30 dark:border-green-900 dark:text-green-200', 'fa-lock-open', 'Edits unlocked',
-        `<p class="mt-0.5">You can change the items below until <strong>${phDate(rev.expiresAt, true)}</strong> (${timeLeft(rev.expiresAt)}).</p>` +
-        bullets(rev.approvedItems.map((k) => { const it = rev.items.find((i) => i.key === k); return `<li><i class="fa-solid ${done.has(k) ? 'fa-circle-check text-green-600' : 'fa-circle text-green-300'} text-xs mr-1.5"></i>${h(it ? it.label : k)}</li>`; })) +
-        (rev.adminNote ? `<p class="mt-2 text-xs"><strong>Admin note:</strong> ${h(rev.adminNote)}</p>` : '') +
-        `<p class="mt-2 text-xs opacity-80">Tap <em>Edit</em> / <em>Replace</em> on the matching card. When you are finished, tap <em>I'm done</em> so the admin can review.</p>`,
-        `<button type="button" class="ma-btn ma-btn-grn" data-act="finish"><i class="fa-solid fa-check text-xs"></i> I'm done</button>`);
+      const returned = !!rev.reviewNote && !!rev.reviewedAt;          // the admin sent submitted changes back
+      return box('border-green-200 bg-green-50 text-green-900 dark:bg-green-950/30 dark:border-green-900 dark:text-green-200', 'fa-lock-open', returned ? 'Changes returned for correction' : 'Edits unlocked',
+        (returned ? `<p class="mt-0.5"><strong>Admin note:</strong> ${h(rev.reviewNote)}</p><p class="mt-1">Your saved drafts are still here. Fix them and submit again before <strong>${phDate(rev.expiresAt, true)}</strong> (${timeLeft(rev.expiresAt)}).</p>`
+                    : `<p class="mt-0.5">You can change the items below until <strong>${phDate(rev.expiresAt, true)}</strong> (${timeLeft(rev.expiresAt)}).</p>`) +
+        bullets(rev.approvedItems.map((k) => { const it = rev.items.find((i) => i.key === k); return `<li><i class="fa-solid ${done.has(k) ? 'fa-circle-check text-green-600' : 'fa-circle text-green-300'} text-xs mr-1.5"></i>${h(it ? it.label : k)}${done.has(k) ? ' <span class="text-xs opacity-70">&middot; draft saved</span>' : ''}</li>`; })) +
+        (rev.adminNote && !returned ? `<p class="mt-2 text-xs"><strong>Admin note:</strong> ${h(rev.adminNote)}</p>` : '') +
+        `<p class="mt-2 text-xs opacity-80">Tap <em>Edit</em> / <em>Replace</em> on the matching card. Your changes are saved as <strong>drafts</strong>: your application does not change until you tap <em>Submit for review</em> and the admin approves them.</p>`,
+        `<button type="button" class="ma-btn ma-btn-grn" data-act="submit"><i class="fa-solid fa-paper-plane text-xs"></i> Submit for review</button>`);
+    }
+    if (rev && rev.status === 'submitted') {
+      return box('border-amber-200 bg-amber-50 text-amber-900 dark:bg-amber-950/30 dark:border-amber-900 dark:text-amber-200', 'fa-hourglass-half', 'Your changes are waiting for review',
+        `<p class="mt-0.5">The admin will check your changes below. They are <strong>not saved to your application yet</strong>; you will get a notification when the admin decides.</p>`,
+        `<button type="button" class="ma-btn ma-btn-out" data-act="withdraw" data-id="${h(rev.id)}" data-submitted="1">Withdraw changes</button>`);
     }
     const last = D.lastDecision; let out = '';
-    if (last && last.status === 'rejected') {
-      out += box('border-red-200 bg-red-50 text-red-900 dark:bg-red-950/30 dark:border-red-900 dark:text-red-200', 'fa-circle-xmark', 'Your last request was declined', `<p class="mt-0.5">${h(last.adminNote || 'No reason was given.')}</p>`, '');
+    if (last && last.status === 'completed') {
+      out += box('border-green-200 bg-green-50 text-green-900 dark:bg-green-950/30 dark:border-green-900 dark:text-green-200', 'fa-circle-check', 'Your changes were approved', `<p class="mt-0.5">They are now saved in your application.${last.reviewNote ? ' <strong>Admin note:</strong> ' + h(last.reviewNote) : ''}</p>`, '');
+    } else if (last && last.status === 'rejected') {
+      const changesDeclined = !!last.submittedAt;
+      out += box('border-red-200 bg-red-50 text-red-900 dark:bg-red-950/30 dark:border-red-900 dark:text-red-200', 'fa-circle-xmark', changesDeclined ? 'Your changes were not approved' : 'Your last request was declined',
+        `<p class="mt-0.5">${h((changesDeclined ? last.reviewNote : last.adminNote) || 'No reason was given.')}</p>${changesDeclined ? '<p class="mt-1 text-xs">Your application was not changed.</p>' : ''}`, '');
     } else if (last && last.status === 'cancelled' && last.adminNote) {
       out += box('border-slate-200 bg-white text-slate-700 dark:bg-slate-900 dark:border-slate-700 dark:text-slate-200', 'fa-circle-info', 'Edit access was closed by the admin', `<p class="mt-0.5">${h(last.adminNote)}</p>`, '');
     } else if (last && last.status === 'expired') {
@@ -243,7 +257,9 @@
 
   function sectionCard(sec) {
     const canEdit = approvedKeys().includes(sec.key), asked = requestedKeys().includes(sec.key);
-    const action = canEdit ? `<button type="button" class="ma-btn ma-btn-pri !min-h-[40px] !px-3" data-act="edit" data-key="${sec.key}"><i class="fa-solid fa-pen text-xs"></i> Edit</button>`
+    const draft = sec.staged ? '<span class="ma-chip bg-amber-100 text-amber-700"><i class="fa-solid fa-pen-ruler"></i> Draft</span>' : '';
+    const action = canEdit ? `${draft}<button type="button" class="ma-btn ma-btn-pri !min-h-[40px] !px-3" data-act="edit" data-key="${sec.key}"><i class="fa-solid fa-pen text-xs"></i> Edit</button>`
+      : sec.staged ? draft
       : asked ? '<span class="ma-chip bg-amber-100 text-amber-700"><i class="fa-solid fa-hourglass-half"></i> Requested</span>' : '';
     const body = sec.groups
       ? sec.groups.map((g) => `<div class="mb-4"><p class="text-xs font-bold text-brand-600 mb-2">${h(g.title)}</p>${rowsHtml(g.rows)}</div>`).join('') + rowsHtml(sec.rows)
@@ -274,8 +290,8 @@
       <div class="aspect-[4/3] bg-slate-100 dark:bg-slate-800">${media}</div>
       <div class="p-3 flex-1 flex flex-col gap-2">
         <p class="text-[13px] font-semibold text-slate-800 dark:text-slate-100 leading-snug">${h(d.label)}</p>
-        <div>${d.onFile ? '<span class="ma-chip bg-green-100 text-green-700"><i class="fa-solid fa-circle-check"></i> On file</span>' : '<span class="ma-chip bg-slate-200 text-slate-600"><i class="fa-solid fa-circle-minus"></i> Not on file</span>'}
-          ${asked ? '<span class="ma-chip bg-amber-100 text-amber-700 ml-1">Requested</span>' : ''}</div>
+        <div>${d.onFile ? '<span class="ma-chip bg-green-100 text-green-700"><i class="fa-solid fa-circle-check"></i> ' + (d.staged ? 'Draft' : 'On file') + '</span>' : '<span class="ma-chip bg-slate-200 text-slate-600"><i class="fa-solid fa-circle-minus"></i> Not on file</span>'}
+          ${d.staged ? '<span class="ma-chip bg-amber-100 text-amber-700 ml-1"><i class="fa-solid fa-pen-ruler"></i> New file (draft)</span>' : asked ? '<span class="ma-chip bg-amber-100 text-amber-700 ml-1">Requested</span>' : ''}</div>
         <div id="ma-prog-${d.key}" class="hidden text-xs text-brand-600 font-semibold"></div>
         <div class="mt-auto flex flex-wrap gap-2">
           ${d.onFile ? `<a href="${h(d.url)}" target="_blank" rel="noopener" class="ma-btn ma-btn-out !min-h-[40px] !px-3 flex-1"><i class="fa-solid fa-eye text-xs"></i> View</a>` : ''}
@@ -294,7 +310,7 @@
     b.innerHTML = banner() + S.sections.map(sectionCard).join('') +
       `<section><h3 class="font-display font-bold text-slate-900 dark:text-white mb-3 flex items-center gap-2"><i class="fa-solid fa-folder-open text-brand-600"></i> Documents</h3>
         <div class="grid grid-cols-2 lg:grid-cols-2 gap-3">${S.documents.map(docCard).join('')}</div></section>
-       <p class="text-[11px] text-center text-slate-400 pb-2">Changes need admin approval. Your profile photo can be changed anytime from your profile.</p>`;
+       <p class="text-[11px] text-center text-slate-400 pb-2">Changes are saved as drafts and need admin approval before they replace your application. Your profile photo can be changed anytime from your profile.</p>`;
     b.scrollTop = scroll;
   }
 
@@ -308,31 +324,31 @@
     if (act === 'pdf-download') return void (typeof window.downloadMyApplicationForm === 'function' ? window.downloadMyApplicationForm() : window.location.assign('/api/users/me/application-form'));
     if (act === 'request') return openRequestModal();
     if (act === 'edit') return openEditModal(el.dataset.key);
-    if (act === 'withdraw') return void withdraw(el.dataset.id);
-    if (act === 'finish') return void finish();
+    if (act === 'withdraw') return void withdraw(el.dataset.id, el.dataset.submitted === '1');
+    if (act === 'submit') return void submitForReview();
   }
   function onSheetChange(e) {
     const inp = e.target;
     if (inp && inp.matches && inp.matches('input[type=file][data-doc]') && inp.files && inp.files[0]) { const f = inp.files[0]; const k = inp.dataset.doc; inp.value = ''; uploadDoc(k, f); }
   }
 
-  async function withdraw(id) {
+  async function withdraw(id, submitted) {
     if (busy) return;
-    if (!confirm('Withdraw this correction request?')) return;
+    if (!confirm(submitted ? 'Withdraw your submitted changes? They will be discarded and your application stays as it is.' : 'Withdraw this correction request?')) return;
     busy = true;
     const r = await api('DELETE', API + '/revisions/' + encodeURIComponent(id));
     busy = false;
     if (!r.ok) return toast(r.data.error || 'Could not withdraw your request.', 'error');
-    toast('Request withdrawn.', 'success'); load();
+    toast(submitted ? 'Changes withdrawn.' : 'Request withdrawn.', 'success'); load();
   }
-  async function finish() {
+  async function submitForReview() {
     if (busy) return;
-    if (!confirm('Finish now? The admin will be told to review your changes, and you will not be able to edit more unless you send a new request.')) return;
+    if (!confirm('Submit your changes for review? The admin must approve them before they are saved to your application, and you will not be able to edit more unless the admin sends them back.')) return;
     busy = true;
-    const r = await api('POST', API + '/revisions/current/finish');
+    const r = await api('POST', API + '/revisions/current/submit');
     busy = false;
-    if (!r.ok) { toast(r.data.error || 'Could not finish. Please try again.', 'error'); return void load(); }
-    toast(r.data.changeCount ? 'Done. The admin will review your changes.' : 'Closed. No changes were made.', 'success'); load();
+    if (!r.ok) { toast(r.data.error || 'Could not submit. Please try again.', 'error'); return void load(); }
+    toast(r.data.submitted ? 'Submitted. The admin will review your changes.' : 'Closed. You had not made any changes.', 'success'); load();
   }
 
   // ── document upload (XHR so the resident sees progress on slow mobile data) ───────────────────
@@ -350,7 +366,7 @@
     x.upload.onprogress = (ev) => { if (ev.lengthComputable) { const p = Math.round(ev.loaded / ev.total * 100); show(p >= 100 ? 'Processing\u2026' : `Uploading ${p}%`); } };
     x.onload = function () {
       let data = {}; try { data = JSON.parse(x.responseText); } catch (_) { /* HTML error page */ }
-      if (x.status >= 200 && x.status < 300) { toast('Document replaced.', 'success'); load(); }
+      if (x.status >= 200 && x.status < 300) { toast('New file saved as a draft. Submit for review when you are ready.', 'success'); load(); }
       else { toast(data.error || `Upload failed (${x.status}). Please try again.`, 'error'); if (prog) prog.classList.add('hidden'); if (x.status === 403 || x.status === 410) load(); }
     };
     x.onerror = () => { toast('Upload failed. Check your connection and try again.', 'error'); if (prog) prog.classList.add('hidden'); };
@@ -521,7 +537,7 @@
     if (!D || !approvedKeys().includes(group)) return toast('That part is not unlocked for editing.', 'error');
     const title = (D.requestable.find((r) => r.key === group) || {}).label || 'Edit';
     const m = openModal(title, editBody(group) + errBox,
-      `${cancelBtn}<button type="submit" id="ma-submit" class="ma-btn ma-btn-grn"><i class="fa-solid fa-floppy-disk text-xs"></i> Save changes</button>`);
+      `${cancelBtn}<button type="submit" id="ma-submit" class="ma-btn ma-btn-grn"><i class="fa-solid fa-floppy-disk text-xs"></i> Save draft</button>`);
     const form = m.querySelector('form');
     form.addEventListener('input', (e) => {
       e.target.classList.remove('ma-bad');
@@ -536,7 +552,7 @@
       const box = $('ma-form-err'); box.classList.add('hidden'); form.querySelectorAll('.ma-bad').forEach((x) => x.classList.remove('ma-bad'));
       busy = true; const btn = $('ma-submit'); btn.disabled = true; btn.textContent = 'Saving\u2026';
       const r = await api('PUT', API + '/revisions/current/info', { group, values: nest(form) });
-      busy = false; btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-floppy-disk text-xs"></i> Save changes';
+      busy = false; btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-floppy-disk text-xs"></i> Save draft';
       if (!r.ok) {
         const f = r.data.field ? String(r.data.field).replace(/^./, (c) => c.toLowerCase()) : '';
         formError(r.data.error || 'Could not save your changes.', f);
@@ -544,7 +560,7 @@
         return;
       }
       closeModal();
-      toast(r.data.changed ? 'Saved. Your changes were recorded.' : 'No changes to save.', r.data.changed ? 'success' : 'info');
+      toast(r.data.changed ? 'Saved as a draft. Submit for review when you are ready.' : r.data.cleared ? 'Same as your current application, so the draft was cleared.' : 'No changes to save.', r.data.changed ? 'success' : 'info');
       load();
     });
   }

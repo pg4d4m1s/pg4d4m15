@@ -1,21 +1,27 @@
 /**
  * routes/revisions.js — approved residents correcting their own application (request -> admin approval -> edit)
  *
+ * Two approvals: (1) the admin allows the resident to edit, (2) after the resident submits, the admin reviews the
+ * changes and approves them again. Until then the edits are DRAFTS; the resident's real record is not touched.
+ *
  * RESIDENT (login required; only approved residents can create requests)
- *   GET    /api/users/me/application-summary          sections + documents + current/last request + form options
+ *   GET    /api/users/me/application-summary          sections + documents (drafts laid over them) + current/last request + form options
  *   POST   /api/users/me/revisions                    { items:[{key,note}], reason }      send a request
- *   DELETE /api/users/me/revisions/:id                withdraw a request that is still pending
- *   PUT    /api/users/me/revisions/current/info       { group, values }                   save ONE approved info group
- *   POST   /api/users/me/revisions/current/documents  multipart (id_front, cert_*)        replace approved documents
- *   POST   /api/users/me/revisions/current/finish     "I'm done" -> admins are told to review the change log
+ *   DELETE /api/users/me/revisions/:id                withdraw a request (or submitted changes) that is still waiting for the admin
+ *   PUT    /api/users/me/revisions/current/info       { group, values }                   save ONE approved info group as a draft
+ *   POST   /api/users/me/revisions/current/documents  multipart (id_front, cert_*)        save approved documents as drafts
+ *   POST   /api/users/me/revisions/current/submit     "Submit for review" -> admins are told to review the drafts
  *
  * ADMIN (all under /api/admin/*, so server.js's admin guard applies on top of requireAdmin)
  *   GET  /api/admin/revisions/stats                   counts per status (sidebar badge)
- *   GET  /api/admin/revisions?status=pending|approved|completed|rejected|cancelled|expired|all
- *   GET  /api/admin/revisions/:id                     request + the resident's current application + change log
- *   POST /api/admin/revisions/:id/approve             { items:[key], days:1|3|7|14, note }
- *   POST /api/admin/revisions/:id/reject              { note }   (required)
- *   POST /api/admin/revisions/:id/revoke              { note }   close an approved window early
+ *   GET  /api/admin/revisions?status=pending|approved|submitted|completed|rejected|cancelled|expired|all
+ *   GET  /api/admin/revisions/:id                     request + the resident's current application + (proposed or applied) changes
+ *   POST /api/admin/revisions/:id/approve             { items:[key], days:1|3|7|14, note }   1st approval: allow the resident to edit
+ *   POST /api/admin/revisions/:id/reject              { note }   (required)                  decline the request
+ *   POST /api/admin/revisions/:id/revoke              { note }   close an approved window early (drafts are discarded)
+ *   POST /api/admin/revisions/:id/apply               { note }                               2nd approval: write the submitted changes
+ *   POST /api/admin/revisions/:id/return              { note (required), days }              send the changes back for correction
+ *   POST /api/admin/revisions/:id/discard             { note (required) }                    decline the submitted changes
  *
  * All rules live in utils/residentRevisions.js; this file only does HTTP, notifications and audit logging.
  */
@@ -65,24 +71,33 @@ function mailResident(userId, args) {
   } catch (e) { log.warn(`[revision] e-mail skipped: ${e.message}`); }
 }
 
+function mailReview(userId, args) {
+  try {
+    const u = findUserById(userId);
+    if (u && u.email && typeof emailService.sendRevisionReviewEmail === 'function') {
+      emailService.sendRevisionReviewEmail(u.email, u.firstName, args).catch((e) => log.warn(`[revision] review e-mail to ${u.email} failed: ${e.message}`));
+    }
+  } catch (e) { log.warn(`[revision] review e-mail skipped: ${e.message}`); }
+}
+
 // ── RESIDENT ────────────────────────────────────────────────────────────────────────────────────
 router.get('/api/users/me/application-summary', requireAuth, (req, res) => {
   try {
     const uid = req.user.id;
-    const summary = rr.buildSummary(uid);
-    if (!summary) return res.status(404).json({ error: 'Account not found.' });
     const open = rr.getOpenRequest(uid);
+    const summary = rr.buildSummary(uid, { draftsOf: open ? open.id : null });      // the resident sees their own drafts on top of the real record
+    if (!summary) return res.status(404).json({ error: 'Account not found.' });
     const hist = rr.history(uid, 5);
     const el = rr.eligibility(uid);
     let blockedReason = '';
     if (!el.ok) blockedReason = el.error;
-    else if (open) blockedReason = open.status === 'pending' ? 'Your request is waiting for the admin.' : 'Your edits are unlocked.';
+    else if (open) blockedReason = open.status === 'pending' ? 'Your request is waiting for the admin.' : open.status === 'submitted' ? 'Your changes are waiting for the admin to review.' : 'Your edits are unlocked.';
     res.set('Cache-Control', 'private, no-store');
     res.json({
       summary, revision: open, history: hist,
       canRequest: el.ok && !open, blockedReason,
       // the MOST RECENT request is shown as a banner while it is still news (declined / revoked / expired in the last 14 days)
-      lastDecision: (!open && hist[0] && ['rejected', 'cancelled', 'expired'].includes(hist[0].status) && hist[0].updatedAt && Date.now() - new Date(hist[0].updatedAt).getTime() < 14 * 864e5) ? hist[0] : null,
+      lastDecision: (!open && hist[0] && (['rejected', 'cancelled', 'expired'].includes(hist[0].status) || (hist[0].status === 'completed' && hist[0].reviewedAt)) && hist[0].updatedAt && Date.now() - new Date(hist[0].updatedAt).getTime() < 14 * 864e5) ? hist[0] : null,
       requestable: rr.REQUESTABLE.map((k) => ({ key: k, label: REVISION_ITEMS[k].label, group: REVISION_ITEMS[k].group })),
       options: { civilStatus: rr.CIVIL_STATUSES, yearLevels: rr.YEAR_LEVELS, income: rr.INCOME_OPTIONS, sexes: rr.SEXES },
       limits: { reasonMin: rr.REASON_MIN, reasonMax: rr.REASON_MAX, noteMax: rr.NOTE_MAX },
@@ -105,7 +120,7 @@ router.delete('/api/users/me/revisions/:id', requireAuth, (req, res) => {
   try {
     const r = rr.cancelRequest(req.params.id, req.user.id);
     if (r.ok) tellAdmins(req, 'revision-request', { id: r.request.id, withdrawn: true });
-    send(res, r, { request: r.request });
+    send(res, r, { request: r.request, wasSubmitted: r.wasSubmitted });
   } catch (e) { fail500(res, 'cancel', e, 'Could not withdraw your request.'); }
 });
 
@@ -113,9 +128,9 @@ router.put('/api/users/me/revisions/current/info', requireAuth, (req, res) => {
   try {
     const open = rr.getOpenRequest(req.user.id);
     const group = String((req.body || {}).group || '');
-    const r = rr.applyInfo(req.user.id, open, group, (req.body || {}).values);
-    if (r.ok && r.changed) log.info(`[revision] @${req.user.username} saved ${group}: ${r.fields.join(', ')}`);
-    send(res, r, { changed: r.changed, fields: r.fields });
+    const r = rr.saveInfoDraft(req.user.id, open, group, (req.body || {}).values);
+    if (r.ok && r.changed) log.info(`[revision] @${req.user.username} saved a draft of ${group}: ${r.fields.join(', ')}`);
+    send(res, r, { changed: r.changed, cleared: r.cleared, fields: r.fields });
   } catch (e) { fail500(res, 'save-info', e, 'Could not save your changes. Please try again.'); }
 });
 
@@ -133,23 +148,24 @@ router.post('/api/users/me/revisions/current/documents', requireAuth, requireEdi
   trackUpload('revision-documents'), ...uploadRevisionDocs,
   (req, res) => {
     try {
-      const r = rr.applyDocuments(req.user.id, req.revisionRequest, req.idDocUrls);
-      if (r.ok) log.upload(`[revision] @${req.user.username} replaced: ${r.replaced.join(', ')}`);
+      const r = rr.saveDocumentDrafts(req.user.id, req.revisionRequest, req.idDocUrls);
+      if (r.ok) log.upload(`[revision] @${req.user.username} saved draft documents: ${r.replaced.join(', ')}`);
       send(res, r, { replaced: r.ok ? r.replaced : [] });
     } catch (e) { fail500(res, 'save-documents', e, 'Could not save your document. Please try again.'); }
   });
 
-router.post('/api/users/me/revisions/current/finish', requireAuth, (req, res) => {
+router.post('/api/users/me/revisions/current/submit', requireAuth, (req, res) => {
   try {
     const open = rr.getOpenRequest(req.user.id);
     if (!open) return res.status(409).json({ error: 'You have no open correction request.', code: 'NO_OPEN' });
-    const r = rr.finish(open.id, req.user.id);
+    const r = rr.submitForReview(open.id, req.user.id);
     if (r.ok) {
-      log.info(`[revision] @${req.user.username} finished ${open.id} (${r.changeCount} change(s))`);
-      tellAdmins(req, 'revision-completed', { id: open.id, username: req.user.username, changeCount: r.changeCount });
+      log.info(`[revision] @${req.user.username} submitted ${open.id} for review (${r.changeCount} change(s))`);
+      if (r.submitted) tellAdmins(req, 'revision-submitted', { id: open.id, username: req.user.username, changeCount: r.changeCount });
+      else tellAdmins(req, 'revision-request', { id: open.id, decided: true });
     }
-    send(res, r, { request: r.request, changeCount: r.changeCount });
-  } catch (e) { fail500(res, 'finish', e, 'Could not finish. Please try again.'); }
+    send(res, r, { request: r.request, submitted: r.submitted, changeCount: r.changeCount });
+  } catch (e) { fail500(res, 'submit', e, 'Could not submit. Please try again.'); }
 });
 
 // ── ADMIN ───────────────────────────────────────────────────────────────────────────────────────
@@ -216,6 +232,54 @@ router.post('/api/admin/revisions/:id/revoke', requireAdmin, (req, res) => {
     }
     send(res, r, { request: r.request });
   } catch (e) { fail500(res, 'revoke', e, 'Could not revoke the request.'); }
+});
+
+// Second approval — the resident submitted drafts; nothing is written to their record until /apply.
+router.post('/api/admin/revisions/:id/apply', requireAdmin, (req, res) => {
+  try {
+    const r = rr.applyChanges({ id: req.params.id, adminId: req.user.id, note: (req.body || {}).note });
+    if (r.ok) {
+      const q = r.request;
+      log.admin(`Revision ${q.id} CHANGES APPROVED by @${req.user.username} for ${q.userId}: ${r.applied} change(s) applied`);
+      logAdminAction(req.user.id, 'revision_changes_applied', 'user', q.userId, `${r.applied} change(s) applied`);
+      tellResident(req, q.userId, 'revision_approved', `Your changes were approved and saved to your application.${q.reviewNote ? ' ' + q.reviewNote : ''}`);
+      mailReview(q.userId, { outcome: 'applied', items: q.items.map((i) => i.label), note: q.reviewNote });
+      tellAdmins(req, 'revision-request', { id: q.id, decided: true });
+    }
+    send(res, r, { request: r.request, applied: r.applied });
+  } catch (e) { fail500(res, 'apply', e, 'Could not apply the changes.'); }
+});
+
+router.post('/api/admin/revisions/:id/return', requireAdmin, (req, res) => {
+  try {
+    const b = req.body || {};
+    const r = rr.returnChanges({ id: req.params.id, adminId: req.user.id, note: b.note, days: b.days });
+    if (r.ok) {
+      const q = r.request;
+      log.admin(`Revision ${q.id} CHANGES RETURNED by @${req.user.username} to ${q.userId} (${r.days}d)`);
+      logAdminAction(req.user.id, 'revision_changes_returned', 'user', q.userId, q.reviewNote);
+      tellResident(req, q.userId, 'revision_approved',
+        `The admin sent your changes back for correction: ${q.reviewNote} Open My Dormitory \u2192 My Application before ${phDate(q.expiresAt)} and submit again.`);
+      mailReview(q.userId, { outcome: 'returned', items: q.approvedLabels, note: q.reviewNote, expiresAt: q.expiresAt });
+      tellAdmins(req, 'revision-request', { id: q.id, decided: true });
+    }
+    send(res, r, { request: r.request });
+  } catch (e) { fail500(res, 'return', e, 'Could not return the changes.'); }
+});
+
+router.post('/api/admin/revisions/:id/discard', requireAdmin, (req, res) => {
+  try {
+    const r = rr.discardChanges({ id: req.params.id, adminId: req.user.id, note: (req.body || {}).note });
+    if (r.ok) {
+      const q = r.request;
+      log.admin(`Revision ${q.id} CHANGES DECLINED by @${req.user.username} for ${q.userId}`);
+      logAdminAction(req.user.id, 'revision_changes_declined', 'user', q.userId, q.reviewNote);
+      tellResident(req, q.userId, 'revision_rejected', `Your changes were not approved and nothing was changed: ${q.reviewNote}`);
+      mailReview(q.userId, { outcome: 'declined', items: q.items.map((i) => i.label), note: q.reviewNote });
+      tellAdmins(req, 'revision-request', { id: q.id, decided: true });
+    }
+    send(res, r, { request: r.request });
+  } catch (e) { fail500(res, 'discard', e, 'Could not decline the changes.'); }
 });
 
 module.exports = router;

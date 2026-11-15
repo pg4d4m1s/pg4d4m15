@@ -912,6 +912,50 @@ async function sendRevisionDecisionEmail(toEmail, firstName, { approved, items =
   }
 }
 
+/**
+ * Outcome of the admin's review of the changes a resident submitted (routes/revisions.js).
+ * args: { outcome:'applied'|'returned'|'declined', items:[label], note:string, expiresAt:ISO string (returned only) }
+ */
+async function sendRevisionReviewEmail(toEmail, firstName, { outcome, items = [], note = '', expiresAt = null } = {}) {
+  const appName = APP_NAME();
+  const appUrl  = APP_URL();
+  const list = items.map((l) => `<li style="margin:4px 0;">${_escMail(l)}</li>`).join('');
+  const until = expiresAt ? new Date(expiresAt).toLocaleDateString('en-PH', { month: 'long', day: 'numeric', year: 'numeric', timeZone: 'Asia/Manila' }) : '';
+  const color = outcome === 'applied' ? '#16a34a' : outcome === 'returned' ? '#ea580c' : '#dc2626';
+  const noteHtml = note
+    ? `<p style="color:#475569;font-size:14px;line-height:1.7;margin:0 0 16px;padding:12px 14px;background:#f8fafc;border-left:3px solid ${color};border-radius:6px;"><strong>Admin note:</strong> ${_escMail(note)}</p>`
+    : '';
+  const P = (t) => `<p style="color:#475569;font-size:15px;line-height:1.7;margin:0 0 12px;">${t}</p>`;
+  const UL = `<ul style="color:#334155;font-size:15px;line-height:1.6;margin:0 0 16px;padding-left:20px;">${list}</ul>`;
+  let subjectTail, body, text;
+  if (outcome === 'applied') {
+    subjectTail = 'your changes were approved';
+    body = emailWrapper('linear-gradient(135deg,#14532d,#16a34a)', '&#9989;', 'Changes Approved', appName,
+      greeting(firstName) + P('The dormitory admin reviewed your changes and approved them. They are now saved in your application:') + UL + noteHtml + btn(appUrl + '/feed.html?panel=dorm', 'Open My Application', '#16a34a'));
+    text = `Changes approved — ${appName}\n\nHi ${firstName},\n\nYour changes (${items.join(', ')}) were approved and saved.\n${note ? 'Admin note: ' + note + '\n' : ''}Open ${appUrl}/feed.html?panel=dorm`;
+  } else if (outcome === 'returned') {
+    subjectTail = 'your changes need a correction';
+    body = emailWrapper('linear-gradient(135deg,#9a3412,#ea580c)', '&#9999;&#65039;', 'Changes Returned', appName,
+      greeting(firstName) + P('The dormitory admin reviewed your changes and sent them back for correction. Nothing was saved to your application yet. You can edit:') + UL + noteHtml +
+      P(`Open <strong>My Dormitory &rarr; My Application</strong>, fix it${until ? ` before <strong>${until}</strong>` : ''} and tap <em>Submit for review</em> again.`) + btn(appUrl + '/feed.html?panel=dorm', 'Open My Application', '#ea580c'));
+    text = `Changes returned — ${appName}\n\nHi ${firstName},\n\nYour changes need a correction${until ? ` (edit until ${until})` : ''}.\n${note ? 'Admin note: ' + note + '\n' : ''}Open ${appUrl}/feed.html?panel=dorm`;
+  } else {
+    subjectTail = 'your changes were not approved';
+    body = emailWrapper('linear-gradient(135deg,#7f1d1d,#dc2626)', '&#9888;&#65039;', 'Changes Not Approved', appName,
+      greeting(firstName) + P('The dormitory admin reviewed your changes and did not approve them. Your application stays exactly as it was, for:') + UL + noteHtml +
+      P('If something is still wrong, you can send a new correction request.'));
+    text = `Changes not approved — ${appName}\n\nHi ${firstName},\n\nYour changes (${items.join(', ')}) were not approved. Your application was not changed.\n${note ? 'Admin note: ' + note : ''}`;
+  }
+  try {
+    const result = await _send({ to: toEmail, subject: `[${appName}] ${subjectTail.charAt(0).toUpperCase() + subjectTail.slice(1)}`, html: body, text, kind: 'revision' });
+    if (result.driver !== 'console') console.log(`  ✅ Revision review email (${outcome}) sent [${result.driver}] → ${toEmail}`);
+    return result;
+  } catch (err) {
+    console.error(`❌ [emailService] sendRevisionReviewEmail → ${toEmail} | driver=${DRIVER} | ${err.message}`);
+    return { success: false };
+  }
+}
+
 // Minimal HTML escaping for admin-typed text that is placed inside an e-mail (reason, checklist notes).
 function _escMail(v) {
   return String(v == null ? '' : v).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -1154,6 +1198,7 @@ module.exports = {
   sendAccountApprovedEmail,
   sendAccountRejectedEmail,
   sendRevisionDecisionEmail,
+  sendRevisionReviewEmail,
   sendContactEmail,
   sendDormReminderEmail,
   sendBedAssignedEmail,
