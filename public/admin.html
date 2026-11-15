@@ -1155,7 +1155,7 @@
         <p class="text-sm text-slate-400 mt-0.5">Residents asking to correct their application. They can edit only what you approve, for a limited time, and you approve their changes again before anything is saved.</p>
       </div>
       <div class="flex gap-2 flex-wrap">
-        <select id="rev-filter-status" onchange="loadRevisions()" class="rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-3 py-2 text-sm outline-none focus:border-brand-400">
+        <select id="rev-filter-status" onchange="loadRevisions()" aria-label="Filter revision requests by status" class="rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-3 py-2 text-sm outline-none focus:border-brand-400">
           <option value="pending">Waiting for review</option>
           <option value="submitted">Changes to review</option>
           <option value="approved">Editing now</option>
@@ -1168,12 +1168,13 @@
         <button onclick="loadRevisionStats();loadRevisions()" class="flex items-center gap-2 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 text-sm font-medium px-4 py-2 rounded-xl hover:bg-slate-50 transition-colors"><i class="fa-solid fa-rotate text-xs"></i>Refresh</button>
       </div>
     </div>
-    <div class="grid grid-cols-2 lg:grid-cols-5 gap-4 mb-6">
-      <div class="bg-white dark:bg-slate-900 rounded-2xl border border-slate-100 dark:border-slate-800 p-4 text-center"><p class="text-xs font-bold text-slate-400 uppercase tracking-wider mb-1">Waiting</p><p id="rev-stat-pending" class="text-3xl font-extrabold text-violet-500">–</p></div>
-      <div class="bg-white dark:bg-slate-900 rounded-2xl border border-slate-100 dark:border-slate-800 p-4 text-center"><p class="text-xs font-bold text-slate-400 uppercase tracking-wider mb-1">Changes to review</p><p id="rev-stat-submitted" class="text-3xl font-extrabold text-amber-500">–</p></div>
-      <div class="bg-white dark:bg-slate-900 rounded-2xl border border-slate-100 dark:border-slate-800 p-4 text-center"><p class="text-xs font-bold text-slate-400 uppercase tracking-wider mb-1">Editing now</p><p id="rev-stat-approved" class="text-3xl font-extrabold text-green-500">–</p></div>
-      <div class="bg-white dark:bg-slate-900 rounded-2xl border border-slate-100 dark:border-slate-800 p-4 text-center"><p class="text-xs font-bold text-slate-400 uppercase tracking-wider mb-1">Completed</p><p id="rev-stat-completed" class="text-3xl font-extrabold text-blue-500">–</p></div>
-      <div class="bg-white dark:bg-slate-900 rounded-2xl border border-slate-100 dark:border-slate-800 p-4 text-center"><p class="text-xs font-bold text-slate-400 uppercase tracking-wider mb-1">Declined</p><p id="rev-stat-rejected" class="text-3xl font-extrabold text-red-500">–</p></div>
+    <!-- Stat cards double as filters: tap one to show that list (highlighted ring = the list you're viewing) -->
+    <div class="grid grid-cols-2 lg:grid-cols-5 gap-4 mb-6" role="group" aria-label="Filter revision requests by status">
+      <button type="button" data-rev-card="pending" onclick="revSetStatus('pending')" aria-pressed="false" class="rev-card w-full min-h-[44px] bg-white dark:bg-slate-900 rounded-2xl border border-slate-100 dark:border-slate-800 p-4 text-center cursor-pointer transition hover:shadow-md hover:border-violet-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400"><p class="text-xs font-bold text-slate-400 uppercase tracking-wider mb-1">Waiting</p><p id="rev-stat-pending" class="text-3xl font-extrabold text-violet-500">–</p></button>
+      <button type="button" data-rev-card="submitted" onclick="revSetStatus('submitted')" aria-pressed="false" class="rev-card w-full min-h-[44px] bg-white dark:bg-slate-900 rounded-2xl border border-slate-100 dark:border-slate-800 p-4 text-center cursor-pointer transition hover:shadow-md hover:border-amber-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400"><p class="text-xs font-bold text-slate-400 uppercase tracking-wider mb-1">Changes to review</p><p id="rev-stat-submitted" class="text-3xl font-extrabold text-amber-500">–</p></button>
+      <button type="button" data-rev-card="approved" onclick="revSetStatus('approved')" aria-pressed="false" class="rev-card w-full min-h-[44px] bg-white dark:bg-slate-900 rounded-2xl border border-slate-100 dark:border-slate-800 p-4 text-center cursor-pointer transition hover:shadow-md hover:border-green-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-green-400"><p class="text-xs font-bold text-slate-400 uppercase tracking-wider mb-1">Editing now</p><p id="rev-stat-approved" class="text-3xl font-extrabold text-green-500">–</p></button>
+      <button type="button" data-rev-card="completed" onclick="revSetStatus('completed')" aria-pressed="false" class="rev-card w-full min-h-[44px] bg-white dark:bg-slate-900 rounded-2xl border border-slate-100 dark:border-slate-800 p-4 text-center cursor-pointer transition hover:shadow-md hover:border-blue-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400"><p class="text-xs font-bold text-slate-400 uppercase tracking-wider mb-1">Completed</p><p id="rev-stat-completed" class="text-3xl font-extrabold text-blue-500">–</p></button>
+      <button type="button" data-rev-card="rejected" onclick="revSetStatus('rejected')" aria-pressed="false" class="rev-card w-full min-h-[44px] bg-white dark:bg-slate-900 rounded-2xl border border-slate-100 dark:border-slate-800 p-4 text-center cursor-pointer transition hover:shadow-md hover:border-red-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400"><p class="text-xs font-bold text-slate-400 uppercase tracking-wider mb-1">Declined</p><p id="rev-stat-rejected" class="text-3xl font-extrabold text-red-500">–</p></button>
     </div>
     <div id="rev-list" class="space-y-3"></div>
   </div>
@@ -2157,7 +2158,7 @@
     else if(tab==='dormitory')loadDormRooms();
     else if(tab==='billing'){ initBillingMonth(); loadBilling(); loadGcashSettings(); }
     else if(tab==='maintenance'){ loadMaintenanceStats(); loadMaintenance(); }
-    else if(tab==='revisions'){ loadRevisionStats(); loadRevisions(); }
+    else if(tab==='revisions')openRevisionsTab();
     else if(tab==='incidents'){ loadIncidentStats(); loadIncidents(); }
     else if(tab==='utility'){ initUtilityMonth(); loadUtility(); loadUtilityChart(); }
     else if(tab==='backup'){ /* static page, no load needed */ }
@@ -7628,18 +7629,49 @@
       const d = await r.json(); const el = id => document.getElementById(id);
       ['pending','submitted','approved','completed','rejected'].forEach(k => { if (el('rev-stat-' + k)) el('rev-stat-' + k).textContent = d[k] ?? 0; });
       const b = el('rev-badge'); const todo = (d.pending ?? 0) + (d.submitted ?? 0); if (b) { b.textContent = todo; b.classList.toggle('hidden', !(todo > 0)); }   // badge = waiting for a decision (new requests + submitted changes)
-    } catch (e) { console.error('loadRevisionStats:', e); }
+      return d;
+    } catch (e) { console.error('loadRevisionStats:', e); return null; }
   }
 
+  // Which stat card matches the list being shown gets a ring (cards only exist for 5 of the 8 dropdown statuses, so "All"/"Expired"/"Withdrawn" highlight nothing).
+  function revHighlight(status) {
+    document.querySelectorAll('[data-rev-card]').forEach(c => {
+      const on = c.dataset.revCard === status;
+      c.setAttribute('aria-pressed', on ? 'true' : 'false');
+      c.classList.toggle('ring-2', on); c.classList.toggle('ring-brand-500', on); c.classList.toggle('shadow-md', on);
+    });
+  }
+
+  // Stat card tap: show that list. On phones/tablets the list sits below the cards, so scroll it into view.
+  function revSetStatus(status) {
+    const sel = document.getElementById('rev-filter-status'); if (sel) sel.value = status;
+    loadRevisions();
+    if (window.innerWidth < 1024) document.getElementById('rev-list')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+
+  // Opening the Revision Requests tab (sidebar item with the badge): jump to the list that needs a decision —
+  // "Changes to review" first (resident already edited), then "Waiting". If neither has anything, keep the admin's last choice.
+  async function openRevisionsTab() {
+    const d = await loadRevisionStats();
+    const sel = document.getElementById('rev-filter-status');
+    if (sel && d) { if ((d.submitted ?? 0) > 0) sel.value = 'submitted'; else if ((d.pending ?? 0) > 0) sel.value = 'pending'; }
+    loadRevisions();
+  }
+
+  let _revReq = 0;   // guards against out-of-order responses when cards are tapped quickly
   async function loadRevisions() {
     const box = document.getElementById('rev-list'); if (!box) return;
     const status = document.getElementById('rev-filter-status')?.value || 'pending';
+    const myReq = ++_revReq;
+    revHighlight(status);
     box.innerHTML = '<div class="py-10 text-center text-slate-400"><i class="fa-solid fa-spinner fa-spin mr-2"></i>Loading…</div>';
     try {
       const r = await fetch('/api/admin/revisions?status=' + encodeURIComponent(status));
       if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || 'HTTP ' + r.status);
-      _revList = await r.json(); renderRevisions();
+      const list = await r.json(); if (myReq !== _revReq) return;
+      _revList = list; renderRevisions();
     } catch (e) {
+      if (myReq !== _revReq) return;
       console.error('loadRevisions:', e);
       box.innerHTML = `<div class="py-10 text-center text-red-500 text-sm">${escHtml(e.message || 'Could not load requests')}</div>`;
     }
@@ -7653,8 +7685,8 @@
     box.innerHTML = _revList.map(q => {
       const who = q.resident || {};
       const items = q.items.map(i => `<span class="text-xs px-2 py-1 rounded-lg bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300">${escHtml(i.label)}</span>`).join(' ');
-      const meta = q.status === 'approved' && q.expiresAt ? `<span class="text-xs text-green-600 font-semibold">Edit window ends ${escHtml(reltime(q.expiresAt))}</span>`
-        : q.status === 'submitted' ? `<span class="text-xs text-amber-600 font-semibold">${q.changeCount} change${q.changeCount === 1 ? '' : 's'} to approve${q.submittedAt ? ' · submitted ' + escHtml(reltime(q.submittedAt)) : ''}</span>`
+      const meta = q.status === 'approved' && q.expiresAt ? `<span class="text-xs text-green-600 font-semibold">Edit window ends ${reltime(q.expiresAt)}</span>`
+        : q.status === 'submitted' ? `<span class="text-xs text-amber-600 font-semibold">${q.changeCount} change${q.changeCount === 1 ? '' : 's'} to approve${q.submittedAt ? ' · submitted ' + reltime(q.submittedAt) : ''}</span>`
         : q.status === 'completed' ? `<span class="text-xs text-blue-600 font-semibold">${q.changeCount} change${q.changeCount === 1 ? '' : 's'} made</span>` : '';
       const warn = (q.warnings || []).length ? '<span class="text-xs font-bold text-orange-600"><i class="fa-solid fa-triangle-exclamation mr-1"></i>Needs room review</span>' : '';
       return `<div class="bg-white dark:bg-slate-900 rounded-2xl border border-slate-100 dark:border-slate-800 p-4 sm:p-5">
@@ -7662,7 +7694,7 @@
           <div class="w-10 h-10 rounded-full bg-brand-50 dark:bg-slate-800 text-brand-600 flex items-center justify-center font-bold shrink-0">${escHtml((who.name || '?').charAt(0))}</div>
           <div class="min-w-0 flex-1">
             <p class="font-semibold text-slate-900 dark:text-slate-100">${escHtml(who.name || 'Resident')} <span class="text-xs font-normal text-slate-400">@${escHtml(who.username || '')}${who.room ? ' · Room ' + escHtml(who.room) + (who.bed ? ' / Bed ' + escHtml(who.bed) : '') : ''}</span></p>
-            <p class="text-xs text-slate-400">Requested ${escHtml(reltime(q.createdAt))}</p>
+            <p class="text-xs text-slate-400">Requested ${reltime(q.createdAt)}</p>
           </div>
           <div class="flex items-center gap-2">${warn}${meta}${revChip(q.status)}</div>
         </div>
@@ -7726,7 +7758,7 @@
         <div><h4 class="text-xs font-bold uppercase tracking-wide text-slate-400 mb-2">${pend ? 'Requested changes · untick what you do not allow' : 'Requested changes'}</h4><div class="space-y-2">${items}</div></div>
         ${q.adminNote && !pend ? `<div class="text-sm"><span class="font-bold text-slate-500">${inReview ? 'Your note when you allowed the edit' : 'Admin note'}:</span> ${escHtml(q.adminNote)}</div>` : ''}
         ${q.reviewNote && !inReview ? `<div class="text-sm"><span class="font-bold text-slate-500">Review note:</span> ${escHtml(q.reviewNote)}</div>` : ''}
-        ${q.status === 'approved' ? `<div class="text-sm text-green-700 dark:text-green-400"><i class="fa-solid fa-hourglass-half mr-1"></i>Edit window ends ${escHtml(reltime(q.expiresAt))}</div>` : ''}
+        ${q.status === 'approved' ? `<div class="text-sm text-green-700 dark:text-green-400"><i class="fa-solid fa-hourglass-half mr-1"></i>Edit window ends ${reltime(q.expiresAt)}</div>` : ''}
         ${revChanges(q)}
         ${pend ? `<div class="grid sm:grid-cols-3 gap-3">
             <div><label class="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1" for="rev-days">Edit window</label>
