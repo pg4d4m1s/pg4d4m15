@@ -1350,6 +1350,17 @@ router.put('/api/admin/dormitory/billing/rate', requireAdmin, (req, res) => {
   res.json({ success: true, rate: parsed });
 });
 
+// Billing visibility switch: ON hides bills, payment history and GCash info from every resident's Dormitory widget.
+router.get('/api/admin/dormitory/billing/visibility', requireAdmin, (req, res) => {
+  res.json({ hidden: getSetting('hide_resident_billing', '0') === '1' });
+});
+router.put('/api/admin/dormitory/billing/visibility', requireAdmin, (req, res) => {
+  const hidden = req.body && (req.body.hidden === true || req.body.hidden === 'true' || req.body.hidden === 1);
+  setSetting('hide_resident_billing', hidden ? '1' : '0');
+  log.billing(`👁️ Resident billing ${hidden ? 'HIDDEN from' : 'SHOWN in'} the Dormitory widget — by @${req.user?.username}`);
+  res.json({ success: true, hidden });
+});
+
 // ─── Room tools: save / restore a layout, bulk remove, swap male ⇄ female ───────────────────────
 // Every destructive action saves an automatic snapshot first (see utils/db.js "Room layout tools"), so each one can be
 // undone with /snapshots/:id/restore. Writes are refused while an admin views an Archive DB (utils/archiveView.js).

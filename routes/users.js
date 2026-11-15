@@ -356,31 +356,18 @@ router.post('/api/users/me/submit-verification', requireAuth, ...uploadIdDocs, a
 // MEDICAL CERTIFICATE (required document, submitted AFTER approval)
 // ════════════════════════════════════════════════════
 // GET  /api/users/me/medical-certificate  -> { uploaded, url }
-// POST /api/users/me/medical-certificate  (multipart, field "cert_medical": JPG/PNG/WebP/PDF/DOCX)
-//      Uploading again replaces the previous file (the old Cloudinary asset is left in place -- see notes).
+// POST /api/users/me/medical-certificate  -> 403: uploads now go through the approved correction-request flow
 router.get('/api/users/me/medical-certificate', requireAuth, (req, res) => {
   const url = getUserMedicalCertificate(req.user.id);
   res.json({ uploaded: !!url, url: url || null });
 });
 
-router.post('/api/users/me/medical-certificate', requireAuth,
-  trackUpload('medical-certificate'), ...uploadMedicalCert,
-  (req, res) => {
-    try {
-      const url = req.idDocUrls && req.idDocUrls.cert_medical;
-      if (!url) return res.status(400).json({ error: 'Please choose your Medical Certificate file (JPG, PNG, WebP, PDF or DOCX).', code: 'NO_FILE', field: 'cert_medical' });
-      const hadOne = !!getUserMedicalCertificate(req.user.id);
-      if (!setUserMedicalCertificate(req.user.id, url)) {
-        log.error(`[medical-cert] update touched 0 rows for user ${req.user.id}`);
-        return res.status(500).json({ error: 'Could not save your Medical Certificate. Please try again.' });
-      }
-      log.upload(`Medical certificate ${hadOne ? 'REPLACED' : 'submitted'} by @${req.user.username}`);
-      res.json({ success: true, uploaded: true, url, replaced: hadOne });
-    } catch (err) {
-      log.error(`[medical-cert] save failed for @${req.user && req.user.username}: ${err.stack || err.message}`);
-      res.status(500).json({ error: 'Could not save your Medical Certificate. Please try again.' });
-    }
-  });
+// Direct upload is closed: a new / replacement Medical Certificate is a draft that the admin must approve
+// (My Application -> Request a correction -> Medical Certificate; see utils/residentRevisions.js). Kept so old cached pages get a clear message.
+router.post('/api/users/me/medical-certificate', requireAuth, (req, res) => {
+  log.warn(`[medical-cert] direct upload refused for @${req.user.username} (needs the correction-request flow)`);
+  res.status(403).json({ error: 'Medical Certificate uploads need admin approval. Open My Application, tap "Request a correction" and choose Medical Certificate.', code: 'USE_CORRECTION_REQUEST' });
+});
 
 /** Loads the user's row + latest ID-verification row and streams their Application Form PDF. */
 async function sendOwnApplicationForm(req, res, userId, via) {
@@ -514,6 +501,11 @@ router.get('/api/users/me/dormitory', requireAuth, (req, res) => {
   }
 
   // ── 2. Billing history (degrade gracefully) ───────────────────────────
+  // Admin switch (Billing page): when on, the resident's widget shows no bills, payment history or GCash info.
+  let billingHidden = false;
+  try { billingHidden = require('../utils/db').getSetting('hide_resident_billing', '0') === '1'; }
+  catch (err) { log.error(`[dorm] hide_resident_billing lookup failed: ${err.message}`); }
+
   let billing = [];
   try {
     billing = db.prepare(
@@ -526,6 +518,7 @@ router.get('/api/users/me/dormitory', requireAuth, (req, res) => {
     warnings.push('billing');
   }
 
+  if (billingHidden) billing = [];
   const hasBills    = billing.length > 0;
   const unpaidCount = billing.filter(b => b.status === 'unpaid' || b.status === 'overdue').length;
 
@@ -533,8 +526,8 @@ router.get('/api/users/me/dormitory', requireAuth, (req, res) => {
   let gcashQr = '', gcashNumber = '';
   try {
     const { getSetting } = require('../utils/db');
-    gcashQr     = getSetting('gcash_qr_url', '') || '';
-    gcashNumber = getSetting('gcash_number', '') || '';
+    gcashQr     = billingHidden ? '' : (getSetting('gcash_qr_url', '') || '');
+    gcashNumber = billingHidden ? '' : (getSetting('gcash_number', '') || '');
   } catch (err) {
     log.error(`[dorm] GCash settings lookup failed: ${err.message}`);
     warnings.push('payment-info');
@@ -548,7 +541,7 @@ router.get('/api/users/me/dormitory', requireAuth, (req, res) => {
     // Not an error — the resident simply has no bed yet. Logged so an
     // "admin says it's assigned but the widget says no" report is checkable.
     log.dorm(`/me/dormitory — user ${userId} has NO bed_assignments row`);
-    return res.json({ assigned: false, billing, hasBills, unpaidCount, gcashQr, gcashNumber, warnings });
+    return res.json({ assigned: false, billing, hasBills, unpaidCount, gcashQr, gcashNumber, billingHidden, warnings });
   }
 
   log.dorm(`/me/dormitory — user ${userId} → room ${assignment.room_number} bed ${assignment.bed_number} (${billing.length} bill(s), ${unpaidCount} unpaid)`);
@@ -565,6 +558,7 @@ router.get('/api/users/me/dormitory', requireAuth, (req, res) => {
     unpaidCount,
     gcashQr,
     gcashNumber,
+    billingHidden,
     warnings,
   });
 });

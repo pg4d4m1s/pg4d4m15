@@ -496,6 +496,7 @@
         return;
       }
       // Has assignment — check actual billing status
+      const billingHidden = !!d.billingHidden;          // admin switch (Billing page): hide bills, payment history and GCash info
       const billing   = d.billing || [];
       const hasBills  = d.hasBills || billing.length > 0;
       const unpaidCount = d.unpaidCount ?? billing.filter(b => b.status === 'unpaid' || b.status === 'overdue').length;
@@ -638,13 +639,13 @@
           </p>
 
           <!-- ── Billing status banner ── -->
-          ${billBanner}
+          ${billingHidden ? '' : billBanner}
 
           <!-- ── GCash payment info (admin-configured) ── -->
-          ${gcashBlock}
+          ${billingHidden ? '' : gcashBlock}
 
           <!-- ── Payment history ── -->
-          ${billing.length > 0 ? `
+          ${billingHidden ? '' : billing.length > 0 ? `
           <div>
             <p class="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-2 flex items-center gap-1.5">
               <i class="fa-solid fa-receipt"></i> Payment History

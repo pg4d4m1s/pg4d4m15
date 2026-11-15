@@ -877,6 +877,18 @@
         <p class="text-xs text-slate-400 mt-1">Per student/month · click to edit</p>
       </div>
     </div>
+    <!-- Resident billing visibility switch: ON hides bills / payment history / GCash info in every resident's Dormitory widget -->
+    <div class="flex items-center gap-3 mb-4 rounded-2xl border border-slate-100 dark:border-slate-800 bg-white dark:bg-slate-900 px-4 py-3">
+      <div class="min-w-0 flex-1">
+        <p class="text-sm font-semibold text-slate-700 dark:text-slate-200">Hide billing from residents</p>
+        <p id="billing-hide-help" class="text-xs text-slate-400">Off: residents see their bills, payment history and GCash info in the Dormitory widget.</p>
+      </div>
+      <button type="button" id="billing-hide-switch" role="switch" aria-checked="false" aria-label="Hide billing from residents" onclick="toggleBillingHidden()"
+        class="relative shrink-0 w-14 h-11 flex items-center justify-center rounded-full focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-400">
+        <span id="billing-hide-track" class="block w-12 h-7 rounded-full bg-slate-300 dark:bg-slate-600 transition-colors"></span>
+        <span id="billing-hide-knob" class="absolute left-1.5 top-1/2 -translate-y-1/2 w-5 h-5 rounded-full bg-white shadow transition-transform"></span>
+      </button>
+    </div>
     <!-- Month selector + sort controls -->
     <div class="flex flex-wrap items-center gap-3 mb-4">
       <label class="text-sm font-semibold text-slate-600 dark:text-slate-300">Month:</label>
@@ -7301,6 +7313,8 @@
     document.getElementById('billing-paid').textContent    = '₱' + paidAmt.toLocaleString();
     document.getElementById('billing-unpaid').textContent  = '₱' + unpaidAmt.toLocaleString();
 
+    loadBillingHidden();
+
     // Load current rate from API (update rate card)
     try {
       const rr = await fetch('/api/admin/dormitory/billing/rate');
@@ -7317,6 +7331,36 @@
     // Store raw data and apply current sort
     _billingData = bills;
     applyBillingSort();
+  }
+
+  // ── Resident billing visibility switch ───────────────────────────────
+  function paintBillingHidden(hidden) {
+    const sw = document.getElementById('billing-hide-switch'); if (!sw) return;
+    sw.setAttribute('aria-checked', hidden ? 'true' : 'false');
+    document.getElementById('billing-hide-track').className = 'block w-12 h-7 rounded-full transition-colors ' + (hidden ? 'bg-green-500' : 'bg-slate-300 dark:bg-slate-600');
+    document.getElementById('billing-hide-knob').style.transform = 'translateY(-50%) translateX(' + (hidden ? '20px' : '0') + ')';
+    document.getElementById('billing-hide-help').textContent = hidden
+      ? 'On: bills, payment history and GCash info are hidden from every resident\u2019s Dormitory widget.'
+      : 'Off: residents see their bills, payment history and GCash info in the Dormitory widget.';
+  }
+  async function loadBillingHidden() {
+    try {
+      const r = await fetch('/api/admin/dormitory/billing/visibility');
+      if (r.ok) paintBillingHidden(!!(await r.json()).hidden);
+    } catch (e) { console.warn('[Billing] visibility load failed:', e.message); }
+  }
+  async function toggleBillingHidden() {
+    const sw = document.getElementById('billing-hide-switch'); if (!sw || sw.disabled) return;
+    const next = sw.getAttribute('aria-checked') !== 'true';
+    sw.disabled = true; paintBillingHidden(next);                 // optimistic; rolled back below if the save fails
+    try {
+      const r = await fetch('/api/admin/dormitory/billing/visibility', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ hidden: next }) });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      toast(next ? 'Billing is now hidden from residents.' : 'Billing is now visible to residents.', 'success');
+    } catch (e) {
+      paintBillingHidden(!next);
+      toast('Could not save the switch. Check your connection and try again.', 'error');
+    } finally { sw.disabled = false; }
   }
 
   async function generateMonthlyBills() {
@@ -7736,7 +7780,7 @@
     const sec = (_revDetail.summary?.sections || []).find(s => s.key === key); if (!sec) return '';
     const rows = r => r.map(x => `<div class="${x.wide ? 'sm:col-span-2' : ''}"><span class="text-slate-400">${escHtml(x.label)}:</span> <span class="text-slate-700 dark:text-slate-200">${escHtml(x.value)}</span></div>`).join('');
     const body = sec.groups ? sec.groups.map(g => `<p class="font-bold text-slate-500 mt-2">${escHtml(g.title)}</p><div class="grid sm:grid-cols-2 gap-x-4 gap-y-1">${rows(g.rows)}</div>`).join('') + `<div class="mt-2">${rows(sec.rows)}</div>` : `<div class="grid sm:grid-cols-2 gap-x-4 gap-y-1">${rows(sec.rows)}</div>`;
-    return `<details class="mt-2"><summary class="text-xs font-semibold text-slate-500 cursor-pointer min-h-[32px] flex items-center">Current information</summary><div class="text-xs mt-1 p-3 rounded-xl bg-slate-50 dark:bg-slate-800/60">${body}</div></details>`;
+    return `<details class="mt-2" open><summary class="text-xs font-semibold text-slate-500 cursor-pointer min-h-[32px] flex items-center">Current information</summary><div class="text-xs mt-1 p-3 rounded-xl bg-slate-50 dark:bg-slate-800/60">${body}</div></details>`;
   }
 
   function revChanges(q) {

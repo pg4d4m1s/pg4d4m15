@@ -98,7 +98,7 @@ router.get('/api/users/me/application-summary', requireAuth, (req, res) => {
       canRequest: el.ok && !open, blockedReason,
       // the MOST RECENT request is shown as a banner while it is still news (declined / revoked / expired in the last 14 days)
       lastDecision: (!open && hist[0] && (['rejected', 'cancelled', 'expired'].includes(hist[0].status) || (hist[0].status === 'completed' && hist[0].reviewedAt)) && hist[0].updatedAt && Date.now() - new Date(hist[0].updatedAt).getTime() < 14 * 864e5) ? hist[0] : null,
-      requestable: rr.REQUESTABLE.map((k) => ({ key: k, label: REVISION_ITEMS[k].label, group: REVISION_ITEMS[k].group })),
+      requestable: rr.REQUESTABLE.map((k) => ({ key: k, label: rr.ITEMS[k].label, group: rr.ITEMS[k].group })),
       options: { civilStatus: rr.CIVIL_STATUSES, yearLevels: rr.YEAR_LEVELS, income: rr.INCOME_OPTIONS, sexes: rr.SEXES },
       limits: { reasonMin: rr.REASON_MIN, reasonMax: rr.REASON_MAX, noteMax: rr.NOTE_MAX },
     });

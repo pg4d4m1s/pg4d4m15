@@ -392,6 +392,7 @@ module.exports = {
     { name: 'cert_low_income', maxCount: 1 },
     { name: 'cert_enrollment', maxCount: 1 },
     { name: 'cert_grades',     maxCount: 1 },
+    { name: 'cert_medical',    maxCount: 1 },
   ]), processIdDocument],
   // Low-level helpers exposed to route files for custom upload flows
   multerUpload,

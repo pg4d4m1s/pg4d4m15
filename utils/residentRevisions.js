@@ -33,19 +33,28 @@ const vm   = require('vm');
 
 const { liveDb: db, genId } = require('./db');
 const log = require('./logger');
-const { REVISION_ITEMS } = require('./applicationRevision');
+const { REVISION_ITEMS: BASE_ITEMS } = require('./applicationRevision');
+
+// The Medical Certificate belongs to residents only (it is not part of registration), so it is added HERE and not to the shared
+// REVISION_ITEMS list that drives the applicant "return for correction" checklist. It lives on users.cert_medical_url,
+// not on id_verification_requests like the other five documents.
+const ITEMS = Object.freeze({
+  ...BASE_ITEMS,
+  doc_medical: { label: 'Medical Certificate', group: 'doc', field: 'cert_medical', urlCol: 'cert_medical_url' },
+});
+const USER_DOC_COLUMNS = new Set(['cert_medical_url']);   // document columns stored on the users row
 
 // ── What a resident may ask to change ───────────────────────────────────────────────────────────
 // Re-uses the labels of the "return application for correction" checklist (REVISION_ITEMS) so admins see the
 // same wording everywhere. The selfie is NOT here: a resident can already change their profile photo freely.
 const REQUESTABLE = Object.freeze([
   'info_personal', 'info_address', 'info_school', 'info_family',
-  'doc_school_id', 'doc_residency', 'doc_low_income', 'doc_enrollment', 'doc_grades',
+  'doc_school_id', 'doc_residency', 'doc_low_income', 'doc_enrollment', 'doc_grades', 'doc_medical',
 ]);
-const DOC_ITEMS  = REQUESTABLE.filter((k) => REVISION_ITEMS[k].group === 'doc');
-const INFO_ITEMS = REQUESTABLE.filter((k) => REVISION_ITEMS[k].group === 'info');
+const DOC_ITEMS  = REQUESTABLE.filter((k) => ITEMS[k].group === 'doc');
+const INFO_ITEMS = REQUESTABLE.filter((k) => ITEMS[k].group === 'info');
 // multipart field name -> item key  (id_front -> doc_school_id ...)
-const FIELD_TO_ITEM = Object.freeze(Object.fromEntries(DOC_ITEMS.map((k) => [REVISION_ITEMS[k].field, k])));
+const FIELD_TO_ITEM = Object.freeze(Object.fromEntries(DOC_ITEMS.map((k) => [ITEMS[k].field, k])));
 
 const ALLOWED_WINDOWS     = Object.freeze([1, 3, 7, 14]);   // days an approved request stays editable
 const DEFAULT_WINDOW_DAYS = 7;
@@ -71,7 +80,7 @@ const INCOME_OPTIONS = Object.freeze([
 const INFO_COLUMNS = new Set(['first_name', 'middle_name', 'last_name', 'suffix', 'birthday', 'sex', 'civil_status', 'phone',
   'permanent_address', 'present_address', 'location', 'school_name', 'school_address', 'year_level', 'course', 'specialization',
   'father_info', 'mother_info', 'guardian_info', 'monthly_income']);
-const DOC_COLUMNS  = new Set(DOC_ITEMS.map((k) => REVISION_ITEMS[k].urlCol));
+const DOC_COLUMNS  = new Set(DOC_ITEMS.map((k) => ITEMS[k].urlCol));
 
 // ── Schema ──────────────────────────────────────────────────────────────────────────────────────
 function ensureSchema() {
@@ -160,7 +169,7 @@ function sanitizeItems(input) {
   }
   return out;
 }
-const decorate = (items) => items.map((i) => ({ key: i.key, note: i.note || '', label: REVISION_ITEMS[i.key].label, group: REVISION_ITEMS[i.key].group }));
+const decorate = (items) => items.map((i) => ({ key: i.key, note: i.note || '', label: ITEMS[i.key].label, group: ITEMS[i.key].group }));
 
 function shape(row) {
   if (!row) return null;
@@ -170,7 +179,7 @@ function shape(row) {
   return {
     id: row.id, userId: row.user_id, status: row.status,
     items: decorate(items), approvedItems: approved, doneItems: done,
-    approvedLabels: approved.map((k) => REVISION_ITEMS[k].label),
+    approvedLabels: approved.map((k) => ITEMS[k].label),
     reason: row.reason || '', adminNote: row.admin_note || '',
     decidedAt: toIso(row.decided_at), expiresAt: toIso(row.expires_at), completedAt: toIso(row.completed_at),
     submittedAt: toIso(row.submitted_at), reviewedAt: toIso(row.reviewed_at), reviewNote: row.review_note || '',
@@ -488,14 +497,14 @@ function saveDocumentDrafts(userId, request, urls) {
   const notAllowed = incoming.filter(([field]) => !request.approvedItems.includes(FIELD_TO_ITEM[field]));
   if (notAllowed.length) {
     log.warn(`[revision] ${request.id}: ${userId} uploaded documents that were not approved: ${notAllowed.map(([f]) => f).join(', ')}`);
-    return fail(403, 'NOT_APPROVED', `The admin did not approve changes to: ${notAllowed.map(([f]) => REVISION_ITEMS[FIELD_TO_ITEM[f]].label).join(', ')}.`);
+    return fail(403, 'NOT_APPROVED', `The admin did not approve changes to: ${notAllowed.map(([f]) => ITEMS[FIELD_TO_ITEM[f]].label).join(', ')}.`);
   }
   const replaced = [];
   db.transaction(() => {
     const up = db.prepare(`INSERT INTO revision_drafts (id, request_id, user_id, item_key, field, new_value) VALUES (?,?,?,?,?,?)
                            ON CONFLICT(request_id, field) DO UPDATE SET new_value = excluded.new_value, updated_at = datetime('now')`);
     for (const [field, url] of incoming) {
-      const key = FIELD_TO_ITEM[field], col = REVISION_ITEMS[key].urlCol;       // our constant, not the browser's
+      const key = FIELD_TO_ITEM[field], col = ITEMS[key].urlCol;       // our constant, not the browser's
       up.run(genId(), request.id, userId, key, col, url);                        // a replaced draft file stays in storage, only the pointer changes
       replaced.push(key);
     }
@@ -511,7 +520,7 @@ function draftChanges(requestId, userId) {
   const docs = latestDocsRow(userId) || {};
   return listDrafts(requestId).map((d) => {
     const isDoc = DOC_COLUMNS.has(d.field);
-    const old = isDoc ? docs[d.field] : u[d.field];
+    const old = isDoc && !USER_DOC_COLUMNS.has(d.field) ? docs[d.field] : u[d.field];
     return { itemKey: d.item_key, field: d.field, isDocument: isDoc, oldValue: old == null ? '' : String(old), newValue: d.new_value || '' };
   });
 }
@@ -553,7 +562,8 @@ function buildSummary(userId, opts = {}) {
   const staged = new Set();
   if (opts.draftsOf) {
     for (const d of listDrafts(opts.draftsOf)) {
-      if (DOC_COLUMNS.has(d.field)) docs[d.field] = d.new_value;
+      if (USER_DOC_COLUMNS.has(d.field)) u[d.field] = d.new_value;
+      else if (DOC_COLUMNS.has(d.field)) docs[d.field] = d.new_value;
       else if (INFO_COLUMNS.has(d.field)) u[d.field] = d.new_value;
       else continue;
       staged.add(d.item_key);
@@ -593,8 +603,10 @@ function buildSummary(userId, opts = {}) {
 
   const docRow = (key, label, url, extra = {}) => ({ key, label, url: url || '', kind: docKind(url), onFile: !!url, staged: staged.has(key), ...extra });
   const documents = [
-    ...DOC_ITEMS.map((k) => docRow(k, REVISION_ITEMS[k].label, docs[REVISION_ITEMS[k].urlCol])),
-    docRow('doc_medical', 'Medical Certificate', u.cert_medical_url),
+    ...DOC_ITEMS.map((k) => {
+      const col = ITEMS[k].urlCol, url = USER_DOC_COLUMNS.has(col) ? u[col] : docs[col];
+      return docRow(k, ITEMS[k].label, url, k === 'doc_medical' && !url ? { note: 'Not on file yet. Tap "Request a correction" and choose Medical Certificate to upload it. The admin approves it first.' } : {});
+    }),
   ];
 
   const tenOfPhone = tenDigits(u.phone);
@@ -663,7 +675,7 @@ function detailForAdmin(id) {
   expireStale();
   const row = db.prepare(`${ADMIN_SELECT} WHERE r.id = ?`).get(id);
   if (!row) return null;
-  const labelOf = (k) => (REVISION_ITEMS[k] ? REVISION_ITEMS[k].label : k);
+  const labelOf = (k) => (ITEMS[k] ? ITEMS[k].label : k);
   // submitted -> the PROPOSED changes (drafts vs. the real record, nothing applied yet); otherwise the log of what was applied
   const changes = row.status === 'submitted'
     ? draftChanges(id, row.user_id).map((c) => ({ ...c, label: labelOf(c.itemKey), at: null }))
@@ -691,8 +703,8 @@ function applyChanges({ id, adminId, note }) {
   const drafts = listDrafts(id);
   const live = db.prepare('SELECT * FROM users WHERE id = ?').get(userId);
   if (!live) return fail(404, 'NO_USER', 'The resident account no longer exists.');
-  const infoDrafts = drafts.filter((d) => INFO_COLUMNS.has(d.field));
-  const docDrafts  = drafts.filter((d) => DOC_COLUMNS.has(d.field));
+  const infoDrafts = drafts.filter((d) => INFO_COLUMNS.has(d.field) || USER_DOC_COLUMNS.has(d.field));   // plain users columns (the medical certificate URL included)
+  const docDrafts  = drafts.filter((d) => DOC_COLUMNS.has(d.field) && !USER_DOC_COLUMNS.has(d.field));
 
   const ph = infoDrafts.find((d) => d.field === 'phone');                     // someone else may have taken the number since the draft was saved
   if (ph && ph.new_value !== live.phone && db.prepare('SELECT id FROM users WHERE phone = ? AND id <> ?').get(ph.new_value, userId))
@@ -757,7 +769,7 @@ function returnChanges({ id, adminId, note, days }) {
 
 module.exports = {
   // constants (used by routes + UI)
-  REQUESTABLE, INFO_ITEMS, DOC_ITEMS, FIELD_TO_ITEM, ALLOWED_WINDOWS, DEFAULT_WINDOW_DAYS, MAX_REQUESTS_30D,
+  ITEMS, REQUESTABLE, INFO_ITEMS, DOC_ITEMS, FIELD_TO_ITEM, ALLOWED_WINDOWS, DEFAULT_WINDOW_DAYS, MAX_REQUESTS_30D,
   REASON_MIN, REASON_MAX, NOTE_MAX, ADMIN_NOTE_MIN, CIVIL_STATUSES, SEXES, YEAR_LEVELS, INCOME_OPTIONS,
   // pure helpers (unit-testable)
   sanitizeItems, buildInfoUpdate, tenDigits, cleanText,
