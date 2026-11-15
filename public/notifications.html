@@ -195,6 +195,8 @@
     if(t==='post_approved')  return {cls:'ti-follow',  icon:'fa-circle-check'};
     if(t==='post_rejected')  return {cls:'ti-like',    icon:'fa-circle-xmark'};
     if(t==='profile_view')   return {cls:'ti-follow',  icon:'fa-eye'};
+    if(t==='revision_approved') return {cls:'ti-follow', icon:'fa-pen-to-square'};
+    if(t==='revision_rejected') return {cls:'ti-like',   icon:'fa-circle-xmark'};
     return {cls:'ti-comment', icon:'fa-bell'};
   }
   function notifMsg(n){
@@ -215,11 +217,13 @@
     if(n.type==='friend_accept')  return `<strong>${name}</strong> accepted your friend request`;
     if(n.type==='post_approved')  return n.message || 'Your post was approved ✅';
     if(n.type==='post_rejected')  return n.message || 'Your post was removed';
+    if(n.type==='revision_approved'||n.type==='revision_rejected') return escHtml(n.message||'Update on your correction request');
     if(n.type==='profile_view')   return `<strong>${name}</strong> viewed your profile`;
     return n.message||'New notification';
   }
   function notifLink(n){
     if(n.type==='follow'||n.type==='profile_view') return `/profile.html?u=${n.username||''}`;
+    if(n.type==='revision_approved'||n.type==='revision_rejected') return '/feed.html?panel=dorm';   // opens My Dormitory, where My Application lives
     return n.target_id?`/feed.html#post-${n.target_id}`:'/feed.html';
   }
 

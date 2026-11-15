@@ -874,6 +874,44 @@ async function sendAccountApprovedEmail(toEmail, firstName) {
   }
 }
 
+/**
+ * Decision on a resident's correction request (routes/revisions.js).
+ * args: { approved:boolean, items:[label], note:string, expiresAt:ISO string (approved only) }
+ */
+async function sendRevisionDecisionEmail(toEmail, firstName, { approved, items = [], note = '', expiresAt = null } = {}) {
+  const appName = APP_NAME();
+  const appUrl  = APP_URL();
+  const list = items.map((l) => `<li style="margin:4px 0;">${_escMail(l)}</li>`).join('');
+  const until = expiresAt ? new Date(expiresAt).toLocaleDateString('en-PH', { month: 'long', day: 'numeric', year: 'numeric', timeZone: 'Asia/Manila' }) : '';
+  const noteHtml = note
+    ? `<p style="color:#475569;font-size:14px;line-height:1.7;margin:0 0 16px;padding:12px 14px;background:#f8fafc;border-left:3px solid ${approved ? '#16a34a' : '#dc2626'};border-radius:6px;"><strong>Admin note:</strong> ${_escMail(note)}</p>`
+    : '';
+  const body = approved
+    ? emailWrapper('linear-gradient(135deg,#14532d,#16a34a)', '&#9999;&#65039;', 'Correction Approved', appName,
+        greeting(firstName) +
+        `<p style="color:#475569;font-size:15px;line-height:1.7;margin:0 0 12px;">The dormitory admin approved your request. You can now update:</p>
+         <ul style="color:#334155;font-size:15px;line-height:1.6;margin:0 0 16px;padding-left:20px;">${list}</ul>` +
+        `<p style="color:#475569;font-size:14px;line-height:1.7;margin:0 0 16px;">Open <strong>My Dormitory &rarr; My Application</strong> and tap <em>Edit</em>${until ? ` before <strong>${until}</strong>` : ''}. Only the items above can be changed.</p>` +
+        noteHtml + btn(appUrl + '/feed.html?panel=dorm', 'Open My Application', '#16a34a'))
+    : emailWrapper('linear-gradient(135deg,#7f1d1d,#dc2626)', '&#9888;&#65039;', 'Correction Not Approved', appName,
+        greeting(firstName) +
+        `<p style="color:#475569;font-size:15px;line-height:1.7;margin:0 0 12px;">The dormitory admin could not approve your correction request for:</p>
+         <ul style="color:#334155;font-size:15px;line-height:1.6;margin:0 0 16px;padding-left:20px;">${list}</ul>` +
+        noteHtml +
+        `<p style="color:#475569;font-size:14px;line-height:1.7;margin:0 0 16px;">If something is still wrong, you can contact the dormitory office or send a new request.</p>`);
+  const text = approved
+    ? `Correction approved — ${appName}\n\nHi ${firstName},\n\nYou can now update: ${items.join(', ')}${until ? ` (until ${until})` : ''}.\n${note ? 'Admin note: ' + note + '\n' : ''}Open ${appUrl}/feed.html?panel=dorm`
+    : `Correction not approved — ${appName}\n\nHi ${firstName},\n\nYour request for ${items.join(', ')} was not approved.\n${note ? 'Admin note: ' + note : ''}`;
+  try {
+    const result = await _send({ to: toEmail, subject: `[${appName}] Your correction request was ${approved ? 'approved' : 'not approved'}`, html: body, text, kind: 'revision' });
+    if (result.driver !== 'console') console.log(`  ✅ Revision decision email sent [${result.driver}] → ${toEmail}`);
+    return result;
+  } catch (err) {
+    console.error(`❌ [emailService] sendRevisionDecisionEmail → ${toEmail} | driver=${DRIVER} | ${err.message}`);
+    return { success: false };
+  }
+}
+
 // Minimal HTML escaping for admin-typed text that is placed inside an e-mail (reason, checklist notes).
 function _escMail(v) {
   return String(v == null ? '' : v).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -1115,6 +1153,7 @@ module.exports = {
   sendAccountPendingEmail,
   sendAccountApprovedEmail,
   sendAccountRejectedEmail,
+  sendRevisionDecisionEmail,
   sendContactEmail,
   sendDormReminderEmail,
   sendBedAssignedEmail,

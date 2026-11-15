@@ -384,6 +384,15 @@ module.exports = {
   ]), processIdDocument],
   // Medical Certificate: ONE file from an approved resident (not part of registration). Same validation/PDF/DOCX pipeline.
   uploadMedicalCert: [multerUpload.single('cert_medical'), processIdDocument],
+  // Approved correction request (routes/revisions.js): the five supporting documents a resident may REPLACE.
+  // Same validation / PDF / DOCX->PDF / resize pipeline as registration; the route decides which of them are allowed.
+  uploadRevisionDocs: [multerUpload.fields([
+    { name: 'id_front',        maxCount: 1 },
+    { name: 'cert_residency',  maxCount: 1 },
+    { name: 'cert_low_income', maxCount: 1 },
+    { name: 'cert_enrollment', maxCount: 1 },
+    { name: 'cert_grades',     maxCount: 1 },
+  ]), processIdDocument],
   // Low-level helpers exposed to route files for custom upload flows
   multerUpload,
   toCloudinary,

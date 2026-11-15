@@ -94,6 +94,7 @@
     <div class="nav-item" id="nav-users" onclick="showTab('users')"><i class="fa-solid fa-users w-4"></i>Residents</div>
     <div class="nav-item" id="nav-billing" onclick="showTab('billing')"><i class="fa-solid fa-peso-sign w-4"></i>Billing</div>
     <div class="nav-item" id="nav-maintenance" onclick="showTab('maintenance')"><i class="fa-solid fa-screwdriver-wrench w-4"></i>Maintenance <span id="maint-badge" class="ml-auto text-xs bg-orange-500 text-white rounded-full px-1.5 py-0.5 hidden">0</span></div>
+    <div class="nav-item" id="nav-revisions" onclick="showTab('revisions')"><i class="fa-solid fa-pen-to-square w-4"></i>Revision Requests <span id="rev-badge" class="ml-auto text-xs bg-violet-500 text-white rounded-full px-1.5 py-0.5 hidden">0</span></div>
     <div class="nav-item" id="nav-incidents" onclick="showTab('incidents')"><i class="fa-solid fa-triangle-exclamation w-4"></i>Incident Reports <span id="incident-badge" class="ml-auto text-xs bg-red-500 text-white rounded-full px-1.5 py-0.5 hidden">0</span></div>
     <div class="nav-item" id="nav-utility" onclick="showTab('utility')"><i class="fa-solid fa-bolt w-4"></i>Utility Bills</div>
 
@@ -1146,6 +1147,35 @@
   </div>
 
   <!-- ═══ MAINTENANCE REQUESTS ═══ -->
+  <!-- ═══ Revision Requests: approved residents asking to correct their own application ═══ -->
+  <div id="tab-revisions" class="tab-content">
+    <div class="flex items-center justify-between mb-6 flex-wrap gap-3">
+      <div>
+        <h1 class="font-display font-bold text-2xl text-slate-900 dark:text-slate-100">Revision Requests</h1>
+        <p class="text-sm text-slate-400 mt-0.5">Residents asking to correct their application. They can edit only what you approve, for a limited time.</p>
+      </div>
+      <div class="flex gap-2 flex-wrap">
+        <select id="rev-filter-status" onchange="loadRevisions()" class="rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-3 py-2 text-sm outline-none focus:border-brand-400">
+          <option value="pending">Waiting for review</option>
+          <option value="approved">Editing now</option>
+          <option value="completed">Completed</option>
+          <option value="rejected">Declined</option>
+          <option value="cancelled">Withdrawn / revoked</option>
+          <option value="expired">Expired</option>
+          <option value="all">All</option>
+        </select>
+        <button onclick="loadRevisionStats();loadRevisions()" class="flex items-center gap-2 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 text-sm font-medium px-4 py-2 rounded-xl hover:bg-slate-50 transition-colors"><i class="fa-solid fa-rotate text-xs"></i>Refresh</button>
+      </div>
+    </div>
+    <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+      <div class="bg-white dark:bg-slate-900 rounded-2xl border border-slate-100 dark:border-slate-800 p-4 text-center"><p class="text-xs font-bold text-slate-400 uppercase tracking-wider mb-1">Waiting</p><p id="rev-stat-pending" class="text-3xl font-extrabold text-violet-500">–</p></div>
+      <div class="bg-white dark:bg-slate-900 rounded-2xl border border-slate-100 dark:border-slate-800 p-4 text-center"><p class="text-xs font-bold text-slate-400 uppercase tracking-wider mb-1">Editing now</p><p id="rev-stat-approved" class="text-3xl font-extrabold text-green-500">–</p></div>
+      <div class="bg-white dark:bg-slate-900 rounded-2xl border border-slate-100 dark:border-slate-800 p-4 text-center"><p class="text-xs font-bold text-slate-400 uppercase tracking-wider mb-1">Completed</p><p id="rev-stat-completed" class="text-3xl font-extrabold text-blue-500">–</p></div>
+      <div class="bg-white dark:bg-slate-900 rounded-2xl border border-slate-100 dark:border-slate-800 p-4 text-center"><p class="text-xs font-bold text-slate-400 uppercase tracking-wider mb-1">Declined</p><p id="rev-stat-rejected" class="text-3xl font-extrabold text-red-500">–</p></div>
+    </div>
+    <div id="rev-list" class="space-y-3"></div>
+  </div>
+
   <div id="tab-maintenance" class="tab-content">
     <div class="flex items-center justify-between mb-6 flex-wrap gap-3">
       <div>
@@ -1373,6 +1403,18 @@
   </div>
 
   <!-- Update Maintenance Status Modal -->
+  <!-- Revision request review (approve / decline / revoke / change log) -->
+  <div id="rev-modal" class="hidden fixed inset-0 z-[200] flex items-end sm:items-center justify-center sm:p-4 bg-black/60 backdrop-blur-sm" onclick="if(event.target===this)closeRevisionModal()">
+    <div class="bg-white dark:bg-slate-900 rounded-t-2xl sm:rounded-2xl shadow-2xl w-full max-w-2xl max-h-[92dvh] flex flex-col">
+      <div class="flex items-center justify-between px-6 pt-5 pb-3 border-b border-slate-100 dark:border-slate-800">
+        <h3 id="rev-modal-title" class="font-display font-bold text-xl text-slate-900 dark:text-slate-100">Revision request</h3>
+        <button onclick="closeRevisionModal()" aria-label="Close" class="w-10 h-10 rounded-full text-slate-400 hover:text-slate-600 hover:bg-slate-100 dark:hover:bg-slate-800"><i class="fa-solid fa-xmark"></i></button>
+      </div>
+      <div id="rev-modal-body" class="px-6 py-4 overflow-y-auto flex-1 space-y-4"></div>
+      <div id="rev-modal-foot" class="px-6 py-4 border-t border-slate-100 dark:border-slate-800 flex gap-3 flex-wrap justify-end"></div>
+    </div>
+  </div>
+
   <div id="maint-update-modal" class="hidden fixed inset-0 z-[200] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
     <div class="bg-white dark:bg-slate-900 rounded-2xl shadow-2xl w-full max-w-md p-6">
       <div class="flex items-center justify-between mb-5">
@@ -2113,6 +2155,7 @@
     else if(tab==='dormitory')loadDormRooms();
     else if(tab==='billing'){ initBillingMonth(); loadBilling(); loadGcashSettings(); }
     else if(tab==='maintenance'){ loadMaintenanceStats(); loadMaintenance(); }
+    else if(tab==='revisions'){ loadRevisionStats(); loadRevisions(); }
     else if(tab==='incidents'){ loadIncidentStats(); loadIncidents(); }
     else if(tab==='utility'){ initUtilityMonth(); loadUtility(); loadUtilityChart(); }
     else if(tab==='backup'){ /* static page, no load needed */ }
@@ -2456,6 +2499,13 @@
     socket.on('account-rejected',()=>{ loadPendingAccounts(); updateRegBadge(-1); });
     // AI badge finished -> patch the badges (and rotated thumbnails) in place; does not disturb a half-typed comment
     socket.on('document-checks-ready',()=>{ if(document.getElementById('tab-registrations')?.classList.contains('active')) refreshDocCheckFooters(); });
+    // Revision requests: a resident sent / withdrew a request, an admin decided one, or a resident finished editing
+    socket.on('revision-request',()=>{ loadRevisionStats(); if(document.getElementById('tab-revisions')?.classList.contains('active')) loadRevisions(); });
+    socket.on('revision-completed',(data)=>{
+      loadRevisionStats();
+      toast(`✏️ @${data?.username||'A resident'} finished their corrections (${data?.changeCount||0} change${data?.changeCount===1?'':'s'}) — review in Revision Requests`, 'info');
+      if(document.getElementById('tab-revisions')?.classList.contains('active')) loadRevisions();
+    });
     socket.on('new-incident',(data)=>{
       loadIncidentStats();
       toast(`⚠️ New incident report: ${data.title||'Untitled'}`, 'error');
@@ -2886,6 +2936,7 @@
 
   async function refreshAll(){
     loadAiStatus();
+    loadRevisionStats();    // sync rev-badge on every refresh
     loadMaintenanceStats(); // sync maint-badge on every refresh — not just the 60s poll
     loadIncidentStats();    // sync incident-badge on every refresh — not just the 60s poll
     try{
@@ -7551,6 +7602,176 @@
     general:    { icon: 'fa-screwdriver-wrench', bg: 'bg-slate-100 dark:bg-slate-800',       fg: 'text-slate-500'   },
   };
   function maintCategoryMeta(category) { return MAINT_CATEGORY_META[category] || MAINT_CATEGORY_META.general; }
+
+  // ═══ Revision Requests ═══════════════════════════════════════════════════════════════════════════
+  // Resident asks -> admin approves (some / all items, 1-14 day window) or declines -> resident edits ONLY the approved
+  // items -> admin reviews the change log. Server rules: utils/residentRevisions.js, routes/revisions.js.
+  const REV_STATUS = {
+    pending:   { t: 'Waiting for review', c: 'bg-violet-100 text-violet-700' },
+    approved:  { t: 'Editing now',        c: 'bg-green-100 text-green-700' },
+    completed: { t: 'Completed',          c: 'bg-blue-100 text-blue-700' },
+    rejected:  { t: 'Declined',           c: 'bg-red-100 text-red-700' },
+    cancelled: { t: 'Withdrawn / revoked',c: 'bg-slate-200 text-slate-600' },
+    expired:   { t: 'Expired',            c: 'bg-slate-200 text-slate-600' },
+  };
+  const REV_FIELD = { first_name:'First name', middle_name:'Middle name', last_name:'Last name', suffix:'Suffix', birthday:'Date of birth', sex:'Sex', civil_status:'Civil status', phone:'Phone',
+    permanent_address:'Permanent address', present_address:'Present address', location:'Location (present address)', school_name:'School', school_address:'School address', year_level:'Year level',
+    course:'Program / course', specialization:'Specialization', monthly_income:'Family income', father_info:'Father', mother_info:'Mother', guardian_info:'Guardian' };
+  let _revList = [], _revDetail = null;
+
+  async function loadRevisionStats() {
+    try {
+      const r = await fetch('/api/admin/revisions/stats'); if (!r.ok) throw new Error('HTTP ' + r.status);
+      const d = await r.json(); const el = id => document.getElementById(id);
+      ['pending','approved','completed','rejected'].forEach(k => { if (el('rev-stat-' + k)) el('rev-stat-' + k).textContent = d[k] ?? 0; });
+      const b = el('rev-badge'); if (b) { b.textContent = d.pending ?? 0; b.classList.toggle('hidden', !(d.pending > 0)); }   // badge = waiting for a decision
+    } catch (e) { console.error('loadRevisionStats:', e); }
+  }
+
+  async function loadRevisions() {
+    const box = document.getElementById('rev-list'); if (!box) return;
+    const status = document.getElementById('rev-filter-status')?.value || 'pending';
+    box.innerHTML = '<div class="py-10 text-center text-slate-400"><i class="fa-solid fa-spinner fa-spin mr-2"></i>Loading…</div>';
+    try {
+      const r = await fetch('/api/admin/revisions?status=' + encodeURIComponent(status));
+      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || 'HTTP ' + r.status);
+      _revList = await r.json(); renderRevisions();
+    } catch (e) {
+      console.error('loadRevisions:', e);
+      box.innerHTML = `<div class="py-10 text-center text-red-500 text-sm">${escHtml(e.message || 'Could not load requests')}</div>`;
+    }
+  }
+
+  function revChip(s) { const m = REV_STATUS[s] || { t: s, c: 'bg-slate-200 text-slate-600' }; return `<span class="text-[11px] font-bold px-2.5 py-1 rounded-full ${m.c}">${m.t}</span>`; }
+
+  function renderRevisions() {
+    const box = document.getElementById('rev-list');
+    if (!_revList.length) { box.innerHTML = '<div class="py-14 text-center text-slate-400"><div class="text-4xl mb-2">📝</div><p class="text-sm">No requests here.</p></div>'; return; }
+    box.innerHTML = _revList.map(q => {
+      const who = q.resident || {};
+      const items = q.items.map(i => `<span class="text-xs px-2 py-1 rounded-lg bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300">${escHtml(i.label)}</span>`).join(' ');
+      const meta = q.status === 'approved' && q.expiresAt ? `<span class="text-xs text-green-600 font-semibold">Edit window ends ${escHtml(reltime(q.expiresAt))}</span>`
+        : q.status === 'completed' ? `<span class="text-xs text-blue-600 font-semibold">${q.changeCount} change${q.changeCount === 1 ? '' : 's'} made</span>` : '';
+      const warn = (q.warnings || []).length ? '<span class="text-xs font-bold text-orange-600"><i class="fa-solid fa-triangle-exclamation mr-1"></i>Needs room review</span>' : '';
+      return `<div class="bg-white dark:bg-slate-900 rounded-2xl border border-slate-100 dark:border-slate-800 p-4 sm:p-5">
+        <div class="flex items-start gap-3 flex-wrap">
+          <div class="w-10 h-10 rounded-full bg-brand-50 dark:bg-slate-800 text-brand-600 flex items-center justify-center font-bold shrink-0">${escHtml((who.name || '?').charAt(0))}</div>
+          <div class="min-w-0 flex-1">
+            <p class="font-semibold text-slate-900 dark:text-slate-100">${escHtml(who.name || 'Resident')} <span class="text-xs font-normal text-slate-400">@${escHtml(who.username || '')}${who.room ? ' · Room ' + escHtml(who.room) + (who.bed ? ' / Bed ' + escHtml(who.bed) : '') : ''}</span></p>
+            <p class="text-xs text-slate-400">Requested ${escHtml(reltime(q.createdAt))}</p>
+          </div>
+          <div class="flex items-center gap-2">${warn}${meta}${revChip(q.status)}</div>
+        </div>
+        <div class="flex flex-wrap gap-1.5 mt-3">${items}</div>
+        <p class="text-sm text-slate-600 dark:text-slate-300 mt-3 italic">“${escHtml(q.reason)}”</p>
+        <div class="flex flex-wrap gap-2 mt-4">
+          <button onclick="openRevisionModal('${escHtml(q.id)}')" class="px-4 py-2 rounded-xl text-sm font-semibold ${q.status === 'pending' ? 'bg-brand-600 hover:bg-brand-700 text-white' : 'border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800'}">${q.status === 'pending' ? 'Review' : 'Details'}</button>
+        </div></div>`;
+    }).join('');
+  }
+
+  const revDocLink = (url, label) => url ? `<a href="${escHtml(url)}" onclick="event.preventDefault();openLightbox('${escHtml(escJS(url))}','${escHtml(escJS(label))}')" class="text-brand-600 font-semibold hover:underline">View</a>` : '<span class="text-slate-400">none</span>';
+
+  function revSectionPreview(key) {                       // the resident's CURRENT values for one info group
+    const sec = (_revDetail.summary?.sections || []).find(s => s.key === key); if (!sec) return '';
+    const rows = r => r.map(x => `<div class="${x.wide ? 'sm:col-span-2' : ''}"><span class="text-slate-400">${escHtml(x.label)}:</span> <span class="text-slate-700 dark:text-slate-200">${escHtml(x.value)}</span></div>`).join('');
+    const body = sec.groups ? sec.groups.map(g => `<p class="font-bold text-slate-500 mt-2">${escHtml(g.title)}</p><div class="grid sm:grid-cols-2 gap-x-4 gap-y-1">${rows(g.rows)}</div>`).join('') + `<div class="mt-2">${rows(sec.rows)}</div>` : `<div class="grid sm:grid-cols-2 gap-x-4 gap-y-1">${rows(sec.rows)}</div>`;
+    return `<details class="mt-2"><summary class="text-xs font-semibold text-slate-500 cursor-pointer min-h-[32px] flex items-center">Current information</summary><div class="text-xs mt-1 p-3 rounded-xl bg-slate-50 dark:bg-slate-800/60">${body}</div></details>`;
+  }
+
+  function revChanges(q) {
+    if (!q.changes?.length) return q.status === 'approved' || q.status === 'pending' ? '' : '<p class="text-sm text-slate-400">No changes were made.</p>';
+    const out = [];
+    q.changes.forEach(c => {
+      if (c.isDocument) { out.push(`<li><strong>${escHtml(c.label)}</strong>: replaced. Old file ${revDocLink(c.oldValue, 'Old: ' + c.label)} → New file ${revDocLink(c.newValue, 'New: ' + c.label)}</li>`); return; }
+      const name = REV_FIELD[c.field] || c.field;
+      if (/_info$/.test(c.field)) {                         // JSON person: list only the keys that changed
+        let o = {}, n = {}; try { o = JSON.parse(c.oldValue || '{}'); n = JSON.parse(c.newValue || '{}'); } catch (_) {}
+        const keys = [...new Set([...Object.keys(o), ...Object.keys(n)])].filter(k => String(o[k] ?? '') !== String(n[k] ?? ''));
+        keys.forEach(k => out.push(`<li><strong>${escHtml(name)} · ${escHtml(k)}</strong>: <span class="line-through text-slate-400">${escHtml(String(o[k] ?? '—'))}</span> → <span class="text-green-700 dark:text-green-400">${escHtml(String(n[k] ?? '—'))}</span></li>`));
+        return;
+      }
+      out.push(`<li><strong>${escHtml(name)}</strong>: <span class="line-through text-slate-400">${escHtml(c.oldValue || '—')}</span> → <span class="text-green-700 dark:text-green-400">${escHtml(c.newValue || '—')}</span></li>`);
+    });
+    return `<div><h4 class="text-xs font-bold uppercase tracking-wide text-slate-400 mb-2">What changed</h4><ul class="text-sm space-y-1.5 list-disc pl-5">${out.join('')}</ul></div>`;
+  }
+
+  async function openRevisionModal(id) {
+    const modal = document.getElementById('rev-modal'), body = document.getElementById('rev-modal-body'), foot = document.getElementById('rev-modal-foot');
+    modal.classList.remove('hidden'); document.body.style.overflow = 'hidden';
+    body.innerHTML = '<div class="py-10 text-center text-slate-400"><i class="fa-solid fa-spinner fa-spin mr-2"></i>Loading…</div>'; foot.innerHTML = '';
+    try {
+      const r = await fetch('/api/admin/revisions/' + encodeURIComponent(id));
+      const q = await r.json(); if (!r.ok) throw new Error(q.error || 'HTTP ' + r.status);
+      _revDetail = q;
+      document.getElementById('rev-modal-title').innerHTML = `${escHtml(q.resident.name)} ${revChip(q.status)}`;
+      const warn = (q.warnings || []).map(w => `<div class="rounded-xl border border-orange-200 bg-orange-50 text-orange-800 text-sm px-3 py-2"><i class="fa-solid fa-triangle-exclamation mr-1"></i>${escHtml(w)}</div>`).join('');
+      const pend = q.status === 'pending';
+      const items = q.items.map(i => {
+        const granted = q.approvedItems.includes(i.key), done = (q.doneItems || []).includes(i.key);
+        const doc = q.summary?.documents?.find(d => d.key === i.key);
+        const cur = i.group === 'doc' ? `<div class="mt-2 text-xs">Current file: ${doc?.onFile ? revDocLink(doc.url, doc.label) : '<span class="text-slate-400">not on file</span>'}</div>` : revSectionPreview(i.key);
+        const lead = pend ? `<input type="checkbox" class="w-5 h-5 accent-green-600 mt-0.5" data-rev-item value="${escHtml(i.key)}" checked>`
+          : `<i class="fa-solid ${granted ? (done ? 'fa-circle-check text-green-600' : 'fa-circle-dot text-green-500') : 'fa-circle-minus text-slate-300'} mt-1"></i>`;
+        return `<label class="flex gap-3 rounded-xl border border-slate-200 dark:border-slate-700 p-3 ${pend ? 'cursor-pointer' : ''}">${lead}<div class="min-w-0 flex-1">
+          <p class="text-sm font-semibold text-slate-800 dark:text-slate-100">${escHtml(i.label)}${!pend && q.status !== 'rejected' ? (granted ? (done ? ' <span class="text-xs text-green-600">· edited</span>' : ' <span class="text-xs text-green-600">· approved</span>') : ' <span class="text-xs text-slate-400">· not approved</span>') : ''}</p>
+          ${i.note ? `<p class="text-xs text-slate-500 mt-0.5">Resident: “${escHtml(i.note)}”</p>` : ''}${cur}</div></label>`;
+      }).join('');
+      body.innerHTML = `${warn}
+        <div><h4 class="text-xs font-bold uppercase tracking-wide text-slate-400 mb-1">Resident's reason</h4><p class="text-sm text-slate-700 dark:text-slate-200 italic">“${escHtml(q.reason)}”</p></div>
+        <div><h4 class="text-xs font-bold uppercase tracking-wide text-slate-400 mb-2">${pend ? 'Requested changes · untick what you do not allow' : 'Requested changes'}</h4><div class="space-y-2">${items}</div></div>
+        ${q.adminNote && !pend ? `<div class="text-sm"><span class="font-bold text-slate-500">Admin note:</span> ${escHtml(q.adminNote)}</div>` : ''}
+        ${q.status === 'approved' ? `<div class="text-sm text-green-700 dark:text-green-400"><i class="fa-solid fa-hourglass-half mr-1"></i>Edit window ends ${escHtml(reltime(q.expiresAt))}</div>` : ''}
+        ${revChanges(q)}
+        ${pend ? `<div class="grid sm:grid-cols-3 gap-3">
+            <div><label class="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1" for="rev-days">Edit window</label>
+              <select id="rev-days" class="w-full bg-slate-50 dark:bg-slate-800 rounded-xl px-3 py-2.5 text-sm border border-transparent focus:border-brand-400 outline-none"><option value="1">1 day</option><option value="3">3 days</option><option value="7" selected>7 days</option><option value="14">14 days</option></select></div>
+            <div class="sm:col-span-2"><label class="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1" for="rev-note">Note to resident <span class="normal-case font-normal">(required to decline)</span></label>
+              <textarea id="rev-note" rows="2" maxlength="500" class="w-full bg-slate-50 dark:bg-slate-800 rounded-xl px-3 py-2.5 text-sm border border-transparent focus:border-brand-400 outline-none resize-none" placeholder="e.g. Please upload a clear photo of the certificate."></textarea></div></div>`
+          : q.status === 'approved' ? `<div><label class="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1" for="rev-note">Reason for closing early (optional)</label>
+              <textarea id="rev-note" rows="2" maxlength="500" class="w-full bg-slate-50 dark:bg-slate-800 rounded-xl px-3 py-2.5 text-sm border border-transparent focus:border-brand-400 outline-none resize-none"></textarea></div>` : ''}
+        <p id="rev-err" class="hidden text-sm font-semibold text-red-600"></p>`;
+      foot.innerHTML = pend
+        ? `<button onclick="closeRevisionModal()" class="px-4 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 text-sm font-semibold">Close</button>
+           <button onclick="revDecide('${escHtml(q.id)}','reject')" class="px-4 py-2.5 rounded-xl bg-red-600 hover:bg-red-700 text-white text-sm font-semibold">Decline</button>
+           <button onclick="revDecide('${escHtml(q.id)}','approve')" class="px-4 py-2.5 rounded-xl bg-green-600 hover:bg-green-700 text-white text-sm font-semibold">Approve selected</button>`
+        : q.status === 'approved'
+        ? `<button onclick="closeRevisionModal()" class="px-4 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 text-sm font-semibold">Close</button>
+           <button onclick="revDecide('${escHtml(q.id)}','revoke')" class="px-4 py-2.5 rounded-xl bg-orange-600 hover:bg-orange-700 text-white text-sm font-semibold">Revoke edit access</button>`
+        : `<button onclick="closeRevisionModal()" class="px-4 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 text-sm font-semibold">Close</button>`;
+    } catch (e) {
+      console.error('openRevisionModal:', e);
+      body.innerHTML = `<p class="py-8 text-center text-red-500 text-sm">${escHtml(e.message || 'Could not load the request')}</p>`;
+    }
+  }
+  function closeRevisionModal() { document.getElementById('rev-modal')?.classList.add('hidden'); document.body.style.overflow = ''; _revDetail = null; }
+
+  async function revDecide(id, action) {
+    const err = document.getElementById('rev-err'); const note = (document.getElementById('rev-note')?.value || '').trim();
+    const say = m => { if (err) { err.textContent = m; err.classList.remove('hidden'); } };
+    if (err) err.classList.add('hidden');
+    const payload = { note };
+    if (action === 'approve') {
+      payload.items = [...document.querySelectorAll('#rev-modal [data-rev-item]:checked')].map(c => c.value);
+      payload.days = Number(document.getElementById('rev-days')?.value || 7);
+      if (!payload.items.length) return say('Tick at least one item to allow, or decline the request.');
+    }
+    if (action === 'reject' && note.length < 5) return say('Please tell the resident why you are declining.');
+    if (action === 'revoke' && !confirm('Close edit access now? Changes already saved stay.')) return;
+    document.querySelectorAll('#rev-modal-foot button').forEach(b => b.disabled = true);
+    try {
+      const r = await fetch(`/api/admin/revisions/${encodeURIComponent(id)}/${action}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok || !d.success) throw new Error(d.error || 'HTTP ' + r.status);
+      closeRevisionModal();
+      toast(action === 'approve' ? 'Approved. The resident was notified.' : action === 'reject' ? 'Declined. The resident was notified.' : 'Edit access closed.', 'success');
+      loadRevisionStats(); loadRevisions();
+    } catch (e) {
+      console.error('revDecide:', e); say(e.message || 'Could not save your decision');
+      document.querySelectorAll('#rev-modal-foot button').forEach(b => b.disabled = false);
+    }
+  }
+  document.addEventListener('keydown', e => { if (e.key === 'Escape' && !document.getElementById('rev-modal')?.classList.contains('hidden') && document.getElementById('img-lightbox')?.classList.contains('hidden')) closeRevisionModal(); });
 
   async function loadMaintenanceStats() {
     try {

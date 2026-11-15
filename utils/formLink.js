@@ -24,11 +24,16 @@ function sign(userId, exp) {
   return crypto.createHmac('sha256', secret()).update(`appform:v1:${userId}:${exp}`).digest('base64url');
 }
 
-/** Relative URL (starts with /api/...) that downloads the user's Application Form for the next 3 minutes. */
-function createFormLink(userId, now = Date.now()) {
+/**
+ * Relative URL (starts with /api/...) for the user's Application Form for the next 3 minutes.
+ * Default = download (Content-Disposition: attachment). { inline: true } = open in the browser's PDF viewer instead
+ * ("View PDF" button). The signature covers only user + expiry, so both variants prove the same thing.
+ */
+function createFormLink(userId, now = Date.now(), { inline = false } = {}) {
   const exp = now + FORM_LINK_TTL_MS;
-  const qs = new URLSearchParams({ u: String(userId), e: String(exp), s: sign(userId, exp), download: '1' });
-  return `/api/application-form/download?${qs.toString()}`;
+  const params = { u: String(userId), e: String(exp), s: sign(userId, exp) };
+  if (!inline) params.download = '1';
+  return `/api/application-form/download?${new URLSearchParams(params).toString()}`;
 }
 
 /** @param {{u?:any,e?:any,s?:any}} q  req.query  @returns {{ok:true,userId:string}|{ok:false,reason:'invalid'|'expired'}} */

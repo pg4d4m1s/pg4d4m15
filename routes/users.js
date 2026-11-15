@@ -399,7 +399,8 @@ router.get('/api/users/me/application-form', requireAuth, (req, res) => sendOwnA
 // Chrome, which has NO session cookie and used to get {"error":"You must be logged in to do that."}.
 router.get('/api/users/me/application-form/link', requireAuth, (req, res) => {
   res.set('Cache-Control', 'private, no-store');
-  res.json({ url: createFormLink(req.user.id) });
+  // ?view=1 -> link that opens the PDF in the browser ("View PDF"); default -> link that downloads it
+  res.json({ url: createFormLink(req.user.id, Date.now(), { inline: req.query.view === '1' }) });
 });
 
 // GET /api/application-form/download?u=&e=&s=&download=1 — NO login required, the signed link IS the proof.

@@ -329,7 +329,22 @@
             <input id="med-cert-input" type="file" accept="image/jpeg,image/png,image/webp,application/pdf,.pdf,.docx" class="hidden" onchange="uploadMedicalCertificate(this)"/>
           </div>
         </div>
-        <a id="app-form-link" href="/api/users/me/application-form" onclick="downloadMyApplicationForm(event)" class="mt-3 flex items-center gap-2 min-h-[44px] px-4 rounded-xl text-sm font-semibold text-slate-600 dark:text-slate-200 border border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800"><i id="app-form-icon" class="fa-solid fa-file-pdf text-red-500"></i> <span id="app-form-text">My Application Form (PDF)</span></a>
+        <!-- My Application: opens the in-app summary (details, documents, correction requests); PDF buttons below -->
+        <div class="mt-3 rounded-2xl border border-slate-200 dark:border-slate-700 overflow-hidden">
+          <button type="button" id="app-card-btn" onclick="openMyApplication()" class="w-full flex items-center gap-3 p-4 min-h-[64px] text-left hover:bg-slate-50 dark:hover:bg-slate-800/60">
+            <span class="w-10 h-10 rounded-xl bg-brand-50 dark:bg-slate-800 text-brand-600 flex items-center justify-center shrink-0"><i class="fa-solid fa-file-lines"></i></span>
+            <span class="min-w-0 flex-1">
+              <span class="block text-sm font-bold text-slate-800 dark:text-slate-100">My Application</span>
+              <span id="app-card-sub" class="block text-xs text-slate-500 dark:text-slate-400 truncate">Review your details &amp; documents</span>
+            </span>
+            <span id="app-card-badge" class="hidden"></span>
+            <i class="fa-solid fa-chevron-right text-slate-300 text-xs"></i>
+          </button>
+          <div class="grid grid-cols-2 border-t border-slate-100 dark:border-slate-800">
+            <button type="button" onclick="viewMyApplicationPdf(this)" class="flex items-center justify-center gap-2 min-h-[44px] px-3 text-sm font-semibold text-slate-600 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800"><i class="fa-solid fa-eye text-xs text-red-500"></i> View PDF</button>
+            <a id="app-form-link" href="/api/users/me/application-form" onclick="downloadMyApplicationForm(event)" class="flex items-center justify-center gap-2 min-h-[44px] px-3 text-sm font-semibold text-slate-600 dark:text-slate-200 border-l border-slate-100 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800"><i id="app-form-icon" class="fa-solid fa-download text-xs text-slate-500"></i> <span id="app-form-text">Download PDF</span></a>
+          </div>
+        </div>
       </div>
 
       <!-- Divider with label -->
@@ -406,6 +421,8 @@
 </div>
 
 <script src="/js/api.js"></script>
+<script src="/js/course-catalog.js"></script>
+<script src="/js/my-application.js"></script>
 <script src="/js/resident-survey.js"></script>
 <script>
   dayjs.extend(dayjs_plugin_relativeTime);
@@ -1293,6 +1310,8 @@
       toast('❌ Your post was removed'+(data.message?': '+data.message.replace('Your post was removed: ',''):'.'),'error');
     }
   });
+  // Admin approved / declined / revoked a correction request -> refresh the My Application card (and sheet, if open)
+  socket.on('revision-updated', () => { if (typeof loadMyApplicationCard === 'function') loadMyApplicationCard(); });
   socket.on('bed_assigned', ({ roomNumber, bedNumber }) => {
     toast(`🏠 You've been assigned to Room ${roomNumber}, Bed ${bedNumber}!`, 'success');
     _dormPanelLoaded = false; // force refresh next open
@@ -1447,6 +1466,7 @@
     document.getElementById('dorm-panel').classList.remove('hidden');
     document.body.style.overflow = 'hidden';
     loadMedicalCertificate();                        // cheap GET; always fresh when the panel opens
+    if (typeof loadMyApplicationCard === 'function') loadMyApplicationCard();   // My Application badge (request pending / edit unlocked)
     if (!_dormPanelLoaded) {
       _dormPanelLoaded = true;
       console.log('[DormPanel] Opening — loading data…');
@@ -1465,13 +1485,13 @@
     if (_appFormBusy) return;
     _appFormBusy = true;
     const txt = document.getElementById('app-form-text'), icon = document.getElementById('app-form-icon');
-    const idleText = 'My Application Form (PDF)';
+    const idleText = 'Download PDF';
     const idle = () => {
       _appFormBusy = false;
       if (txt) txt.textContent = idleText;
-      if (icon) icon.className = 'fa-solid fa-file-pdf text-red-500';
+      if (icon) icon.className = 'fa-solid fa-download text-xs text-slate-500';
     };
-    if (txt) txt.textContent = 'Preparing your form…';
+    if (txt) txt.textContent = 'Preparing…';
     if (icon) icon.className = 'fa-solid fa-spinner fa-spin text-slate-400';
     try {
       const r = await fetch('/api/users/me/application-form/link', { credentials: 'same-origin', cache: 'no-store' });

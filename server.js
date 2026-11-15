@@ -40,6 +40,7 @@ const notifRoutes        = require('./routes/notifications');
 const messagesRoutes     = require('./routes/messages');
 const adminRoutes        = require('./routes/admin');
 const documentRoutes     = require('./routes/documents');   // document badges, "request a new copy", rotate + the applicant's replace-document link
+const revisionRoutes     = require('./routes/revisions');    // approved residents' correction requests (resident + admin sides)
 const aiRoutes           = require('./routes/ai');
 const researchRoutes     = require('./routes/research');
 const announcementRoutes = require('./routes/announcements');
@@ -475,6 +476,7 @@ app.use((req, res, next) => {
 // ── Routes ────────────────────────────────────────────
 app.use('/', authRoutes);
 app.use('/', postsRoutes);
+app.use('/', revisionRoutes);   // before usersRoutes: /api/users/me/* must win over /api/users/:username
 app.use('/', usersRoutes);
 app.use('/', notifRoutes);
 app.use('/', messagesRoutes);
