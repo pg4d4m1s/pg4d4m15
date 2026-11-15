@@ -14,6 +14,7 @@
   <script src="https://cdn.jsdelivr.net/npm/toastify-js"></script>
   <script src="/socket.io/socket.io.js"></script>
   <link rel="stylesheet" href="/css/app.css"/>
+  <script src="/js/dialog.js"></script>
   <script>tailwind.config={darkMode:'class',theme:{extend:{fontFamily:{display:['Sora','sans-serif'],sans:['DM Sans','sans-serif']},colors:{brand:{50:'#eef6ff',100:'#d9ecff',400:'#4da6ff',500:'#1a8cff',600:'#0070e0',700:'#005bb5'}}}}}</script>
   <style>
     body{display:flex;min-height:100vh;}
@@ -5471,7 +5472,7 @@
   }
 
   async function saveManualDbArchive() {
-    const label = prompt('Label for this snapshot (optional):', `Manual snapshot ${dayjs().format('MMM D, YYYY')}`);
+    const label = await damisPrompt('Add an optional label so you can recognise this snapshot later.', { title: 'Save database snapshot', confirmText: 'Save snapshot', defaultValue: `Manual snapshot ${dayjs().format('MMM D, YYYY')}` });
     if (label === null) return; // cancelled
     const btn = document.getElementById('db-archive-save-btn');
     if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner animate-spin mr-2"></i>Saving…'; }
@@ -7328,7 +7329,7 @@
     const confirmMsg = updateExisting
       ? `Generate/update bills for ${month} @ ₱${rate}?\nExisting UNPAID bills will be re-priced to ₱${rate}.`
       : `Generate ₱${rate} bills for all current residents for ${month}?\n(Only creates missing bills — existing records untouched.)`;
-    if (!confirm(confirmMsg)) return;
+    if (!await damisConfirm(confirmMsg, { title: updateExisting ? 'Generate / update bills?' : 'Generate monthly bills?', confirmText: 'Generate bills' })) return;
     try {
       const r = await fetch('/api/admin/dormitory/billing/generate', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -7354,7 +7355,7 @@
   });
 
   async function clearBillReceipt(billId) {
-    if (!confirm('Remove the uploaded GCash receipt for this bill?')) return;
+    if (!await damisConfirm('The uploaded GCash receipt will be removed from this bill.', { title: 'Remove receipt?', confirmText: 'Remove receipt', tone: 'danger' })) return;
     try {
       const r = await fetch(`/api/admin/dormitory/billing/${billId}/receipt`, { method: 'DELETE' });
       const d = await r.json();
@@ -7375,7 +7376,7 @@
   }
 
   async function markBillUnpaid(billId) {
-    if (!confirm('Undo this payment? The bill will be marked as unpaid again.')) return;
+    if (!await damisConfirm('The bill will be marked as unpaid again.', { title: 'Undo this payment?', confirmText: 'Mark as unpaid', tone: 'warning' })) return;
     try {
       const r = await fetch(`/api/admin/dormitory/billing/${billId}/unpay`, { method: 'PUT' });
       const d = await r.json();
@@ -7410,7 +7411,7 @@
     if (!month) { toast('Select a month first', 'error'); return; }
     const btn = document.getElementById('remind-all-btn');
     if (btn?.disabled) return;
-    if (!confirm(`Send payment reminders to ALL unpaid residents for ${month}? This will send email + in-app notification to each.`)) return;
+    if (!await damisConfirm(`Every resident with an unpaid bill for ${month} will get an email and an in-app notification.`, { title: 'Send reminders to all unpaid residents?', confirmText: 'Send reminders', tone: 'warning' })) return;
     if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin mr-1"></i>Sending…'; }
     try {
       const r = await fetch('/api/admin/dormitory/billing/remind-all', {
@@ -7433,7 +7434,7 @@
     if (!month) { toast('Select a month first', 'error'); return; }
     const btn = document.getElementById('remind-all-btn');
     if (btn?.disabled) return;
-    if (!confirm(`Send payment reminders to ALL unpaid residents for ${month}? This will send email + in-app notification to each.`)) return;
+    if (!await damisConfirm(`Every resident with an unpaid bill for ${month} will get an email and an in-app notification.`, { title: 'Send reminders to all unpaid residents?', confirmText: 'Send reminders', tone: 'warning' })) return;
     if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin mr-1"></i>Sending…'; }
     try {
       const r = await fetch('/api/admin/dormitory/billing/remind-all', {
@@ -7507,7 +7508,7 @@
   }
 
   async function removeGcashQr() {
-    if (!confirm('Remove the GCash QR code? Residents will no longer see it.')) return;
+    if (!await damisConfirm('Residents will no longer see it when they pay.', { title: 'Remove the GCash QR code?', confirmText: 'Remove QR code', tone: 'danger' })) return;
     try {
       const r = await fetch('/api/admin/billing/gcash-qr', { method: 'DELETE' });
       const d = await r.json();
@@ -7769,7 +7770,8 @@
       const items = q.items.map(i => {
         const granted = q.approvedItems.includes(i.key), done = (q.doneItems || []).includes(i.key);
         const doc = q.summary?.documents?.find(d => d.key === i.key);
-        const cur = i.group === 'doc' ? (doc?.onFile ? `<div class="mt-2">${revDocTile(doc.url, doc.label, 'Current file')}</div>` : '<div class="mt-2 text-xs text-slate-400">Current file: not on file</div>') : revSectionPreview(i.key);
+        // Current info / file is only shown while there is nothing else to compare (resident's request not edited yet). Once changes exist, the "Proposed changes" list below already shows old → new, so repeating it here is noise.
+        const cur = (q.changes && q.changes.length) ? '' : i.group === 'doc' ? (doc?.onFile ? `<div class="mt-2">${revDocTile(doc.url, doc.label, 'Current file')}</div>` : '<div class="mt-2 text-xs text-slate-400">Current file: not on file</div>') : revSectionPreview(i.key);
         const tag = pend ? 'label' : 'div';   // only a <label> while ticking boxes; otherwise a <label> would forward title clicks to the preview button
         const lead = pend ? `<input type="checkbox" class="w-5 h-5 accent-green-600 mt-0.5" data-rev-item value="${escHtml(i.key)}" checked>`
           : `<i class="fa-solid ${granted ? (done ? 'fa-circle-check text-green-600' : 'fa-circle-dot text-green-500') : 'fa-circle-minus text-slate-300'} mt-1"></i>`;
@@ -7831,9 +7833,9 @@
     if (action === 'reject' && note.length < 5) return say('Please tell the resident why you are declining.');
     if (action === 'discard' && note.length < 5) return say('Please tell the resident why the changes are not approved.');
     if (action === 'return' && note.length < 5) return say('Please tell the resident what to correct.');
-    if (action === 'apply' && !confirm('Apply these changes to the resident\'s application now?')) return;
-    if (action === 'discard' && !confirm('Decline these changes? They will be thrown away and the application stays as it is.')) return;
-    if (action === 'revoke' && !confirm('Close edit access now? Any drafts the resident has not submitted are discarded.')) return;
+    if (action === 'apply' && !await damisConfirm('These changes will be saved to the resident\'s application right away.', { title: 'Approve & apply changes?', confirmText: 'Approve & apply', tone: 'success' })) return;
+    if (action === 'discard' && !await damisConfirm('They will be thrown away and the application stays as it is.', { title: 'Decline these changes?', confirmText: 'Decline changes', tone: 'danger' })) return;
+    if (action === 'revoke' && !await damisConfirm('Any drafts the resident has not submitted are discarded.', { title: 'Close edit access now?', confirmText: 'Close access', tone: 'warning' })) return;
     document.querySelectorAll('#rev-modal-foot button').forEach(b => b.disabled = true);
     try {
       const r = await fetch(`/api/admin/revisions/${encodeURIComponent(id)}/${action}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
@@ -8321,7 +8323,7 @@
   async function removeUtilityBillImage(key) {
     const bill = _utilityBillMap.get(key);
     if (!bill) { toast('Bill not found — please refresh', 'error'); return; }
-    if (!confirm(`Remove the bill image for ${bill.type} — ${bill.month}?`)) return;
+    if (!await damisConfirm(`The bill image for ${bill.type} — ${bill.month} will be removed.`, { title: 'Remove bill image?', confirmText: 'Remove image', tone: 'danger' })) return;
     try {
       const fd = new FormData();
       fd.append('month',   bill.month);

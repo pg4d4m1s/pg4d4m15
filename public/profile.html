@@ -15,6 +15,7 @@
   <script src="/socket.io/socket.io.js"></script>
   <link rel="stylesheet" href="/css/app.css"/>
   <link rel="stylesheet" href="/css/polish.css"/>
+  <script src="/js/dialog.js"></script>
   <script>tailwind.config={darkMode:'class',theme:{extend:{fontFamily:{display:['Sora','sans-serif'],sans:['DM Sans','sans-serif']},colors:{brand:{50:'#eef6ff',100:'#d9ecff',400:'#4da6ff',500:'#1a8cff',600:'#0070e0',700:'#005bb5'}}}}}</script>
   <style>
     #cover-wrap{height:240px;overflow:hidden;position:relative;background:linear-gradient(135deg,#0070e0,#4da6ff);}
@@ -520,7 +521,7 @@
   async function toggleFollow(){
     const btn=document.getElementById('follow-btn');
     if(btn.textContent.includes('Friends')){
-      if(!confirm('Remove this person from friends?'))return;
+      if(!await damisConfirm('Remove this person from friends?',{title:'Remove friend?',confirmText:'Remove',tone:'danger'}))return;
       await fetch(`/api/users/${profileUser.id}/friend`,{method:'DELETE'});
       setFollowBtn(false,null);
       toast('Removed from friends');
@@ -760,11 +761,11 @@
     loadCommentReactions(commentId);
   }
   async function delComment(commentId,postId){
-    if(!confirm('Delete this comment?'))return;
+    if(!await damisConfirm('This comment will be permanently removed.',{title:'Delete comment?',confirmText:'Delete',tone:'danger'}))return;
     await fetch(`/api/comments/${commentId}`,{method:'DELETE'});loadComments(postId);
   }
   async function delPost(id){
-    if(!confirm('Delete this post?'))return;
+    if(!await damisConfirm('This post will be permanently removed.',{title:'Delete post?',confirmText:'Delete',tone:'danger'}))return;
     await fetch(`/api/posts/${id}`,{method:'DELETE'});document.getElementById(`post-${id}`)?.remove();toast('Post deleted.');
     const pc=document.getElementById('post-count');if(pc)pc.textContent=Math.max(0,parseInt(pc.textContent||0)-1);
   }

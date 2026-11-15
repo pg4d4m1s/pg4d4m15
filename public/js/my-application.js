@@ -153,7 +153,7 @@
     else if (rev && rev.status === 'approved') { txt = 'Edit unlocked'; cls = 'bg-green-100 text-green-700'; }
     else if (rev && rev.status === 'submitted') { txt = 'In review'; cls = 'bg-amber-100 text-amber-700'; }
     else if (last && last.status === 'rejected') { txt = 'Declined'; cls = 'bg-red-100 text-red-700'; }
-    badge.className = txt ? `ma-chip ${cls}` : 'hidden';
+    badge.className = txt ? `ma-chip mt-1 ${cls}` : 'hidden';
     badge.textContent = txt;
     if (sub) sub.textContent = rev && rev.status === 'approved' ? `Edit until ${phDate(rev.expiresAt)}` : rev && rev.status === 'pending' ? 'Waiting for admin approval' : rev && rev.status === 'submitted' ? 'Your changes are being reviewed' : 'Review your details & documents';
   }
@@ -334,7 +334,7 @@
 
   async function withdraw(id, submitted) {
     if (busy) return;
-    if (!confirm(submitted ? 'Withdraw your submitted changes? They will be discarded and your application stays as it is.' : 'Withdraw this correction request?')) return;
+    if (!await damisConfirm(submitted ? 'They will be discarded and your application stays as it is.' : 'Withdraw this correction request?', { title: submitted ? 'Withdraw your changes?' : 'Withdraw request?', confirmText: submitted ? 'Withdraw changes' : 'Withdraw', tone: 'warning' })) return;
     busy = true;
     const r = await api('DELETE', API + '/revisions/' + encodeURIComponent(id));
     busy = false;
@@ -343,7 +343,7 @@
   }
   async function submitForReview() {
     if (busy) return;
-    if (!confirm('Submit your changes for review? The admin must approve them before they are saved to your application, and you will not be able to edit more unless the admin sends them back.')) return;
+    if (!await damisConfirm('The admin must approve them before they are saved to your application, and you will not be able to edit more unless the admin sends them back.', { title: 'Submit your changes for review?', confirmText: 'Submit for review' })) return;
     busy = true;
     const r = await api('POST', API + '/revisions/current/submit');
     busy = false;

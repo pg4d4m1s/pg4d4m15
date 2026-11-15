@@ -386,7 +386,7 @@
   }
 
   async function deleteRow(id) {
-    if (!confirm('Delete this questionnaire submission? This cannot be undone.')) return;
+    if (!await damisConfirm('This questionnaire submission will be deleted. This cannot be undone.', { title: 'Delete submission?', confirmText: 'Delete', tone: 'danger' })) return;
     try {
       await getJSON('/api/admin/research/manager/responses/' + encodeURIComponent(id), { method: 'DELETE' });
       notify('Submission deleted');

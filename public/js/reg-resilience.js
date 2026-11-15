@@ -692,7 +692,7 @@
     setTimeout(function () { if (el.parentNode) el.style.opacity = '0.85'; }, 15000);
   }
   async function startOver() {
-    if (!confirm('Discard your saved answers and start the registration from the beginning?')) return;
+    if (!await damisConfirm('Your saved answers will be discarded and the registration starts from the beginning.', { title: 'Start over?', confirmText: 'Start over', tone: 'warning' })) return;
     clearDraft(); markInflight(false);
     try { await fetch(API.RESET, { method: 'POST', credentials: 'same-origin' }); } catch (e) {}
     location.href = '/';
