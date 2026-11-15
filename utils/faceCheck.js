@@ -12,8 +12,8 @@
  *   - exactly one clearly visible, real human face
  *   - NOT a photo of a screen / printed photo / ID card / cartoon / object / animal
  *   - face clear (not covered, not blurry)
- *   - NOT a joke pose: tongue sticking out, or a clearly wide-open mouth (yelling / pulled face). A normal smile, even
- *     with teeth showing, is fine. This is the applicant's official profile photo.
+ *   - NOT a tongue sticking out past the lips. Smiling or laughing — mouth open, teeth showing, even a tongue merely
+ *     visible INSIDE the open mouth — is fine; only a tongue clearly poking out is refused (SELFIE_TONGUE_OUT).
  *   Any refusal (code SELFIE_*) sends the applicant back to Step 4 to retake the selfie (public/js/auth.js handles it).
  *
  * FAIL-OPEN BY DESIGN for infrastructure problems (no key, quota exhausted, timeout, unparsable answer):
@@ -42,9 +42,8 @@ const PROMPT =
   '"realPerson": <true if it looks like a real person photographed directly by a camera, false if it is a drawing, ' +
   'cartoon, mascot, object, animal, screenshot, a photo of a computer/phone screen, a printed photo, or a photo of an ID card>, ' +
   '"faceClear": <true if the face is large enough, unobstructed (no mask, sunglasses, hand or object covering it) and in focus>, ' +
-  '"tongueOut": <true if the person\'s tongue is visible outside the lips, even slightly; otherwise false>, ' +
-  '"wideOpenMouth": <true ONLY if the mouth is clearly open wide (jaw dropped, shouting, laughing with the mouth open, or a pulled/silly face); ' +
-  'false for a closed mouth or an ordinary smile, even when teeth are visible>, ' +
+  '"tongueOut": <true ONLY if the tongue is clearly sticking out past the lips (poking out over or beyond the lower lip); ' +
+  'false for a closed mouth, a smile, a laugh or an open mouth with teeth showing, even if the tongue can be seen inside the mouth>, ' +
   '"reason": "<max 12 words>"}. Do not add any other text.';
 
 /**
@@ -136,7 +135,7 @@ async function checkSelfie(buffer, mimeType, ctx = {}) {
   }
 
   const faces = Number(r.faceCount);
-  const seen = `faces=${faces} realPerson=${r.realPerson} faceClear=${r.faceClear} tongueOut=${r.tongueOut} wideOpenMouth=${r.wideOpenMouth} reason="${String(r.reason || '').slice(0, 60)}"`;
+  const seen = `faces=${faces} realPerson=${r.realPerson} faceClear=${r.faceClear} tongueOut=${r.tongueOut} reason="${String(r.reason || '').slice(0, 60)}"`;
   log.info(`[SELFIE-CHECK] ${seen} (${Date.now() - t0}ms)${ctx.ref ? ` ref=${ctx.ref}` : ''}`);
   const done = (result, label) => { aiUsage.setOutcome(usageId, `${seen} → ${label}`); return result; };
 
@@ -151,10 +150,7 @@ async function checkSelfie(buffer, mimeType, ctx = {}) {
       message: 'Your face is not clearly visible (too small, blurry or covered). Please retake the selfie in good light with your face uncovered.' }, 'REFUSED (SELFIE_FACE_UNCLEAR)');
   if (r.tongueOut === true)
     return done({ ok: false, code: 'SELFIE_TONGUE_OUT', detail: r,
-      message: 'Your tongue is sticking out in the selfie. This is your official profile photo — please retake it with your mouth closed and a natural, neutral face.' }, 'REFUSED (SELFIE_TONGUE_OUT)');
-  if (r.wideOpenMouth === true)
-    return done({ ok: false, code: 'SELFIE_EXPRESSION', detail: r,
-      message: 'Your mouth is wide open in the selfie. This is your official profile photo — please retake it with your mouth closed and a natural, neutral face (a gentle smile is fine).' }, 'REFUSED (SELFIE_EXPRESSION)');
+      message: 'Your tongue is sticking out in the selfie. This is your official profile photo — please retake it without sticking your tongue out (smiling is fine).' }, 'REFUSED (SELFIE_TONGUE_OUT)');
   return done({ ok: true }, 'ok');
 }
 

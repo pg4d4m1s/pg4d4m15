@@ -3103,13 +3103,11 @@ var _scan           = null;   // the running scan session (null when the camera 
 var _faceLibPromise = null;   // memoised library+model load (reset on failure so "Start" can retry)
 var _lumaCanvas     = null;   // tiny canvas reused for brightness sampling
 
-// The FINAL photo must show a calm face. `mar` is the inner-lip gap divided by the mouth width (≈0 closed, a relaxed smile
-// with teeth ≈0.05–0.15, clearly open ≥0.35). A tongue-out / silly-face shot needs the mouth open, so it lands above this
-// limit and the scan asks the applicant to close their mouth instead of taking the photo. The browser's landmark model
-// cannot see a tongue itself — the server re-checks the uploaded photo for one (utils/faceCheck.js).
-// Tune here if real phones show that normal smiles get refused.
-var SELFIE_MAX_MAR_FINAL = 0.22;
-var SELFIE_CALM_HINT     = 'Close your mouth \u2014 no tongue or funny faces';
+// FINAL stage: the face must look straight and hold still, but the mouth MAY be open — smiling or laughing with teeth
+// showing is fine. `mar` = inner-lip gap / mouth width (≈0 closed, ≥0.35 clearly open). Only a mouth opened wider than
+// this (yawning, shouting) pauses the countdown. The browser's landmark model cannot see a tongue at all, so tongue-out
+// photos are refused by the server's check of the uploaded photo (utils/faceCheck.js → SELFIE_TONGUE_OUT).
+var SELFIE_MAX_MAR_FINAL = 0.60;
 
 var SCAN_CHALLENGE_TEXT = {
   left:  '\u2190 Turn your head slowly LEFT',
@@ -3568,9 +3566,7 @@ async function handleScanFrame(s, video, res, opts) {
   }
 
   // final: look straight and hold still → on-screen 3-2-1 countdown → capture
-  var calm = a.mar < SELFIE_MAX_MAR_FINAL;                // mouth (nearly) closed
-  var steady = frontal && calm;
-  var holdHint = (frontal && !calm) ? SELFIE_CALM_HINT : 'Look straight \u2014 hold still\u2026';
+  var steady = a.state === 'ok' && a.yaw >= 0.40 && a.yaw <= 0.60 && a.mar < SELFIE_MAX_MAR_FINAL;   // open-mouth smile allowed
   var cx = a.box.x + a.box.width / 2;
   if (steady && s.lastCx !== null && Math.abs(cx - s.lastCx) > a.vis.w * 0.05) steady = false;
   s.lastCx = cx;
@@ -3580,7 +3576,7 @@ async function handleScanFrame(s, video, res, opts) {
     if (s.cdBad >= 3) {                                   // moved / turned away for ~0.4 s → cancel, start over
       s.cdStart = 0; s.cdBad = 0; s.good = 0; setCountdown(null);
       s.flash = 'Hold still \u2014 let\u2019s try the countdown again'; s.flashUntil = now + 2000;
-      paintScan(s, a, 'adjust', holdHint);
+      paintScan(s, a, 'adjust', 'Look straight \u2014 hold still\u2026');
       return;
     }
     var elapsed = now - s.cdStart;
@@ -3597,7 +3593,7 @@ async function handleScanFrame(s, video, res, opts) {
   }
 
   s.good = steady ? s.good + 1 : 0;
-  paintScan(s, a, steady ? 'ok' : 'adjust', holdHint);
+  paintScan(s, a, steady ? 'ok' : 'adjust', 'Look straight \u2014 hold still\u2026');
   if (s.good >= 4) { s.cdStart = now; s.cdBad = 0; setCountdown(3); paintScan(s, a, 'ok', 'Look straight \u2014 photo in 3\u2026'); }
 }
 
@@ -3617,11 +3613,6 @@ async function finishSelfieScan(s, video, opts) {
     mar = _dist(p[62], p[66]) / (_dist(p[60], p[64]) || 1);
     var h = d.detection.box.height / canvas.height;
     ok = d.detection.score >= 0.6 && h >= 0.26 && h <= 0.8 && yaw >= 0.36 && yaw <= 0.64;
-  }
-  if (ok && mar !== null && mar >= SELFIE_MAX_MAR_FINAL) {      // frame was grabbed with the mouth open (tongue out, laughing, silly face)
-    console.warn('[Selfie] shot refused — mouth open at capture (mar=' + mar.toFixed(2) + ', limit ' + SELFIE_MAX_MAR_FINAL + ')');
-    resetScan(s, 'Keep your mouth closed with a calm face \u2014 no tongue out. Let\u2019s try again');
-    return;
   }
   if (!ok) { resetScan(s, 'That shot didn\u2019t pass \u2014 let\u2019s try again'); return; }
   if (s.cancelled) return;
