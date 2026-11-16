@@ -3,7 +3,8 @@
  * Admissions control — "close applications" switch + automatic close when a gender's beds are full.
  *
  * Rules (set by the admin, see the Registrations tab):
- *   • Master switch (app_settings.admission_closed = '1')  → registration is closed for EVERYONE (male + female).
+ *   • Master switch (app_settings.admission_closed = '1')  → registration is closed for EVERYONE (male + female);
+ *     an automatic "Applications are closed" announcement is posted while it is ON and hidden when it is turned OFF.
  *   • Auto-close per gender: when the number of APPROVED residents of that sex reaches the number of beds in the
  *     rooms of that gender (SUM of dorm_rooms.capacity), that gender is closed. Approved residents count even when
  *     they have no bed assigned yet — they will be assigned later.
@@ -12,7 +13,7 @@
  *         applicant gets a "slots are full" e-mail;
  *       – an automatic login-page announcement is posted (male / female / both).
  *   • Nothing is stored for "full": it is computed live from the data, so it reopens by itself when beds are
- *     added or a resident leaves. Only the announcement flags live in app_settings (admission_ann_male|female|all).
+ *     added or a resident leaves. Only the announcement flags live in app_settings (admission_ann_male|female|all|manual).
  *
  * Missing keys = open, so deploying this does not change current behaviour. A gender with 0 beds is NOT treated
  * as full (nothing to compare against) — it never auto-rejects or auto-announces.
@@ -66,7 +67,9 @@ function setManualClosed(closed, byUsername = '') {
   setSetting(KEY_UPDATED_AT, new Date().toISOString());
   setSetting(KEY_UPDATED_BY, byUsername);
   log.admin(`🚪 Applications ${closed ? 'CLOSED' : 'REOPENED'} for everyone by @${byUsername || '?'}`);
-  return getStatus();
+  const status = getStatus();
+  try { syncAnnouncements(status); } catch (e) { log.warn(`[admission] announcement sync failed: ${e.message}`); }
+  return status;
 }
 
 // ── Automatic announcements ────────────────────────────────────────────────
@@ -79,6 +82,11 @@ const ANN_TEXT = {
   female: {
     title: 'Female dormitory slots are full',
     body:  'All female slots in the dormitory have been filled, so applications from female applicants are now closed. ' +
+           'Please check this page again for updates.',
+  },
+  manual: {
+    title: 'Applications are closed',
+    body:  'Applications for the dormitory are temporarily closed. ' +
            'Please check this page again for updates.',
   },
   all: {
@@ -94,8 +102,9 @@ function syncAnnouncements(status = getStatus()) {
   if (status.male.full && status.female.full) wanted.add('all');
   else if (status.male.full) wanted.add('male');
   else if (status.female.full) wanted.add('female');
+  if (status.manualClosed) wanted.add('manual');
 
-  for (const tag of ['male', 'female', 'all']) {
+  for (const tag of ['male', 'female', 'all', 'manual']) {
     const key = `admission_ann_${tag}`;
     const existingId = getSetting(key, '');
     if (wanted.has(tag)) {

@@ -85,6 +85,16 @@ function showToast(message, type) {
 // ═══════════════════════════════════════════════════
 // TAB SWITCHING
 // ═══════════════════════════════════════════════════
+// The dorm does not take applicants whose permanent address is in Baler (the server re-checks on submit).
+var BALER_MSG = 'Sorry, the dormitory only accepts applicants whose permanent address is in other municipalities of Aurora. Applicants from Baler are not accepted.';
+function isBalerPermanent() {
+  var sel = $('perm-city');
+  if (!sel || !sel.value) return false;
+  var o = sel.options[sel.selectedIndex];
+  return /^(municipality of |city of )?baler$/i.test(((o && o.text) || '').trim());
+}
+function checkBalerPermanent() { if (isBalerPermanent()) showStepError(3, BALER_MSG); }
+
 function showTab(tab) {
   var isLogin = tab === 'login';
   $('panel-login').classList.toggle('hidden', !isLogin);
@@ -590,6 +600,7 @@ async function validateStep(step) {
     // Permanent Address (required)
     if (!$('perm-region') || !$('perm-region').value) { showStepError(3, 'Please select your Permanent Address Region.'); return false; }
     if (!$('perm-city') || !$('perm-city').value)     { showStepError(3, 'Please select your Permanent Address City/Municipality.'); return false; }
+    if (isBalerPermanent()) { showStepError(3, BALER_MSG); return false; }
     if (!$('perm-brgy') || !$('perm-brgy').value)     { showStepError(3, 'Please select your Permanent Address Barangay.'); return false; }
     if (PUROK_REQUIRED && !addrCleanPurok(($('perm-purok') || {}).value)) { showStepError(3, 'Please enter your Permanent Address Purok / Sitio.'); $('perm-purok') && $('perm-purok').focus(); return false; }
     buildAddrString('perm');

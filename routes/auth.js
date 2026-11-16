@@ -389,6 +389,11 @@ router.post('/api/auth/complete-registration',
       return fail(400, 'VALIDATION', 'Your permanent address is incomplete. Please choose your city/municipality and barangay and enter your purok / sitio.', { field: 'permanentAddress' });
     if (addrSegments(presentAddress) < 4)
       return fail(400, 'VALIDATION', 'Your present address is incomplete. Please choose your city/municipality and barangay and enter your purok / sitio.', { field: 'presentAddress' });
+    // The dormitory only takes applicants whose PERMANENT address is in another Aurora municipality — not Baler.
+    // City/municipality is the 2nd comma segment; the whole tail is checked too so "Municipality of Baler" can't slip through.
+    const permSegs = String(permanentAddress || '').split(',').map(s => s.trim().toLowerCase());
+    if (permSegs.slice(1).some(seg => /^(municipality of |city of )?baler$/.test(seg)))
+      return fail(400, 'VALIDATION', 'Sorry, the dormitory only accepts applicants whose permanent address is in other municipalities of Aurora. Applicants from Baler are not accepted.', { field: 'permanentAddress' });
     const yearLevelClean = String(yearLevel || '').trim();
     if (!yearLevelClean || /^[\u2014\u2013-]|^select\b/i.test(yearLevelClean))   // a dropdown placeholder is not an answer
       return fail(400, 'VALIDATION', 'Please select your year level.', { field: 'yearLevel' });
