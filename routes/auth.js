@@ -34,6 +34,7 @@ const {
   findRejectedRegistrationByEmail, getRejectedRegistrationById, deleteRejectedRegistration, setUserApplicationMeta,
 } = require('../utils/db');
 const { REVISION_ITEMS, parseFlags, decorateFlags, sanitizeSnapshot } = require('../utils/applicationRevision');
+const admission = require('../utils/admission');
 
 
 // ─── Live-selfie gate (runs BEFORE any file is sent to Cloudinary) ───────────────────────────
@@ -104,6 +105,12 @@ router.post('/api/auth/send-otp', async (req, res) => {
     const { email, password, confirmPassword, isGoogleSignup } = req.body;
     if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim()))
       return res.status(400).json({ error: 'Please enter a valid email address.' });
+
+    // Admissions closed for everyone (switch ON, or every bed taken) → no new sign-ups. An applicant whose application
+    // was returned earlier still goes through (the final submit re-checks their sex).
+    if (admission.getStatus().allClosed && !findRejectedRegistrationByEmail(email.trim())) {
+      return res.status(403).json({ code: 'REGISTRATION_CLOSED', error: 'Applications are currently closed. Please check the announcements on this page for updates.' });
+    }
 
     const existing = findUserByEmail(email.trim());
     if (existing) {
@@ -408,6 +415,21 @@ router.post('/api/auth/complete-registration',
     // Username uniqueness check removed
     if (findUserByEmail(pending.email))
       return fail(409, 'EMAIL_TAKEN', 'This email was just registered by someone else.', { field: 'email' });
+
+    // ── Admissions: closed for this sex? (authoritative check — the form only hints) ──────────────
+    // "Slots full" closes that sex for everyone. The master switch closes new applicants only; a returned application may resubmit.
+    {
+      const adm = admission.getStatus();
+      const sk = String(sex).toLowerCase();
+      if (sk === 'male' || sk === 'female') {
+        const g = adm[sk];
+        if (g.full || (g.reason === 'manual' && !req.revision)) {
+          return fail(403, 'REGISTRATION_CLOSED', g.full
+            ? `Sorry, all ${sk} dormitory slots are already full, so we can't accept new ${sk} applications right now.`
+            : 'Applications are currently closed. Please check the announcements on this page for updates.', { field: 'sex' });
+        }
+      }
+    }
 
     // ── Room preference (optional) + roommate note (optional) ──────────────
     // The picker only offers rooms that matched the applicant's sex and had a
@@ -799,6 +821,23 @@ router.get('/api/auth/room-availability', (req, res) => {
   } catch (err) {
     log.error(`[room-availability] ${err.message}`);
     return res.status(500).json({ error: 'Could not load room availability. Please try again.' });
+  }
+});
+
+// ════════════════════════════════════════════════════
+// ADMISSION STATUS (login page counter + sign-up gate)
+// Public on purpose; aggregate numbers only — approved residents / max beds / remaining, per sex. Never names.
+// ════════════════════════════════════════════════════
+router.get('/api/auth/admission-status', (req, res) => {
+  try {
+    admission.syncAnnouncements();   // keeps the automatic notices in step if beds were added / a resident left
+    const st = admission.getStatus();
+    const pub = g => ({ approved: g.approved, max: g.max, remaining: g.remaining, open: g.open, reason: g.reason });
+    res.set('Cache-Control', 'no-store');
+    return res.json({ success: true, manualClosed: st.manualClosed, allClosed: st.allClosed, male: pub(st.male), female: pub(st.female) });
+  } catch (err) {
+    log.error(`[admission-status] ${err.message}`);
+    return res.status(500).json({ error: 'Could not load slot numbers.' });
   }
 });
 

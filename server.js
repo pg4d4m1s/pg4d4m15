@@ -179,6 +179,7 @@ app.use('/api/auth/reset-password',        authLimiter);
 app.use('/api/auth/check-username',        checkLimiter);
 app.use('/api/auth/check-phone',           checkLimiter);
 app.use('/api/auth/room-availability',     checkLimiter);
+app.use('/api/auth/admission-status',      checkLimiter);
 app.use('/api/',                           apiLimiter);
 
 // ── Request logging (morgan) ──────────────────────────

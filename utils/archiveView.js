@@ -49,6 +49,8 @@ const ALWAYS_LIVE = [
   // Login-page announcements describe the LIVE site, so editing them must never hit (or be
   // blocked by) an archived snapshot — older snapshots may not even have the table.
   /^\/announcements(\/|$)/,
+  // Admissions switch + slot numbers describe the LIVE dorm (same reason as announcements).
+  /^\/admission\/?$/,
 ];
 
 // GET routes that look harmless but WRITE (admission-slip assigns an admission number).

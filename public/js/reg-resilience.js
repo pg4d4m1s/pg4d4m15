@@ -356,6 +356,8 @@
       return { message: withRef(d.error, d), hint: 'Upload a new file for each document the admin asked you to replace.', code: code, field: d.field };
     if (code === 'REVISION_GONE')
       return { message: withRef(d.error, d), hint: 'Reload this page to continue.', code: code };
+    if (code === 'REGISTRATION_CLOSED')   // that sex is full / applications closed → back to Step 3 (the sex choice); answers stay saved
+      return { message: withRef(d.error, d), hint: 'Your answers are saved on this device.', code: code, field: d.field, goStep: 3 };
     if (code === 'VALIDATION')
       return { message: withRef(d.error, d), hint: 'We took you back to fix it.', code: code, field: d.field, goStep: 3 };
     if (/^SELFIE_/.test(code || ''))   // server-side face check rejected / missed the live selfie → back to Step 4

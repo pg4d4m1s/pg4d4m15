@@ -37,6 +37,7 @@ const { sendAccountApprovedEmail, sendAccountRejectedEmail } = require('../utils
 const { REVISION_ITEMS, sanitizeFlags, decorateFlags, cleanReason } = require('../utils/applicationRevision');
 const { sendApplicationFormPdf, withBedAssignment } = require('../utils/applicationForm');
 const { createSemesterAnnouncement } = require('../utils/announcements');
+const admission = require('../utils/admission');
 const { getViewingArchive, getArchiveHandle, closeArchiveHandle } = require('../utils/archiveView');
 const { multerUpload, toCloudinary, resizeImage, hasCloudinary } = require('../middleware/upload');
 
@@ -767,6 +768,16 @@ router.put('/api/admin/accounts/:id/approve', requireAdmin, async (req, res) => 
   if (user.accountStatus !== 'pending')
     return res.status(400).json({ error: 'Account is not pending.' });
 
+  // Admissions: never approve beyond the beds of that sex (approved residents count even before a bed is assigned).
+  const adm = admission.getStatus();
+  const sexKey = String(user.sex || '').toLowerCase();
+  if ((sexKey === 'male' || sexKey === 'female') && adm[sexKey].full) {
+    return res.status(409).json({
+      error: `All ${sexKey} slots are full (${adm[sexKey].approved}/${adm[sexKey].max}). Add beds in Room Management or free a slot before approving more ${sexKey} residents.`,
+      code: 'SLOTS_FULL',
+    });
+  }
+
   approveAccount(req.params.id);
 
   // Also approve any pending ID verification for this user (registration + ID = one workflow)
@@ -783,7 +794,34 @@ router.put('/api/admin/accounts/:id/approve', requireAdmin, async (req, res) => 
   // Email the user
   sendAccountApprovedEmail(user.email, user.firstName).catch(e => log.error(`Approval email failed: ${e.message}`));
 
-  res.json({ success: true });
+  // This approval may have filled the last bed of that sex → auto-return the other pending applicants of that sex
+  // (e-mailed "slots are full") and post the automatic announcement. Never lets a failure here undo the approval.
+  let autoClosed = null;
+  try {
+    const r = admission.enforce(req.user.id, io);
+    if (r.rejected.male || r.rejected.female) {
+      autoClosed = r.rejected;
+      logAdminAction(req.user.id, 'admission_auto_reject', 'system', 'admission',
+        `Slots full — auto-returned ${r.rejected.male} male and ${r.rejected.female} female pending applicant(s)`);
+    }
+  } catch (e) { log.error(`[admission] enforce after approval failed: ${e.message}`); }
+
+  res.json({ success: true, autoRejected: autoClosed });
+});
+
+// ── Admissions switch + live slot numbers (Registrations tab) ─────────────────────
+router.get('/api/admin/admission', requireAdmin, (req, res) => {
+  try { admission.syncAnnouncements(); } catch (e) { log.warn(`[admission] sync failed: ${e.message}`); }
+  res.set('Cache-Control', 'no-store');
+  res.json(admission.getStatus());
+});
+
+router.put('/api/admin/admission', requireAdmin, (req, res) => {
+  if (typeof req.body?.closed !== 'boolean') return res.status(400).json({ error: 'closed must be true or false.' });
+  const status = admission.setManualClosed(req.body.closed, req.user.username);
+  logAdminAction(req.user.id, 'admission_switch', 'setting', 'admission_closed',
+    req.body.closed ? 'Closed applications for everyone' : 'Reopened applications');
+  res.json(status);
 });
 
 // ── Return an application for correction ("Reject") ────────────────────────────────

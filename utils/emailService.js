@@ -1009,6 +1009,42 @@ async function sendAccountRejectedEmail(toEmail, firstName, reason = '', flags =
   }
 }
 
+/**
+ * Sent to every pending applicant who is auto-returned because the dormitory slots for their sex just filled up
+ * (utils/admission.js). Plain "sorry, we are full" — no correction checklist, nothing for them to fix right now.
+ */
+async function sendSlotsFullEmail(toEmail, firstName, sex = '') {
+  const appName = APP_NAME();
+  const appUrl  = APP_URL();
+  const who = sex === 'male' ? 'male' : sex === 'female' ? 'female' : '';
+  const slots = who ? `all ${who} dormitory slots` : 'all dormitory slots';
+  const body = emailWrapper(
+    'linear-gradient(135deg,#78350f,#d97706)', '&#128716;', 'Dormitory slots are full', appName,
+    greeting(firstName) +
+    `<p style="color:#475569;font-size:15px;line-height:1.7;margin:0 0 12px;">
+      Thank you for applying to <strong>${appName}</strong>. Unfortunately, ${slots} have just been filled,
+      so we are <strong>unable to accept your application</strong> at this time.
+    </p>
+    <div style="background:#fffbeb;border:1px solid #fcd34d;border-radius:8px;padding:12px 16px;margin:16px 0;">
+      <p style="color:#92400e;font-size:13px;line-height:1.6;margin:0;">
+        Your application was not deleted &mdash; it is kept safely on file. If a slot opens up or applications reopen,
+        announcements will be posted on the login page, and you can log in with your email and password (or Google) to continue.
+      </p>
+    </div>` +
+    btn(appUrl, 'Visit PGA-DAMIS', '#d97706')
+  );
+  const text = `Dormitory slots are full — ${appName}\n\nHi ${firstName},\n\nThank you for applying. Unfortunately, ${slots} have just been filled, so we are unable to accept your application at this time.` +
+    `\n\nYour application was not deleted — it is kept safely on file. If a slot opens up or applications reopen, announcements will be posted on the login page (${appUrl}).`;
+  try {
+    const result = await _send({ to: toEmail, subject: `[${appName}] Dormitory slots are full`, html: body, text });
+    if (result.driver !== 'console') console.log(`  🛏️ Slots-full email sent [${result.driver}] → ${toEmail}`);
+    return result;
+  } catch (err) {
+    console.error(`❌ [emailService] sendSlotsFullEmail → ${toEmail} | driver=${DRIVER} | ${err.message}`);
+    return { success: false };
+  }
+}
+
 async function sendContactEmail(toEmail, senderName, senderEmail, subject, message) {
   const appName = APP_NAME();
   const body = emailWrapper(
@@ -1197,6 +1233,7 @@ module.exports = {
   sendAccountPendingEmail,
   sendAccountApprovedEmail,
   sendAccountRejectedEmail,
+  sendSlotsFullEmail,
   sendRevisionDecisionEmail,
   sendRevisionReviewEmail,
   sendContactEmail,

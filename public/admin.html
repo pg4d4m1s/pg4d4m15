@@ -366,6 +366,39 @@
       </div>
       <button onclick="currentRegTab==='pending'?loadPendingAccounts():loadRejectedAccounts()" class="flex items-center gap-2 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 text-sm font-medium px-4 py-2 rounded-xl hover:bg-slate-50 transition-colors"><i class="fa-solid fa-rotate text-xs"></i>Refresh</button>
     </div>
+    <!-- Admissions: master switch + live slot numbers (approved residents / beds, per sex). Same numbers the login page shows. -->
+    <div id="admission-card" class="mb-5 rounded-2xl border border-slate-100 dark:border-slate-800 bg-white dark:bg-slate-900 p-4">
+      <div class="flex items-center gap-3">
+        <div class="min-w-0 flex-1">
+          <p class="text-sm font-semibold text-slate-700 dark:text-slate-200">Close applications for everyone</p>
+          <p id="admission-help" class="text-xs text-slate-400">Off: sign-ups are open. A sex closes by itself when its beds are full.</p>
+        </div>
+        <button type="button" id="admission-switch" role="switch" aria-checked="false" aria-label="Close applications for everyone" onclick="toggleAdmission()"
+          class="relative shrink-0 w-14 h-11 flex items-center justify-center rounded-full focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-400">
+          <span id="admission-track" class="block w-12 h-7 rounded-full bg-slate-300 dark:bg-slate-600 transition-colors"></span>
+          <span id="admission-knob" class="absolute left-1.5 top-1/2 -translate-y-1/2 w-5 h-5 rounded-full bg-white shadow transition-transform"></span>
+        </button>
+      </div>
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-3">
+        <div id="admission-male" class="rounded-xl border border-slate-100 dark:border-slate-800 px-3 py-2.5 flex items-center gap-3">
+          <i class="fa-solid fa-mars text-blue-500 text-lg" aria-hidden="true"></i>
+          <div class="min-w-0 flex-1">
+            <p class="text-xs font-semibold text-slate-500 dark:text-slate-400">Male residents</p>
+            <p class="text-sm text-slate-800 dark:text-slate-100"><span class="adm-approved font-bold text-lg">–</span><span class="text-slate-400"> / </span><span class="adm-max font-semibold">–</span> <span class="adm-remaining text-xs text-slate-400"></span></p>
+          </div>
+          <span class="adm-badge text-xs font-bold rounded-full px-2.5 py-1 bg-slate-100 text-slate-500">…</span>
+        </div>
+        <div id="admission-female" class="rounded-xl border border-slate-100 dark:border-slate-800 px-3 py-2.5 flex items-center gap-3">
+          <i class="fa-solid fa-venus text-pink-500 text-lg" aria-hidden="true"></i>
+          <div class="min-w-0 flex-1">
+            <p class="text-xs font-semibold text-slate-500 dark:text-slate-400">Female residents</p>
+            <p class="text-sm text-slate-800 dark:text-slate-100"><span class="adm-approved font-bold text-lg">–</span><span class="text-slate-400"> / </span><span class="adm-max font-semibold">–</span> <span class="adm-remaining text-xs text-slate-400"></span></p>
+          </div>
+          <span class="adm-badge text-xs font-bold rounded-full px-2.5 py-1 bg-slate-100 text-slate-500">…</span>
+        </div>
+      </div>
+      <p class="text-[11px] text-slate-400 mt-2">Counts every approved resident of that sex (even without a bed yet) against the beds in that sex&rsquo;s rooms. When a sex becomes full, its other pending applicants are returned automatically with a &ldquo;slots are full&rdquo; email, and an announcement is posted on the login page.</p>
+    </div>
     <!-- Sub-tabs -->
     <div class="flex gap-1 mb-5 bg-slate-100 dark:bg-slate-800 rounded-xl p-1 w-fit">
       <button id="reg-sub-pending" onclick="switchRegTab('pending')"
@@ -3061,9 +3094,51 @@
   }
 
   // ── REGISTRATION APPROVAL ────────────────────────
+  // ── Admissions switch + slot numbers ──────────────────────────────────────────
+  function paintAdmission(st) {
+    const sw = document.getElementById('admission-switch'); if (!sw || !st) return;
+    const closed = !!st.manualClosed;
+    sw.setAttribute('aria-checked', closed ? 'true' : 'false');
+    document.getElementById('admission-track').className = 'block w-12 h-7 rounded-full transition-colors ' + (closed ? 'bg-red-500' : 'bg-slate-300 dark:bg-slate-600');
+    document.getElementById('admission-knob').style.transform = 'translateY(-50%) translateX(' + (closed ? '20px' : '0') + ')';
+    document.getElementById('admission-help').textContent = closed
+      ? 'On: applications are CLOSED for male and female. Applicants who were returned for correction can still resubmit.'
+      : 'Off: sign-ups are open. A sex closes by itself when its beds are full.';
+    ['male', 'female'].forEach(function (sex) {
+      const g = st[sex], box = document.getElementById('admission-' + sex); if (!g || !box) return;
+      box.querySelector('.adm-approved').textContent = g.approved;
+      box.querySelector('.adm-max').textContent = g.max;
+      box.querySelector('.adm-remaining').textContent = g.max ? '(' + g.remaining + ' left' + (g.pending ? ' · ' + g.pending + ' pending' : '') + ')' : '(no beds set)';
+      const b = box.querySelector('.adm-badge');
+      b.className = 'adm-badge text-xs font-bold rounded-full px-2.5 py-1 ' + (g.open ? 'bg-emerald-100 text-emerald-700' : 'bg-red-100 text-red-700');
+      b.innerHTML = g.open ? '<i class="fa-solid fa-door-open mr-1" aria-hidden="true"></i>Open'
+        : '<i class="fa-solid fa-door-closed mr-1" aria-hidden="true"></i>' + (g.reason === 'full' ? 'Full' : 'Closed');
+    });
+  }
+  async function loadAdmission() {
+    try {
+      const r = await fetch('/api/admin/admission', { cache: 'no-store' });
+      if (r.ok) paintAdmission(await r.json());
+    } catch (e) { /* the card just keeps its last numbers */ }
+  }
+  async function toggleAdmission() {
+    const sw = document.getElementById('admission-switch'); if (!sw || sw.disabled) return;
+    const next = sw.getAttribute('aria-checked') !== 'true';
+    sw.disabled = true;
+    try {
+      const r = await fetch('/api/admin/admission', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ closed: next }) });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      paintAdmission(await r.json());
+      toast(next ? 'Applications are now closed for everyone.' : 'Applications are open again.', 'success');
+    } catch (e) {
+      toast('Could not save the switch. Check your connection and try again.', 'error');
+    } finally { sw.disabled = false; }
+  }
+
   async function loadPendingAccounts(){
     const el=document.getElementById('registrations-list');
     if(!el)return;
+    loadAdmission();
     setLoading(el);
     const r=await fetch('/api/admin/accounts/pending');
     const d=await r.json();
@@ -3754,10 +3829,16 @@
     if(btn){ btn.disabled=true; btn.innerHTML='<i class="fa-solid fa-spinner animate-spin mr-1"></i>Approving...'; }
     const r=await fetch(`/api/admin/accounts/${id}/approve`,{method:'PUT'});
     const d=await r.json();
-    if(d.error){ toast(d.error,'error'); if(btn){btn.disabled=false;btn.innerHTML='<i class="fa-solid fa-check"></i> Approve Account';} return; }
+    if(d.error){ toast(d.error,'error'); loadAdmission(); if(btn){btn.disabled=false;btn.innerHTML='<i class="fa-solid fa-check"></i> Approve Account';} return; }
     document.getElementById(`reg-card-${id}`)?.remove();
     toast('Account approved! User has been emailed. ✅','success');
     updateRegBadge(-1);
+    loadAdmission();
+    if(d.autoRejected){
+      const n=(d.autoRejected.male||0)+(d.autoRejected.female||0);
+      toast(`Slots are now full — ${n} other pending applicant${n===1?'':'s'} returned and emailed. An announcement was posted.`,'info');
+      // the list + badge refresh through the 'account-rejected' socket events the server sends for each one
+    }
     // Also refresh stats
     fetch('/api/admin/stats').then(r=>r.json()).then(s=>{ _lastStats=s; renderStatCards(s); });
   }
