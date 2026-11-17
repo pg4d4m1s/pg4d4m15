@@ -14,6 +14,8 @@
  *
  * ADMIN (all under /api/admin/*, so server.js's admin guard applies on top of requireAdmin)
  *   GET  /api/admin/revisions/stats                   counts per status (sidebar badge)
+ *   GET  /api/admin/revisions/items                   what an admin may ask a resident to correct
+ *   POST /api/admin/residents/:userId/revisions       { items:[{key,note}], days, note (required) }   admin asks a resident to correct something (edit window opens at once)
  *   GET  /api/admin/revisions?status=pending|approved|submitted|completed|rejected|cancelled|expired|all
  *   GET  /api/admin/revisions/:id                     request + the resident's current application + (proposed or applied) changes
  *   POST /api/admin/revisions/:id/approve             { items:[key], days:1|3|7|14, note }   1st approval: allow the resident to edit
@@ -172,6 +174,33 @@ router.post('/api/users/me/revisions/current/submit', requireAuth, (req, res) =>
 router.get('/api/admin/revisions/stats', requireAdmin, (req, res) => {
   try { res.json(rr.statsForAdmin()); }
   catch (e) { fail500(res, 'admin-stats', e, 'Could not load revision stats.'); }
+});
+
+// What an admin may ask a resident to correct (labels come from the same list the resident sees).
+router.get('/api/admin/revisions/items', requireAdmin, (req, res) => {
+  res.json({
+    items: rr.REQUESTABLE.map((k) => ({ key: k, label: rr.ITEMS[k].label, group: rr.ITEMS[k].group })),
+    windows: rr.ALLOWED_WINDOWS, defaultDays: rr.DEFAULT_WINDOW_DAYS, noteMin: rr.ADMIN_NOTE_MIN, noteMax: rr.ADMIN_NOTE_MAX,
+  });
+});
+
+// Admin asks ONE resident to correct something -> the edit window opens immediately (see rr.adminRequest).
+router.post('/api/admin/residents/:userId/revisions', requireAdmin, (req, res) => {
+  try {
+    const b = req.body || {};
+    const r = rr.adminRequest({ userId: req.params.userId, adminId: req.user.id, items: b.items, days: b.days, note: b.note });
+    if (r.ok) {
+      const q = r.request;
+      const labels = q.approvedLabels;
+      log.admin(`Revision ${q.id} REQUESTED by @${req.user.username} from ${q.userId}: [${q.approvedItems.join(', ')}] ${r.days}d`);
+      logAdminAction(req.user.id, 'revision_requested_by_admin', 'user', q.userId, `${q.approvedItems.join(',')} for ${r.days} day(s)`);
+      tellResident(req, q.userId, 'revision_approved',
+        `The dormitory admin asked you to correct: ${labels.join('; ')}. ${q.adminNote} Open My Dormitory \u2192 My Application before ${phDate(q.expiresAt)}.`);
+      mailResident(q.userId, { approved: true, items: labels, note: q.adminNote, expiresAt: q.expiresAt });
+      tellAdmins(req, 'revision-request', { id: q.id, decided: true });
+    }
+    send(res, r, { request: r.request });
+  } catch (e) { fail500(res, 'admin-request', e, 'Could not send the revision request.'); }
 });
 
 router.get('/api/admin/revisions', requireAdmin, (req, res) => {

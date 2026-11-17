@@ -560,7 +560,7 @@
                   </label>
                 </div>
                 <div class="relative">
-                  <select id="reg-course" onchange="onCourseChange()" disabled
+                  <select id="reg-course" data-sheet data-sheet-title="Program / Course" data-sheet-search="Search your course…" onchange="onCourseChange()" disabled
                     class="form-input w-full px-3 py-2.5 rounded-xl border border-slate-200 dark:border-slate-600 bg-slate-50 dark:bg-slate-800 text-sm text-slate-700 dark:text-slate-100 appearance-none pr-8 disabled:opacity-50 transition-colors">
                     <option value="">&#8212; Select Year Level first &#8212;</option>
                   </select>
@@ -583,7 +583,7 @@
                 </label>
               </div>
               <div class="relative">
-                <select id="reg-specialization"
+                <select id="reg-specialization" data-sheet data-sheet-title="Major / Specialization" data-sheet-search="Search your major…"
                   class="form-input w-full px-3 py-2.5 rounded-xl border border-slate-200 dark:border-slate-600 bg-slate-50 dark:bg-slate-800 text-sm text-slate-700 dark:text-slate-100 appearance-none pr-8 transition-colors">
                   <option value="">&#8212; Select Major / Specialization &#8212;</option>
                 </select>
@@ -1200,7 +1200,11 @@
                 <i class="fa-solid fa-rotate"></i> Refresh
               </button>
             </div>
-            <p class="text-xs text-slate-400 mb-3 leading-relaxed">Choose a room you would like to stay in. This is only a request &mdash; the dormitory manager makes the final room assignment. Availability is live.</p>
+            <p class="text-xs text-slate-400 mb-2 leading-relaxed">Choose a room you would like to stay in. Availability is live.</p>
+            <div class="flex items-start gap-3 rounded-xl border-l-4 border-amber-500 bg-amber-50 dark:bg-amber-950/30 px-3.5 py-3 mb-3" role="note">
+              <i class="fa-solid fa-circle-info text-amber-500 text-base mt-0.5 shrink-0" aria-hidden="true"></i>
+              <p class="text-sm font-semibold text-amber-900 dark:text-amber-200 leading-snug">This is only a request &mdash; <span class="underline decoration-amber-400 decoration-2 underline-offset-2">the dormitory manager makes the final room assignment.</span></p>
+            </div>
             <input id="reg-room-pref" type="hidden" value=""/>
             <div id="room-pref-list" class="grid grid-cols-2 gap-2 max-h-72 overflow-y-auto pr-1" role="radiogroup" aria-label="Room preference">
               <p class="col-span-2 text-xs text-slate-400 py-3 text-center">Loading rooms&hellip;</p>
@@ -1306,6 +1310,7 @@
 
 <script src="/js/psgc-data.js"></script>
 <script src="/js/reg-resilience.js"></script>
+<script src="/js/select-sheet.js"></script>
 <script src="/js/course-catalog.js"></script>
 <script src="/js/auth.js"></script>
 <script src="/js/support-chat.js"></script>

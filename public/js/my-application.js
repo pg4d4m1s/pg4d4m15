@@ -215,11 +215,11 @@
     if (rev && rev.status === 'approved') {
       const done = new Set(rev.doneItems);
       const returned = !!rev.reviewNote && !!rev.reviewedAt;          // the admin sent submitted changes back
-      return box('border-green-200 bg-green-50 text-green-900 dark:bg-green-950/30 dark:border-green-900 dark:text-green-200', 'fa-lock-open', returned ? 'Changes returned for correction' : 'Edits unlocked',
+      return box('border-green-200 bg-green-50 text-green-900 dark:bg-green-950/30 dark:border-green-900 dark:text-green-200', 'fa-lock-open', returned ? 'Changes returned for correction' : (rev.initiatedBy === 'admin' ? 'The admin asked you to correct your application' : 'Edits unlocked'),
         (returned ? `<p class="mt-0.5"><strong>Admin note:</strong> ${h(rev.reviewNote)}</p><p class="mt-1">Your saved drafts are still here. Fix them and submit again before <strong>${phDate(rev.expiresAt, true)}</strong> (${timeLeft(rev.expiresAt)}).</p>`
                     : `<p class="mt-0.5">You can change the items below until <strong>${phDate(rev.expiresAt, true)}</strong> (${timeLeft(rev.expiresAt)}).</p>`) +
         bullets(rev.approvedItems.map((k) => { const it = rev.items.find((i) => i.key === k); return `<li><i class="fa-solid ${done.has(k) ? 'fa-circle-check text-green-600' : 'fa-circle text-green-300'} text-xs mr-1.5"></i>${h(it ? it.label : k)}${done.has(k) ? ' <span class="text-xs opacity-70">&middot; draft saved</span>' : ''}</li>`; })) +
-        (rev.adminNote && !returned ? `<p class="mt-2 text-xs"><strong>Admin note:</strong> ${h(rev.adminNote)}</p>` : '') +
+        (rev.adminNote && !returned ? `<p class="mt-2 ${rev.initiatedBy === 'admin' ? 'text-sm' : 'text-xs'}"><strong>${rev.initiatedBy === 'admin' ? 'What the admin needs' : 'Admin note'}:</strong> ${h(rev.adminNote)}</p>` : '') +
         `<p class="mt-2 text-xs opacity-80">Tap <em>Edit</em> / <em>Replace</em> on the matching card. Your changes are saved as <strong>drafts</strong>: your application does not change until you tap <em>Submit for review</em> and the admin approves them.</p>`,
         `<button type="button" class="ma-btn ma-btn-grn" data-act="submit"><i class="fa-solid fa-paper-plane text-xs"></i> Submit for review</button>`);
     }

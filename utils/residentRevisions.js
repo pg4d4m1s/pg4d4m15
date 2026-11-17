@@ -132,7 +132,8 @@ function ensureSchema() {
   `);
   // Columns added for the second review step (older databases get them on boot; harmless when already there).
   const have = db.prepare('PRAGMA table_info(revision_requests)').all().map((c) => c.name);
-  for (const [name, ddl] of [['submitted_at', 'TEXT'], ['reviewed_by', 'TEXT'], ['reviewed_at', 'TEXT'], ['review_note', "TEXT NOT NULL DEFAULT ''"]]) {
+  for (const [name, ddl] of [['submitted_at', 'TEXT'], ['reviewed_by', 'TEXT'], ['reviewed_at', 'TEXT'], ['review_note', "TEXT NOT NULL DEFAULT ''"],
+                             ['initiated_by', "TEXT NOT NULL DEFAULT 'resident'"]]) {   // 'admin' = the admin asked the resident to correct something
     if (!have.includes(name)) db.exec(`ALTER TABLE revision_requests ADD COLUMN ${name} ${ddl}`);
   }
 }
@@ -184,6 +185,7 @@ function shape(row) {
     decidedAt: toIso(row.decided_at), expiresAt: toIso(row.expires_at), completedAt: toIso(row.completed_at),
     submittedAt: toIso(row.submitted_at), reviewedAt: toIso(row.reviewed_at), reviewNote: row.review_note || '',
     createdAt: toIso(row.created_at), updatedAt: toIso(row.updated_at),
+    initiatedBy: row.initiated_by === 'admin' ? 'admin' : 'resident',
   };
 }
 
@@ -383,6 +385,35 @@ function approve({ id, adminId, items, days, note }) {
   const expires = sqlNow(new Date(Date.now() + d * 86400000));
   db.prepare(`UPDATE revision_requests SET status = 'approved', approved_items = ?, admin_note = ?, decided_by = ?, decided_at = datetime('now'),
               expires_at = ?, updated_at = datetime('now') WHERE id = ?`).run(JSON.stringify(granted), cleanText(note, ADMIN_NOTE_MAX), adminId, expires, id);
+  return { ok: true, request: shape(getRow(id)), days: d };
+}
+
+/**
+ * Admin-initiated revision: the admin asks a resident to correct something (wrong ID photo, outdated address ...) instead of
+ * waiting for the resident to ask. It skips the 'pending' step (the admin IS the first approval) and opens the edit window at
+ * once, so everything after this - resident edits drafts, submits, admin approves/returns/declines the changes - is the
+ * existing flow, unchanged. The note is required: it is the instruction the resident reads.
+ */
+function adminRequest({ userId, adminId, items, days, note }) {
+  const el = eligibility(userId); if (!el.ok) return el;
+  const list = sanitizeItems(items);
+  if (!list.length) return fail(400, 'NO_ITEMS', 'Choose at least one thing the resident should correct.');
+  const n = cleanText(note, ADMIN_NOTE_MAX);
+  if (n.length < ADMIN_NOTE_MIN) return fail(400, 'NOTE_REQUIRED', 'Tell the resident what is wrong so they know what to fix.', { field: 'note' });
+  const open = getOpenRequest(userId);
+  if (open) {
+    const where = open.status === 'pending' ? 'has a request waiting for you in Revision Requests - approve or decline it first'
+      : open.status === 'submitted' ? 'already submitted changes waiting for your review in Revision Requests'
+      : 'already has edit access open (close it in Revision Requests first if you want to start over)';
+    return fail(409, 'ALREADY_OPEN', `This resident ${where}.`);
+  }
+  const d = ALLOWED_WINDOWS.includes(Number(days)) ? Number(days) : DEFAULT_WINDOW_DAYS;
+  const expires = sqlNow(new Date(Date.now() + d * 86400000));
+  const id = genId();
+  db.prepare(`INSERT INTO revision_requests (id, user_id, status, items, approved_items, reason, admin_note, decided_by, decided_at, expires_at, initiated_by)
+              VALUES (?, ?, 'approved', ?, ?, ?, ?, ?, datetime('now'), ?, 'admin')`)
+    .run(id, userId, JSON.stringify(list), JSON.stringify(list.map((i) => i.key)), n, n, adminId, expires);
+  log.info(`[revision] admin ${adminId} asked ${userId} to correct [${list.map((i) => i.key).join(', ')}] (request ${id}, ${d}d)`);
   return { ok: true, request: shape(getRow(id)), days: d };
 }
 
@@ -776,5 +807,5 @@ module.exports = {
   // resident side
   getOpenRequest, history, eligibility, createRequest, cancelRequest, saveInfoDraft, saveDocumentDrafts, submitForReview, buildSummary,
   // admin side
-  approve, reject, revoke, applyChanges, discardChanges, returnChanges, listForAdmin, statsForAdmin, detailForAdmin, expireStale,
+  approve, adminRequest, reject, revoke, applyChanges, discardChanges, returnChanges, listForAdmin, statsForAdmin, detailForAdmin, expireStale,
 };

@@ -28,7 +28,7 @@ const FEATURES = {
   doc_gate:     'Document check at submit',
   doc_audit:    'Document badges (admin)',
   selfie_check: 'Selfie face check',
-  id_orient:    'ID card orientation',
+  id_orient:    'Document orientation',
 };
 const STATUSES = ['ok', 'rate_limited', 'timeout', 'error', 'no_key'];
 const KEEP_DAYS = Math.max(7, parseInt(process.env.AI_USAGE_KEEP_DAYS, 10) || 90);
