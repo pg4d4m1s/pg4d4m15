@@ -1484,6 +1484,73 @@ async function initAddrDropdowns() {
 // ═══════════════════════════════════════════════════
 window._damis_docs = {};
 
+// ── Upload helpers (phones) ─────────────────────────────────────────────────────────────────────────
+function docEsc(t) { return String(t == null ? '' : t).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
+
+// Android browsers and most phone WebViews cannot render a PDF inside an <iframe> (they show a "content is blocked"
+// sad-face box). Only embed the PDF where the browser really has an inline viewer (desktop).
+function canInlinePdf() {
+  var mobile = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent || '');
+  if (mobile) return false;
+  if (typeof navigator.pdfViewerEnabled === 'boolean') return navigator.pdfViewerEnabled;
+  return true;
+}
+
+var DOC_OPEN_LINK_STYLE = 'background:rgba(0,0,0,0.6);color:#fff;font-size:11px;font-weight:700;padding:5px 11px;border-radius:7px;text-decoration:none;display:flex;align-items:center;gap:5px;z-index:10;box-shadow:0 2px 8px rgba(0,0,0,0.25);';
+
+function pdfPreviewHtml(url, fileName) {
+  if (canInlinePdf()) {
+    return '<div style="position:relative;width:100%;height:440px;background:#f8fafc;">'
+      + '<iframe src="' + url + '#toolbar=0&navpanes=0&scrollbar=1&view=FitH" style="width:100%;height:100%;border:none;" title="' + docEsc(fileName) + '"></iframe>'
+      + '<a href="' + url + '" target="_blank" rel="noopener" onclick="event.stopPropagation()" '
+      + 'style="position:absolute;top:8px;right:8px;' + DOC_OPEN_LINK_STYLE + '">'
+      + '<i class="fa-solid fa-up-right-from-square" style="font-size:10px;"></i> Open Full Page</a></div>';
+  }
+  // Phone: a clear "file is ready" card + a button that opens the PDF in the phone's own viewer.
+  return '<div class="flex flex-col items-center justify-center py-5 px-3 gap-2 text-center">'
+    + '<i class="fa-solid fa-file-pdf text-red-500 text-4xl"></i>'
+    + '<p class="text-sm font-semibold text-slate-600 dark:text-slate-200">PDF ready to upload</p>'
+    + '<p class="text-xs text-slate-400">Preview isn\u2019t shown on phones. Tap below to check the file.</p>'
+    + '<a href="' + url + '" target="_blank" rel="noopener" onclick="event.stopPropagation()" '
+    + 'class="inline-flex items-center justify-center gap-2 min-h-[44px] px-5 rounded-lg bg-blue-600 text-white text-sm font-semibold no-underline">'
+    + '<i class="fa-solid fa-up-right-from-square text-xs"></i> Open to check</a></div>';
+}
+
+// Some phones take several seconds to show the file picker; without feedback people tap again and think it is broken.
+function showDocOpening(key) {
+  var def = $('doc-def-' + key); if (!def) return;
+  var note = $('doc-open-' + key);
+  if (!note) { note = document.createElement('p'); note.id = 'doc-open-' + key; note.className = 'doc-opening-note'; note.setAttribute('role', 'status'); def.appendChild(note); }
+  note.textContent = 'Opening your files\u2026 this can take a few seconds on some phones.';
+  clearTimeout(note._t); note._t = setTimeout(function () { hideDocOpening(key); }, 12000);
+}
+function hideDocOpening(key) {
+  var note = $('doc-open-' + key);
+  if (note) { clearTimeout(note._t); note.remove(); }
+}
+document.addEventListener('click', function (e) {
+  var el = e.target;
+  if (el && el.classList && el.classList.contains('doc-file-overlay')) showDocOpening(el.id.replace('doc-file-', ''));
+}, true);
+
+// Facebook / Messenger / Instagram / TikTok in-app browsers often cannot open the file picker. Tell the person how to get out.
+(function inAppBrowserTip() {
+  function run() {
+    var ua = navigator.userAgent || '';
+    if (!/FBAN|FBAV|FB_IAB|FBIOS|Instagram|Messenger|musical_ly|TikTok|Line\//i.test(ua)) return;
+    var tip = $('inapp-browser-tip'); if (!tip) return;
+    tip.classList.remove('hidden');
+    var btn = $('inapp-copy-link');
+    if (btn) btn.addEventListener('click', function () {
+      var url = location.origin + '/';
+      var done = function () { btn.textContent = 'Link copied \u2713'; };
+      if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(url).then(done, function () { window.prompt('Copy this link:', url); });
+      else window.prompt('Copy this link:', url);
+    });
+  }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', run); else run();
+})();
+
 function handleDocFile(evt, key) {
   var file = evt.target.files && evt.target.files[0];
   if (!file) return;
@@ -1495,6 +1562,7 @@ function handleDocFile(evt, key) {
   var maxBytes = isImage ? 30 * 1024 * 1024 : 10 * 1024 * 1024;
   if (file.size > maxBytes) { showStepError(5, 'File too large (' + formatBytes(file.size) + '). Maximum ' + (isImage ? '30 MB per photo.' : '10 MB per document.')); return; }
   hideStepError(5);
+  hideDocOpening(key);
   window._damis_docs[key] = file;
   RegResilience.onDocSelected(key, file);   // compress in background + keep a copy for draft resume
   var def = $('doc-def-' + key), prev = $('doc-prev-' + key), fn = $('doc-fn-' + key);
@@ -1519,20 +1587,9 @@ function handleDocFile(evt, key) {
       };
       reader.readAsDataURL(file);
     } else if (isPdf) {
-      // Show embedded PDF preview with full-page open link
       var pdfObjUrl = URL.createObjectURL(file);
       thumb.dataset.pdfObjUrl = pdfObjUrl; // store for revoke on clear
-      thumb.innerHTML =
-        '<div style="position:relative;width:100%;height:440px;background:#f8fafc;">'
-        + '<iframe src="' + pdfObjUrl + '#toolbar=0&navpanes=0&scrollbar=1&view=FitH" '
-        + 'style="width:100%;height:100%;border:none;" title="' + file.name + '"></iframe>'
-        + '<a href="' + pdfObjUrl + '" target="_blank" rel="noopener" '
-        + 'onclick="event.stopPropagation()" '
-        + 'style="position:absolute;top:8px;right:8px;background:rgba(0,0,0,0.6);color:#fff;'
-        + 'font-size:11px;font-weight:700;padding:5px 11px;border-radius:7px;text-decoration:none;'
-        + 'display:flex;align-items:center;gap:5px;z-index:10;box-shadow:0 2px 8px rgba(0,0,0,0.25);">'
-        + '<i class="fa-solid fa-up-right-from-square" style="font-size:10px;"></i> Open Full Page</a>'
-        + '</div>';
+      thumb.innerHTML = pdfPreviewHtml(pdfObjUrl, file.name);
     } else if (isDocx) {
       // Convert DOCX → PDF on the server via LibreOffice for an accurate print-preview.
       // Mammoth's client-side HTML conversion drops most formatting; a server-side PDF
@@ -1558,17 +1615,7 @@ function handleDocFile(evt, key) {
           var pdfUrl  = URL.createObjectURL(pdfBlob);
           thumb.dataset.pdfObjUrl = pdfUrl; // reuse existing revoke logic in clearDocFile
 
-          thumb.innerHTML =
-            '<div style="position:relative;width:100%;height:440px;background:#f8fafc;">'
-            + '<iframe src="' + pdfUrl + '#toolbar=0&navpanes=0&scrollbar=1&view=FitH" '
-            + 'style="width:100%;height:100%;border:none;" title="' + file.name + '"></iframe>'
-            + '<a href="' + pdfUrl + '" target="_blank" rel="noopener" '
-            + 'onclick="event.stopPropagation()" '
-            + 'style="position:absolute;top:8px;right:8px;background:rgba(0,0,0,0.6);color:#fff;'
-            + 'font-size:11px;font-weight:700;padding:5px 11px;border-radius:7px;text-decoration:none;'
-            + 'display:flex;align-items:center;gap:5px;z-index:10;box-shadow:0 2px 8px rgba(0,0,0,0.25);">'
-            + '<i class="fa-solid fa-up-right-from-square" style="font-size:10px;"></i> Open Full Page</a>'
-            + '</div>';
+          thumb.innerHTML = pdfPreviewHtml(pdfUrl, file.name);
 
           console.log('[DAMIS Doc] ' + key + ' DOCX→PDF preview ready (' + Math.round(pdfBlob.size / 1024) + ' KB)');
         } catch (err) {
@@ -1578,7 +1625,7 @@ function handleDocFile(evt, key) {
             + '<i class="fa-solid fa-file-word text-blue-500 text-4xl"></i>'
             + '<p class="text-sm font-semibold text-slate-600">Word Document</p>'
             + '<p class="text-xs text-slate-400">Preview unavailable — file will upload correctly.</p>'
-            + '<p class="text-xs text-red-400">' + (err.message || 'Conversion error') + '</p>'
+            + '<p class="text-xs text-red-400">' + docEsc(err.message || 'Conversion error') + '</p>'
             + '</div>';
         }
       })();
@@ -1599,6 +1646,7 @@ function clearDocFile(evt, key) {
   if (evt) evt.stopPropagation();
   delete window._damis_docs[key];
   RegResilience.onDocCleared(key);
+  hideDocOpening(key);
   var fileInput = $('doc-file-' + key), def = $('doc-def-' + key), prev = $('doc-prev-' + key);
   var thumb = $('doc-thumb-' + key);
   var sz    = $('doc-sz-' + key);
