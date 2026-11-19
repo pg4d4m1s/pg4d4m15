@@ -1499,21 +1499,103 @@ function canInlinePdf() {
 var DOC_OPEN_LINK_STYLE = 'background:rgba(0,0,0,0.6);color:#fff;font-size:11px;font-weight:700;padding:5px 11px;border-radius:7px;text-decoration:none;display:flex;align-items:center;gap:5px;z-index:10;box-shadow:0 2px 8px rgba(0,0,0,0.25);';
 
 function pdfPreviewHtml(url, fileName) {
-  if (canInlinePdf()) {
-    return '<div style="position:relative;width:100%;height:440px;background:#f8fafc;">'
-      + '<iframe src="' + url + '#toolbar=0&navpanes=0&scrollbar=1&view=FitH" style="width:100%;height:100%;border:none;" title="' + docEsc(fileName) + '"></iframe>'
-      + '<a href="' + url + '" target="_blank" rel="noopener" onclick="event.stopPropagation()" '
-      + 'style="position:absolute;top:8px;right:8px;' + DOC_OPEN_LINK_STYLE + '">'
-      + '<i class="fa-solid fa-up-right-from-square" style="font-size:10px;"></i> Open Full Page</a></div>';
-  }
-  // Phone: a clear "file is ready" card + a button that opens the PDF in the phone's own viewer.
+  return '<div style="position:relative;width:100%;height:440px;background:#f8fafc;">'
+    + '<iframe src="' + url + '#toolbar=0&navpanes=0&scrollbar=1&view=FitH" style="width:100%;height:100%;border:none;" title="' + docEsc(fileName) + '"></iframe>'
+    + '<a href="' + url + '" target="_blank" rel="noopener" onclick="event.stopPropagation()" '
+    + 'style="position:absolute;top:8px;right:8px;' + DOC_OPEN_LINK_STYLE + '">'
+    + '<i class="fa-solid fa-up-right-from-square" style="font-size:10px;"></i> Open Full Page</a></div>';
+}
+
+// Last-resort card (PDF.js could not load or the PDF could not be read): the file still uploads normally.
+function pdfFallbackHtml(url, note) {
   return '<div class="flex flex-col items-center justify-center py-5 px-3 gap-2 text-center">'
     + '<i class="fa-solid fa-file-pdf text-red-500 text-4xl"></i>'
     + '<p class="text-sm font-semibold text-slate-600 dark:text-slate-200">PDF ready to upload</p>'
-    + '<p class="text-xs text-slate-400">Preview isn\u2019t shown on phones. Tap below to check the file.</p>'
+    + '<p class="text-xs text-slate-400">' + docEsc(note || 'Preview isn\u2019t available right now. You can still check the file below.') + '</p>'
     + '<a href="' + url + '" target="_blank" rel="noopener" onclick="event.stopPropagation()" '
     + 'class="inline-flex items-center justify-center gap-2 min-h-[44px] px-5 rounded-lg bg-blue-600 text-white text-sm font-semibold no-underline">'
     + '<i class="fa-solid fa-up-right-from-square text-xs"></i> Open to check</a></div>';
+}
+
+// ── Phone PDF preview: PDF.js (self-hosted in /vendor/pdfjs, loaded only when needed) draws the pages in-page ──
+var _pdfjsPromise = null;
+function loadPdfJs() {
+  if (window.pdfjsLib) return Promise.resolve(window.pdfjsLib);
+  if (_pdfjsPromise) return _pdfjsPromise;
+  _pdfjsPromise = new Promise(function (resolve, reject) {
+    var sc = document.createElement('script');
+    sc.src = '/vendor/pdfjs/pdf.min.js';
+    sc.onload = function () {
+      if (!window.pdfjsLib) { _pdfjsPromise = null; return reject(new Error('pdf.js missing')); }
+      window.pdfjsLib.GlobalWorkerOptions.workerSrc = '/vendor/pdfjs/pdf.worker.min.js';
+      resolve(window.pdfjsLib);
+    };
+    sc.onerror = function () { _pdfjsPromise = null; reject(new Error('pdf.js failed to load')); };
+    document.head.appendChild(sc);
+  });
+  return _pdfjsPromise;
+}
+
+var PDF_PREVIEW_MAX_PAGES = 6;   // keeps low-end phones from running out of memory
+var _pdfTok = 0;
+
+// Shows `blob` (a PDF) inside `thumb`. Desktop: the browser's own viewer in an iframe. Phones: pages drawn by PDF.js.
+function showPdfPreview(thumb, blob, url, fileName) {
+  if (canInlinePdf()) { thumb.innerHTML = pdfPreviewHtml(url, fileName); return; }
+  var tok = ++_pdfTok; thumb._pdfTok = tok;
+  var alive = function () { return thumb._pdfTok === tok && document.body.contains(thumb); };
+  thumb.innerHTML = '<div class="flex flex-col items-center justify-center py-8 gap-2 text-slate-400" role="status">'
+    + '<i class="fa-solid fa-spinner fa-spin text-2xl"></i><p class="text-xs">Preparing preview\u2026</p></div>';
+  Promise.all([loadPdfJs(), blob.arrayBuffer()]).then(function (r) {
+    var lib = r[0];
+    return lib.getDocument({ data: new Uint8Array(r[1]), disableFontFace: true, isEvalSupported: false, standardFontDataUrl: '/vendor/pdfjs/standard_fonts/' }).promise;
+  }).then(function (doc) {
+    if (!alive()) { doc.destroy(); return; }
+    var wrap = document.createElement('div');
+    wrap.style.cssText = 'position:relative;width:100%;background:#f8fafc;';
+    var scroller = document.createElement('div');
+    scroller.style.cssText = 'height:min(70dvh,480px);overflow:auto;-webkit-overflow-scrolling:touch;padding:8px;box-sizing:border-box;';
+    scroller.setAttribute('aria-label', 'Document preview: ' + fileName);
+    var link = document.createElement('a');
+    link.href = url; link.target = '_blank'; link.rel = 'noopener';
+    link.setAttribute('style', 'position:absolute;top:8px;right:14px;' + DOC_OPEN_LINK_STYLE + 'min-height:32px;');
+    link.addEventListener('click', function (e) { e.stopPropagation(); });
+    link.innerHTML = '<i class="fa-solid fa-up-right-from-square" style="font-size:10px;"></i> Open Full Page';
+    wrap.appendChild(scroller); wrap.appendChild(link);
+    thumb.innerHTML = ''; thumb.appendChild(wrap);
+
+    var total = doc.numPages, count = Math.min(total, PDF_PREVIEW_MAX_PAGES);
+    var cssW = Math.max(200, (scroller.clientWidth || 320) - 16);
+    var dpr = Math.min(window.devicePixelRatio || 1, 2);
+    var chain = Promise.resolve();
+    for (var n = 1; n <= count; n++) (function (pageNo) {
+      chain = chain.then(function () {
+        if (!alive()) return;
+        return doc.getPage(pageNo).then(function (page) {
+          var base = page.getViewport({ scale: 1 });
+          var vp = page.getViewport({ scale: (cssW / base.width) * dpr });
+          var canvas = document.createElement('canvas');
+          canvas.width = Math.floor(vp.width); canvas.height = Math.floor(vp.height);
+          canvas.style.cssText = 'display:block;width:100%;height:auto;margin:0 0 8px;background:#fff;box-shadow:0 1px 4px rgba(0,0,0,.15);';
+          canvas.setAttribute('role', 'img'); canvas.setAttribute('aria-label', 'Page ' + pageNo + ' of ' + total);
+          scroller.appendChild(canvas);
+          return page.render({ canvasContext: canvas.getContext('2d'), viewport: vp }).promise;
+        });
+      });
+    })(n);
+    return chain.then(function () {
+      if (alive() && total > count) {
+        var more = document.createElement('p');
+        more.className = 'text-xs text-slate-400 text-center py-1';
+        more.textContent = 'Showing the first ' + count + ' of ' + total + ' pages. Tap \u201cOpen Full Page\u201d to see everything.';
+        scroller.appendChild(more);
+      }
+      doc.destroy();
+    });
+  }).catch(function (err) {
+    console.warn('[DAMIS Doc] PDF preview failed:', err && err.message);
+    if (alive()) thumb.innerHTML = pdfFallbackHtml(url, 'We couldn\u2019t draw a preview of this PDF, but it can still be uploaded.');
+  });
 }
 
 // Some phones take several seconds to show the file picker; without feedback people tap again and think it is broken.
@@ -1576,6 +1658,7 @@ function handleDocFile(evt, key) {
   console.log('[DAMIS Doc] ' + key + ' uploaded: ' + file.name + ' (' + formatBytes(file.size) + ')');
   // Show thumbnail
   if (thumb) {
+    thumb._pdfTok = 0;   // a newer pick cancels an older phone PDF render
     thumb.innerHTML = '';
     if (isImage) {
       var reader = new FileReader();
@@ -1589,7 +1672,7 @@ function handleDocFile(evt, key) {
     } else if (isPdf) {
       var pdfObjUrl = URL.createObjectURL(file);
       thumb.dataset.pdfObjUrl = pdfObjUrl; // store for revoke on clear
-      thumb.innerHTML = pdfPreviewHtml(pdfObjUrl, file.name);
+      showPdfPreview(thumb, file, pdfObjUrl, file.name);
     } else if (isDocx) {
       // Convert DOCX → PDF on the server via LibreOffice for an accurate print-preview.
       // Mammoth's client-side HTML conversion drops most formatting; a server-side PDF
@@ -1615,7 +1698,7 @@ function handleDocFile(evt, key) {
           var pdfUrl  = URL.createObjectURL(pdfBlob);
           thumb.dataset.pdfObjUrl = pdfUrl; // reuse existing revoke logic in clearDocFile
 
-          thumb.innerHTML = pdfPreviewHtml(pdfUrl, file.name);
+          showPdfPreview(thumb, pdfBlob, pdfUrl, file.name);
 
           console.log('[DAMIS Doc] ' + key + ' DOCX→PDF preview ready (' + Math.round(pdfBlob.size / 1024) + ' KB)');
         } catch (err) {
@@ -1625,7 +1708,6 @@ function handleDocFile(evt, key) {
             + '<i class="fa-solid fa-file-word text-blue-500 text-4xl"></i>'
             + '<p class="text-sm font-semibold text-slate-600">Word Document</p>'
             + '<p class="text-xs text-slate-400">Preview unavailable — file will upload correctly.</p>'
-            + '<p class="text-xs text-red-400">' + docEsc(err.message || 'Conversion error') + '</p>'
             + '</div>';
         }
       })();
@@ -1655,6 +1737,7 @@ function clearDocFile(evt, key) {
   if (prev) prev.classList.add('hidden');
   if (sz)   sz.textContent = '';
   if (thumb) {
+    thumb._pdfTok = 0;   // stop any phone PDF render still in progress
     if (thumb.dataset.pdfObjUrl)  { URL.revokeObjectURL(thumb.dataset.pdfObjUrl);  delete thumb.dataset.pdfObjUrl; }
     if (thumb.dataset.docxBlobUrl) { URL.revokeObjectURL(thumb.dataset.docxBlobUrl); delete thumb.dataset.docxBlobUrl; }
     thumb.innerHTML = '';

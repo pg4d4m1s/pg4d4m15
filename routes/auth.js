@@ -1303,22 +1303,37 @@ router.post('/api/auth/reset-password', async (req, res) => {
       try {
         fs.writeFileSync(inPath, req.file.buffer);
 
-        await new Promise((resolve, reject) => {
-          // --headless --convert-to pdf --outdir <dir> <file>
-          // LibreOffice names the output <basename>.pdf in the same outdir.
+        // Try `libreoffice`, then `soffice` (the binary name differs between Nix and Debian installs).
+        // A private profile dir (-env:UserInstallation) avoids "profile locked / HOME not writable" failures in containers.
+        const runLO = (bin) => new Promise((resolve, reject) => {
           execFile(
-            'libreoffice',
-            ['--headless', '--convert-to', 'pdf', '--outdir', tmpDir, inPath],
-            { timeout: 30_000 },
-            (convErr, _stdout, stderr) => {
+            bin,
+            ['--headless', '--norestore', '-env:UserInstallation=file://' + path.join(tmpDir, 'lo-profile'),
+             '--convert-to', 'pdf', '--outdir', tmpDir, inPath],
+            { timeout: 45_000 },
+            (convErr, stdout, stderr) => {
               if (convErr) {
-                log.warn('[docx-convert] LibreOffice error:', stderr || convErr.message);
-                return reject(new Error('Conversion failed — LibreOffice error'));
+                const e = new Error(convErr.message);
+                e.code = convErr.code; e.detail = String(stderr || stdout || '').slice(0, 300);
+                return reject(e);
               }
               resolve();
             }
           );
         });
+        try {
+          await runLO('libreoffice');
+        } catch (e1) {
+          if (e1.code !== 'ENOENT') {
+            log.warn('[docx-convert] libreoffice failed: ' + e1.message + (e1.detail ? ' | ' + e1.detail : ''));
+            throw new Error('Conversion failed — LibreOffice error');
+          }
+          try { await runLO('soffice'); }
+          catch (e2) {
+            log.warn('[docx-convert] LibreOffice is not installed on this server (tried libreoffice, soffice): ' + e2.message + (e2.detail ? ' | ' + e2.detail : ''));
+            throw new Error('Conversion failed — LibreOffice error');
+          }
+        }
 
         if (!fs.existsSync(outPath)) {
           throw new Error('PDF not generated — unexpected LibreOffice output');
